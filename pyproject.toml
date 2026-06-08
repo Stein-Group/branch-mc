@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gcmc"
+version = "3.0.0"
+description = "Modular Grand Canonical Monte Carlo (BRANCH-MC)"
+requires-python = ">=3.9"
+dependencies = ["numpy", "scipy", "ase"]
+
+[tool.setuptools.packages.find]
+include = ["gcmc*"]
