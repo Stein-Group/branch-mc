@@ -17,7 +17,7 @@ import socket
 import time
 import numpy as np
 
-from . import config, identity, io, MC_engine
+from . import sim_setup, hash_fingerprint, io, MC_engine
 from .state import ChainState, zero_counters
 
 LOG_HEADER = ("#MC_cycle(M)  pckng_frctn  N  add_acc add_att add_stp "
@@ -91,8 +91,8 @@ def run(params, root="runs"):
         with open(params) as f:
             params = json.load(f)
 
-    cfg = config.from_params(params)
-    paths = identity.run_paths(cfg, root)
+    cfg = sim_setup.from_params(params)
+    paths = hash_fingerprint.run_paths(cfg, root)
     io.ensure_run_dir(paths, params)
     acquire_lock(paths)
 

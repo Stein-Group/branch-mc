@@ -26,7 +26,7 @@ import os
 import re
 import numpy as np
 
-from . import config, identity, io
+from . import sim_setup, hash_fingerprint, io
 from .state import zero_counters
 
 _TOKENS = [
@@ -116,8 +116,8 @@ def migrate(extxyz_path, root="runs", *, temp, seed=0, **opts):
     """Convert one legacy trajectory and write a resumable checkpoint. Returns
     the run directory."""
     params, positions, step = legacy_to_params(extxyz_path, temp=temp, **opts)
-    cfg = config.from_params(params)
-    paths = identity.run_paths(cfg, root)
+    cfg = sim_setup.from_params(params)
+    paths = hash_fingerprint.run_paths(cfg, root)
     io.ensure_run_dir(paths, params)
 
     gen = np.random.default_rng(seed)
