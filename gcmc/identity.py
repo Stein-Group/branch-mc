@@ -22,7 +22,7 @@ import json
 import os
 
 _IDENTITY_FIELDS = (
-    "potential_type", "dimension", "chem_pot", "box", "cavity_radius",
+    "potential_type", "sampler", "dimension", "chem_pot", "box", "cavity_radius",
     "trial_density", "depth", "branch", "use_depth", "move_factor",
     "temp", "rc", "eta", "gamma_max", "delta_eta",
 )

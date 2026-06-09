@@ -36,7 +36,7 @@ with tempfile.TemporaryDirectory() as root:
     st = io.rng_state(gen)
     pos = np.random.default_rng(1).uniform(0, 10, size=(17, 3))
     counters = {"add_acc": 5, "add_att": 9, "rm_acc": 2}
-    params = {"potential": {"type": "lj", "T": 0.85}, "ensemble": {"mu": -4.0}}
+    params = {"potential": {"main": "lennard_jones", "T": 0.85}, "ensemble": {"mu": -4.0}}
     io.save_checkpoint(P, positions=pos, step=4000, rng=st, counters=counters, params=params)
     ck = io.load_checkpoint(P)
     assert np.allclose(ck["positions"], pos), "positions round-trip"

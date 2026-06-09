@@ -16,13 +16,11 @@ from gcmc import runner, identity, config  # noqa: E402
 
 def base(target):
     return {
-        "potential": {"type": "hard_sphere"},
+        "potential": {"main": "hard_core"},
         "ensemble": {"mu": 3.0, "dimension": 3},
-        "trials": {"k": 20, "cavity_radius": 1.5},
-        "algorithm": {"depth": 0},
-        "execution": {"sampling_window": 200, "target_cycles": target,
-                      "checkpoint_every": 1, "traj_every": 1, "seed": 7},
-        "move": {"move_factor": 0.25},
+        "sampler": {"type": "rosenbluth", "trials": 20, "trial_box_side": 3.0, "depth": 0},
+        "run": {"sampling_window": 200, "target_cycles": target,
+                "checkpoint_every": 1, "traj_every": 1, "seed": 7},
     }
 
 

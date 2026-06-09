@@ -12,50 +12,54 @@ sys.path.insert(0, os.path.join(HERE, ".."))
 from gcmc import config, identity  # noqa: E402
 
 BASE = {
-    "potential": {"type": "lj", "T": 0.85},
+    "potential": {"main": "hard_core"},
+    "ensemble": {"mu": 4.0, "dimension": 2, "box": 75.0},
+    "sampler": {"type": "rosenbluth", "trial_density": 400, "trial_box_side": 3.0, "depth": 0},
+    "run": {"target_cycles": 1e6, "move_factor": 0.25},
+}
+
+LJ_BASE = {
+    "potential": {"main": "lennard_jones", "T": 0.85},
     "ensemble": {"mu": -4.0, "dimension": 3},
-    "trials": {"trial_density": 400, "cavity_radius": 1.5},
-    "algorithm": {"depth": 0, "branch": False},
-    "execution": {"mode": "serial", "n_workers": 1, "target_cycles": 1e6},
-    "move": {"move_factor": 0.25},
+    "sampler": {"type": "rosenbluth", "trial_density": 400, "trial_box_side": 3.0},
 }
 
 
-def cid(mut):
+def cid(mut, base=BASE):
     import copy
-    p = copy.deepcopy(BASE)
+    p = copy.deepcopy(base)
     for path, val in mut.items():
         sec, key = path.split(".")
-        p[sec][key] = val
+        p.setdefault(sec, {})[key] = val
     return identity.run_id(config.from_params(p))
 
 
 base_id = cid({})
 print("base id:", base_id)
 
-# determinism
 assert cid({}) == base_id, "id not deterministic"
 print("  ok  deterministic")
 
 # identity-bearing params must change the id
-for path, val in [("ensemble.mu", -3.5), ("ensemble.box", 25.0),
-                  ("trials.trial_density", 500), ("trials.cavity_radius", 2.0),
-                  ("algorithm.depth", 1), ("algorithm.branch", True),
-                  ("move.move_factor", 0.3), ("potential.T", 0.9)]:
+for path, val in [("ensemble.mu", 3.5), ("ensemble.box", 25.0),
+                  ("sampler.trial_density", 500), ("sampler.trial_box_side", 4.0),
+                  ("sampler.depth", 1), ("sampler.type", "branch"),
+                  ("run.move_factor", 0.3)]:
     assert cid({path: val}) != base_id, f"id should change with {path}"
     print(f"  ok  id changes with {path}")
 
+# temperature is identity-bearing on an LJ run
+assert cid({"potential.T": 0.9}, base=LJ_BASE) != cid({}, base=LJ_BASE), "T should change id"
+print("  ok  id changes with potential.T (LJ)")
+
 # execution-only params must NOT change the id
-for path, val in [("execution.target_cycles", 9e9), ("execution.n_workers", 16),
-                  ("execution.mode", "parallel")]:
-    # mode=parallel would change the default box, so pin box to isolate mode
+for path, val in [("run.target_cycles", 9e9), ("run.n_workers", 16),
+                  ("run.kind", "parallel")]:
     import copy
-    p = copy.deepcopy(BASE)
-    p["ensemble"]["box"] = 20.0
+    p = copy.deepcopy(BASE)            # 2D base: parallel is valid, box pinned
     sec, key = path.split(".")
-    p[sec][key] = val
+    p.setdefault(sec, {})[key] = val
     p0 = copy.deepcopy(BASE)
-    p0["ensemble"]["box"] = 20.0
     assert identity.run_id(config.from_params(p)) == identity.run_id(config.from_params(p0)), \
         f"id should NOT change with {path}"
     print(f"  ok  id stable under {path}")

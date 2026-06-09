@@ -98,11 +98,11 @@ os.chdir(old_cwd); sys.path[:] = old_path
 from gcmc import config, engine          # noqa: E402
 from gcmc.state import ChainState        # noqa: E402
 
-cfg = config.from_params({"potential": {"type": "reweight"},
+cfg = config.from_params({"potential": {"main": "hard_core"},
                           "ensemble": {"mu": 2.0, "dimension": 2},
-                          "trials": {"k": 40, "cavity_radius": 2.5},
-                          "algorithm": {"depth": 0},
-                          "execution": {"sampling_window": 1000}})
+                          "sampler": {"type": "reweight", "trials": 40,
+                                      "trial_box_side": 5.0, "depth": 0},
+                          "run": {"sampling_window": 1000}})
 assert cfg.box == orig.side_of_box, "box mismatch between engine and original"
 pot = cfg.build_potential()
 w = engine.make_weigher(cfg, pot)

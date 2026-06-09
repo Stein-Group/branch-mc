@@ -13,6 +13,7 @@ checkpointable. BRANCH and reweighting are not wired here yet and raise.
 """
 
 from __future__ import annotations
+import math
 import numpy as np
 from scipy.spatial import cKDTree
 
@@ -63,7 +64,133 @@ def _weighted_trials(raw, kdtree, cfg, potential, choice, n_full):
     raise NotImplementedError(t)
 
 
+def _advance_metropolis(state, cfg, potential):
+    """Standard single-particle grand-canonical Metropolis (textbook GCMC): one
+    trial insertion at a uniform-random box point or one deletion of a random
+    particle, accepted by the GCMC criterion. No cavity, no multiple trials, no
+    depth. Supports hard_core (2D/3D) and Lennard-Jones (3D), using the same
+    pair energy and tail as the Rosenbluth path so the two agree at equilibrium.
+    """
+    if cfg.potential_type == "aux":
+        raise NotImplementedError(
+            "metropolis with a pmf auxiliary is not yet implemented; "
+            "use the rosenbluth sampler for pmf runs")
+
+    rng = state.rng
+    pos = np.asarray(state.positions, float)
+    c = zero_counters()
+    side = cfg.box
+    box = cfg.box_dims
+    dim = cfg.dimension
+    diameter = cfg.diameter
+    uc = cfg.upper_cutoff
+    nn = cfg.no_neigh
+    mf = cfg.move_factor
+    beta = cfg.beta
+    mu = cfg.chem_pot
+    V = cfg.total_volume
+    hs = cfg.potential_type == "hard_sphere"
+
+    def neighbour_dists(point, tree, k):
+        d, _ = tree.query([point], k=min(k, max(1, k)), distance_upper_bound=uc)
+        d = d[0]
+        return d[np.isfinite(d)]
+
+    step = 0
+    while step <= cfg.sampling_window:
+        N = len(pos)
+        choice = "add" if N == 0 else rng.choice(["move", "add", "remove"], p=[0.5, 0.25, 0.25])
+
+        # ----- translate -----
+        if choice == "move" and N > 0:
+            c["move_step"] += 1
+            j = rng.choice(N)
+            old = pos[j]
+            without = np.delete(pos, j, axis=0)
+            disp = mf * (rng.uniform(0, 1, dim) - 0.5)
+            moved = (old + disp) % side
+            if len(without) == 0:
+                pos = moved.reshape(1, -1)
+                c["move_accept"] += 1
+                continue
+            tree = cKDTree(without, boxsize=box)
+            d_new = neighbour_dists(moved, tree, nn)
+            if hs:
+                if not (d_new.size and np.any(d_new < diameter)):
+                    pos = np.append(without, [moved], axis=0)
+                    c["move_accept"] += 1
+            else:
+                d_old = neighbour_dists(old, tree, nn)
+                u_new = _lj_energy(d_new, uc)
+                u_old = _lj_energy(d_old, uc)
+                if np.log(rng.uniform(0, 1)) <= -beta * (u_new - u_old):
+                    pos = np.append(without, [moved], axis=0)
+                    c["move_accept"] += 1
+            continue
+
+        if choice == "remove" and N == 0:
+            continue
+
+        # ----- insertion -----
+        if choice == "add":
+            c["add_step"] += 1
+            c["add_attempt"] += 1
+            step += 1
+            trial = rng.uniform(0, side, dim)
+            if N > 0:
+                tree = cKDTree(pos, boxsize=box)
+                d = neighbour_dists(trial, tree, nn)
+            else:
+                d = np.empty(0)
+            if hs:
+                if d.size and np.any(d < diameter):
+                    continue
+                log_bf = 0.0
+            else:
+                u = _lj_energy(d, uc) + cfg.lj_tail_pref * (2.0 * N + 1.0)
+                log_bf = -beta * u
+            log_acc = math.log(V) - math.log(N + 1) + beta * mu + log_bf
+            if math.log(rng.uniform(0, 1)) <= log_acc:
+                pos = np.append(pos, [trial], axis=0) if N > 0 else trial.reshape(1, -1)
+                c["add_accept"] += 1
+
+        # ----- deletion -----
+        else:
+            c["remove_step"] += 1
+            step += 1
+            j = rng.choice(N)
+            chosen = pos[j]
+            without = np.delete(pos, j, axis=0)
+            if hs:
+                log_bf = 0.0
+            else:
+                tree = cKDTree(without, boxsize=box) if len(without) else None
+                d = neighbour_dists(chosen, tree, nn) if tree is not None else np.empty(0)
+                u = _lj_energy(d, uc) + cfg.lj_tail_pref * (2.0 * N - 1.0)
+                log_bf = -beta * u  # removing reverses the sign below
+            log_acc = math.log(N) - math.log(V) - beta * mu - log_bf
+            if math.log(rng.uniform(0, 1)) <= log_acc:
+                pos = without
+                c["remove_accept"] += 1
+
+    state.positions = pos
+    state.step += cfg.sampling_window
+    packing = (len(pos) * cfg.volume_of_molecule) / cfg.total_volume
+    return {"N": len(pos), "packing_fraction": packing, "counters": c}
+
+
+def _lj_energy(dists, rc):
+    d = np.asarray(dists, float)
+    d = d[(d < rc) & (d > 0)]
+    if d.size == 0:
+        return 0.0
+    ir6 = (1.0 / d) ** 6
+    return float(np.sum(4.0 * ir6 * (ir6 - 1.0)))
+
+
 def advance(state, cfg, potential, weigher):
+    if cfg.metropolis:
+        return _advance_metropolis(state, cfg, potential)
     if cfg.potential_type == "reweight" and not cfg.two_dim:
         raise NotImplementedError(
             "3D reweighting (Q6) is not a coherent estimator in the original "

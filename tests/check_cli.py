@@ -17,12 +17,11 @@ ENV = dict(os.environ)
 ENV["PYTHONPATH"] = PKG_PARENT + os.pathsep + ENV.get("PYTHONPATH", "")
 
 BASE = {
-    "potential": {"type": "hard_sphere"},
+    "potential": {"main": "hard_core"},
     "ensemble": {"mu": 3.0, "dimension": 3},
-    "trials": {"k": 20, "cavity_radius": 1.5},
-    "algorithm": {"depth": 0},
-    "execution": {"sampling_window": 200, "target_cycles": 400,
-                  "checkpoint_every": 1, "traj_every": 1, "seed": 3},
+    "sampler": {"type": "rosenbluth", "trials": 20, "trial_box_side": 3.0, "depth": 0},
+    "run": {"sampling_window": 200, "target_cycles": 400,
+            "checkpoint_every": 1, "traj_every": 1, "seed": 3},
 }
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -42,8 +41,9 @@ with tempfile.TemporaryDirectory() as tmp:
     print("  ok  `gcmc run` produced a complete run:", os.path.basename(dirs[0]))
 
     # 2. launcher sweep over three mu values -> three distinct directories
-    base2 = dict(BASE)
-    base2["sweep"] = {"mu": [3.0, 3.25, 3.5]}
+    import copy as _copy
+    base2 = _copy.deepcopy(BASE)
+    base2["ensemble"] = {"dimension": 3, "sweep": [3.0, 3.25, 3.5]}
     bf = os.path.join(tmp, "base.json")
     with open(bf, "w") as f:
         json.dump(base2, f)

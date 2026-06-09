@@ -33,9 +33,9 @@ with tempfile.TemporaryDirectory() as tmp:
                 two_dim=False, aux=False)
 
     params, positions, step = migrate.legacy_to_params(legacy, temp=1.0)
-    assert params["potential"]["type"] == "hard_sphere"
+    assert params["potential"]["main"] == "hard_core"
     assert params["ensemble"] == {"mu": 3.0, "dimension": 3, "box": 20.0}
-    assert params["trials"] == {"k": 30, "cavity_radius": 1.5}
+    assert params["sampler"]["trials"] == 30 and params["sampler"]["trial_box_side"] == 3.0
     assert step == 5_000_000
     assert positions.shape == (120, 3) and np.allclose(positions, pos3d)
     print("  ok  hard-sphere 3D legacy parsed (params, positions, step)")
@@ -54,8 +54,8 @@ with tempfile.TemporaryDirectory() as tmp:
     # ---- `run` resumes from the migrated checkpoint --------------------
     with open(os.path.join(run_dir, "params.json")) as f:
         p = json.load(f)
-    p["execution"] = {"sampling_window": 500, "target_cycles": 5_000_000 + 1000,
-                      "checkpoint_every": 1, "seed": 1}
+    p.setdefault("run", {}).update({"sampling_window": 500,
+                  "target_cycles": 5_000_000 + 1000, "checkpoint_every": 1, "seed": 1})
     state, paths2 = runner.run(p, root=os.path.join(tmp, "runs"))
     assert paths2.directory == run_dir, "resume must land in the same directory"
     assert state.step >= 5_000_000 + 1000, f"did not advance past the legacy cycle: {state.step}"
@@ -69,7 +69,7 @@ with tempfile.TemporaryDirectory() as tmp:
     make_legacy(legacy2, pos2d, 75.0, mu=2.0, cav=2.5, k=20, mc_cycle=10,
                 two_dim=True, aux=True)
     pr, po, st = migrate.legacy_to_params(legacy2, temp=1.0)
-    assert pr["potential"]["type"] == "aux"
+    assert pr["potential"]["main"] == "hard_core" and pr["auxiliary"]["type"] == "pmf"
     assert pr["ensemble"]["dimension"] == 2 and pr["ensemble"]["box"] == 75.0
     assert po.shape == (50, 2), "2D migration must drop the padded z column"
     config.from_params(pr)  # the emitted schema validates

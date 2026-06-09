@@ -56,7 +56,7 @@ def _init_config(cfg, rng):
         raise FileNotFoundError(
             f"initial_config not found: {path}\n"
             f"  (resolved from cwd={os.getcwd()}). If runs are launched from a "
-            f"different directory than the config tree, set execution."
+            f"different directory than the config tree, set run."
             f"initial_config to an absolute path.")
     pos = io.load_config_file(path, cfg.dimension)
     print(f"loaded initial config: {len(pos)} molecules from {path}")
@@ -99,7 +99,7 @@ def run(params, root="runs"):
     try:
         ckpt = io.load_checkpoint(paths)
         if ckpt is None:
-            seed = params.get("execution", {}).get("seed")
+            seed = params.get("run", {}).get("seed")
             state = ChainState.fresh(cfg.dimension, seed=seed)
             state.positions = _init_config(cfg, state.rng)
         else:

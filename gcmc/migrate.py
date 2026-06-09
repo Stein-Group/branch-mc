@@ -76,31 +76,36 @@ def legacy_to_params(extxyz_path, *, temp, potential=None, depth=0, branch=False
     k = int(pick("no_trials", pick("no_of_trial_molecules")))
     step = int(info.get("mc_cycle", 0))
 
-    pot_type = potential or ("aux" if aux else "hard_sphere")
-    pot_block = {"type": pot_type}
-    if pot_type == "lj":
+    pot_choice = potential or ("aux" if aux else "hard_sphere")
+    is_lj = pot_choice == "lj"
+    is_aux = pot_choice == "aux"
+    main = "lennard_jones" if is_lj else "hard_core"
+    pot_block = {"main": main}
+    if is_lj:
         pot_block["T"] = temp
     elif temp != 1.0:
         import warnings
-        warnings.warn(f"{pot_type} runs are fixed at T=1.0; ignoring --temp {temp}")
+        warnings.warn(f"{main} runs are fixed at T=1.0; ignoring --temp {temp}")
     params = {
         "potential": pot_block,
         "ensemble": {"mu": mu, "dimension": dim, "box": side},
-        "trials": {"k": k, "cavity_radius": cav},
-        "algorithm": {"depth": depth, "branch": branch, "use_depth": use_depth},
-        "move": {"move_factor": move_factor},
-        "execution": {},
+        "sampler": {"type": ("branch" if branch else "rosenbluth"),
+                    "trials": k, "trial_box_side": 2.0 * cav,
+                    "depth": depth, "use_depth": use_depth},
+        "run": {"move_factor": move_factor},
     }
-    if pot_type == "aux":
+    if is_aux:
+        aux_block = {"type": "pmf"}
         if "gamma_max" in info or "gamma_max" in name:
-            pot_block["gamma_max"] = float(pick("gamma_max"))
+            aux_block["gamma_max"] = float(pick("gamma_max"))
         if "delta_eta" in info or "delta_eta" in name:
-            pot_block["delta_eta"] = float(pick("delta_eta"))
+            aux_block["delta_eta"] = float(pick("delta_eta"))
         if not two_dim:
             if not g3_csv:
                 raise ValueError("aux 3D run needs --g3-csv (the angular table "
                                  "path); it is not stored in the trajectory.")
-            pot_block["g3_csv"] = g3_csv
+            aux_block["g3_csv"] = g3_csv
+        params["auxiliary"] = aux_block
 
     positions = np.asarray(frame.positions, float)
     positions = positions[:, :2] if two_dim else positions[:, :3]

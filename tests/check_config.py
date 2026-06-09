@@ -25,17 +25,19 @@ ARGV = {
 }
 
 PARAMS = {
-    "lj3d":  {"potential": {"type": "lj", "T": 0.85}, "ensemble": {"mu": -4.0, "dimension": 3},
-              "trials": {"trial_density": 400, "cavity_radius": 1.5}, "algorithm": {"depth": 0}},
-    "hs2d":  {"potential": {"type": "hard_sphere"}, "ensemble": {"mu": 4.0, "dimension": 2},
-              "trials": {"trial_density": 400, "cavity_radius": 1.5}, "algorithm": {"depth": 0}},
-    "hs3d":  {"potential": {"type": "hard_sphere"}, "ensemble": {"mu": 4.0, "dimension": 3},
-              "trials": {"trial_density": 400, "cavity_radius": 1.5}, "algorithm": {"depth": 0}},
-    "aux2d": {"potential": {"type": "aux", "eta": 0.69}, "ensemble": {"mu": 4.0, "dimension": 2},
-              "trials": {"trial_density": 400, "cavity_radius": 1.5}, "algorithm": {"depth": 0}},
-    "aux3d": {"potential": {"type": "aux", "g3_csv": os.path.join(ORIG, "g3_analysis_data.csv")},
+    "lj3d":  {"potential": {"main": "lennard_jones", "T": 0.85}, "ensemble": {"mu": -4.0, "dimension": 3},
+              "sampler": {"type": "rosenbluth", "trial_density": 400, "trial_box_side": 3.0, "depth": 0}},
+    "hs2d":  {"potential": {"main": "hard_core"}, "ensemble": {"mu": 4.0, "dimension": 2},
+              "sampler": {"type": "rosenbluth", "trial_density": 400, "trial_box_side": 3.0, "depth": 0}},
+    "hs3d":  {"potential": {"main": "hard_core"}, "ensemble": {"mu": 4.0, "dimension": 3},
+              "sampler": {"type": "rosenbluth", "trial_density": 400, "trial_box_side": 3.0, "depth": 0}},
+    "aux2d": {"potential": {"main": "hard_core"}, "auxiliary": {"type": "pmf", "eta": 0.69},
+              "ensemble": {"mu": 4.0, "dimension": 2},
+              "sampler": {"type": "rosenbluth", "trial_density": 400, "trial_box_side": 3.0, "depth": 0}},
+    "aux3d": {"potential": {"main": "hard_core"},
+              "auxiliary": {"type": "pmf", "g3_csv": os.path.join(ORIG, "g3_analysis_data.csv")},
               "ensemble": {"mu": 4.0, "dimension": 3},
-              "trials": {"trial_density": 400, "cavity_radius": 1.5}, "algorithm": {"depth": 0}},
+              "sampler": {"type": "rosenbluth", "trial_density": 400, "trial_box_side": 3.0, "depth": 0}},
 }
 
 sys.argv = ["orig"] + ARGV[MODE]

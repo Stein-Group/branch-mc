@@ -9,7 +9,7 @@ collide and restart is just re-running the launcher.
 
     python -m gcmc.launcher base.json --mus -3.0 -3.25 -3.5 --root runs
 
-The mu list may instead live in the base file under a top-level "sweep": {"mu":
+The mu list may instead live in the base file under ensemble.sweep (a list of
 [...]}, which is stripped before each run since it is not part of a run's params.
 Core pinning uses `taskset -c <core>` as a command prefix, which is race-free,
 and is skipped automatically if taskset is unavailable or --no-pin is given.
@@ -30,8 +30,9 @@ _THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
 
 def _params_for(base, mu):
     p = copy.deepcopy(base)
-    p.pop("sweep", None)
-    p.setdefault("ensemble", {})["mu"] = float(mu)
+    ens = p.setdefault("ensemble", {})
+    ens.pop("sweep", None)
+    ens["mu"] = float(mu)
     return p
 
 
@@ -68,7 +69,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m gcmc.launcher")
     ap.add_argument("base", help="base params.json (mu is supplied by the sweep)")
     ap.add_argument("--mus", nargs="+", type=float, default=None,
-                    help="mu values; if omitted, read from base['sweep']['mu']")
+                    help="mu values; if omitted, read from ensemble.sweep")
     ap.add_argument("--root", default="runs")
     ap.add_argument("--launch-dir", default="launch")
     ap.add_argument("--threads", type=int, default=1)
@@ -78,9 +79,9 @@ def main(argv=None):
 
     with open(args.base) as f:
         base = json.load(f)
-    mus = args.mus if args.mus is not None else base.get("sweep", {}).get("mu")
+    mus = args.mus if args.mus is not None else base.get("ensemble", {}).get("sweep")
     if not mus:
-        ap.error("no mu values: pass --mus or set base['sweep']['mu']")
+        ap.error("no mu values: pass --mus or set ensemble.sweep")
 
     result = launch_sweep(base, mus, root=args.root, launch_dir=args.launch_dir,
                           threads=args.threads, pin=not args.no_pin,

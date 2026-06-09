@@ -21,11 +21,11 @@ NW = 36
 
 
 def run(branch, nwin=NW):
-    p = {"potential": {"type": "hard_sphere"},
+    p = {"potential": {"main": "hard_core"},
          "ensemble": {"mu": 3.0, "dimension": 3, "box": 20.0},
-         "trials": {"k": 30, "cavity_radius": 1.5},
-         "algorithm": {"depth": 0, "branch": branch},
-         "execution": {"sampling_window": 1000, "seed": 1}}
+         "sampler": {"type": ("branch" if branch else "rosenbluth"),
+                     "trials": 30, "trial_box_side": 3.0, "depth": 0},
+         "run": {"sampling_window": 1000, "seed": 1}}
     cfg = from_params(p); pot = cfg.build_potential()
     w = engine.make_weigher(cfg, pot)
     st = ChainState.fresh(3, seed=1)

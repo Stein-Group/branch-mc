@@ -32,11 +32,11 @@ def _state(n, hi):
 
 
 def run_parallel(n_win):
-    p = {"potential": {"type": "hard_sphere"},
+    p = {"potential": {"main": "hard_core"},
          "ensemble": {"mu": MU, "dimension": 2, "box": 70.0},
-         "trials": {"k": K, "cavity_radius": CAVR}, "algorithm": {"depth": 0},
-         "execution": {"mode": "parallel", "n_workers": 1, "sampling_window": WIN,
-                       "target_cycles": 1e9, "seed": 1}}
+         "sampler": {"type": "rosenbluth", "trials": K, "trial_box_side": 2 * CAVR, "depth": 0},
+         "run": {"kind": "parallel", "n_workers": 1, "sampling_window": WIN,
+                 "target_cycles": 1e9, "seed": 1}}
     cfg = from_params(p); pot = cfg.build_potential()
     w = parallel.make_weigher(cfg, pot); st = _state(150, 68)
     etas, last = [], None
@@ -47,11 +47,11 @@ def run_parallel(n_win):
 
 
 def run_serial(n_win):
-    p = {"potential": {"type": "hard_sphere"},
+    p = {"potential": {"main": "hard_core"},
          "ensemble": {"mu": MU, "dimension": 2, "box": 40.0},
-         "trials": {"k": K, "cavity_radius": CAVR}, "algorithm": {"depth": 0},
-         "execution": {"mode": "serial", "sampling_window": WIN,
-                       "target_cycles": 1e9, "seed": 1}}
+         "sampler": {"type": "rosenbluth", "trials": K, "trial_box_side": 2 * CAVR, "depth": 0},
+         "run": {"kind": "single", "sampling_window": WIN,
+                 "target_cycles": 1e9, "seed": 1}}
     cfg = from_params(p); pot = cfg.build_potential()
     w = engine.make_weigher(cfg, pot); st = _state(60, 38)
     etas = []
@@ -75,21 +75,29 @@ print(f"  parallel equilib eta = {pmean:.4f}   serial equilib eta = {smean:.4f} 
 assert diff < 0.02, f"equilibrium densities disagree by {diff:.4f}"
 print("  ok  parallel and serial reach the same equilibrium density")
 
-# 3. 3D parallel raises, as in the original
-p3 = {"potential": {"type": "lj"}, "ensemble": {"mu": -4.0, "dimension": 3, "box": 50.0},
-      "trials": {"k": 20, "cavity_radius": 1.5},
-      "execution": {"mode": "parallel", "n_workers": 1, "sampling_window": 100,
-                    "target_cycles": 1e9}}
-# lj is 3d; build a hard_sphere 3d instead to hit the guard cleanly
-p3["potential"] = {"type": "hard_sphere"}; p3["ensemble"]["mu"] = 1.0
-cfg3 = from_params(p3)
-st3 = ChainState(positions=np.random.default_rng(0).uniform(2, 48, size=(40, 3)),
-                 step=0, rng=np.random.default_rng(1), counters=zero_counters())
+# 3. 3D parallel is rejected up front by the schema (parallel is 2D only)
+p3 = {"potential": {"main": "hard_core"}, "ensemble": {"mu": 1.0, "dimension": 3, "box": 50.0},
+      "sampler": {"type": "rosenbluth", "trials": 20, "trial_box_side": 3.0},
+      "run": {"kind": "parallel", "n_workers": 1, "sampling_window": 100,
+              "target_cycles": 1e9}}
 try:
-    parallel.advance_parallel(st3, cfg3, cfg3.build_potential(),
-                              parallel.make_weigher(cfg3, cfg3.build_potential()))
+    from_params(p3)
     raise SystemExit("FAIL: 3D parallel did not raise")
-except NotImplementedError:
-    print("  ok  3D parallel raises NotImplementedError")
+except ValueError as e:
+    assert "2D only" in str(e), str(e)
+    print("  ok  3D parallel rejected at config:", e)
+
+# 4. a non-rosenbluth sampler under parallel is rejected by the engine guard
+p4 = {"potential": {"main": "hard_core"}, "ensemble": {"mu": MU, "dimension": 2, "box": 40.0},
+      "sampler": {"type": "branch", "trials": K, "trial_box_side": 2 * CAVR},
+      "run": {"kind": "parallel", "n_workers": 1, "sampling_window": 50, "target_cycles": 1e9}}
+cfg4 = from_params(p4)
+st4 = _state(40, 38)
+try:
+    parallel.advance_parallel(st4, cfg4, cfg4.build_potential(),
+                              parallel.make_weigher(cfg4, cfg4.build_potential()))
+    raise SystemExit("FAIL: parallel+branch did not raise")
+except NotImplementedError as e:
+    print("  ok  parallel+branch raises NotImplementedError:", str(e)[:60])
 
 print("\nALL PARALLEL TESTS PASSED")

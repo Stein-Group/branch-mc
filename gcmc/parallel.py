@@ -264,6 +264,10 @@ def advance_parallel(state, cfg, potential, weigher):
     if not cfg.two_dim:
         raise NotImplementedError(
             "parallel decomposition is 2D-only, matching the original")
+    if cfg.sampler != "rosenbluth":
+        raise NotImplementedError(
+            f"parallel currently wires the rosenbluth sampler only; "
+            f"{cfg.sampler!r} under parallel is not yet implemented")
 
     rng = state.rng
     decomposition.configure(cfg.cell_length)
