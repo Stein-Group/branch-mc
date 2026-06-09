@@ -1,0 +1,51 @@
+{
+  "potential": {
+    "main": "hard_core" | "lennard_jones",   // REQUIRED
+    "T": float                               // REQUIRED iff main = lennard_jones
+  },
+
+  "auxiliary": {                             // OPTIONAL block (omit = no aux). PMF only.
+    "type": "pmf",
+    "g3_csv": str,                           // REQUIRED iff aux present AND dimension = 3
+    "eta": float,                            // OPTIONAL, default 0.69 (2D)
+    "gamma_max": float,                      // OPTIONAL, default from original schedule
+    "delta_eta": float                       // OPTIONAL, default from original schedule
+  },
+
+  "sampler": {
+    "type": "metropolis" | "rosenbluth" | "branch" | "reweight",   // REQUIRED
+    "depth": int,                            // OPTIONAL, default 0       (forbidden: metropolis)
+    "trials": int,                           // OPTIONAL, default 30      (forbidden: metropolis; XOR trial_density)
+    "trial_density": float,                  // OPTIONAL                  (forbidden: metropolis; XOR trials)
+    "trial_box_side": float,                 // OPTIONAL, default 3.0     (forbidden: metropolis)
+    "use_depth": bool                        // OPTIONAL, default true
+  },
+
+  "ensemble": {
+    "mu": float,                             // REQUIRED: exactly one of mu | sweep
+    "sweep": [float, ...],                   //   mu = one run; sweep = a batch (one run per value)
+    "dimension": 2 | 3,                      // REQUIRED
+    "box": float                             // OPTIONAL, default by (dimension, run.kind): 75 / 200 / 20
+  },
+
+  "run": {
+    "kind": "single" | "parallel",           // OPTIONAL, default "single"
+    "n_workers": int,                        // OPTIONAL (parallel), default 1
+    "sampling_window": int,                  // OPTIONAL, default 1000
+    "target_cycles": float,                  // OPTIONAL, default large — set for real runs
+    "seed": int,                             // OPTIONAL
+    "initial_config": str,                   // OPTIONAL (file or dir; absolute path recommended)
+    "checkpoint_every": int,                 // OPTIONAL, default 1
+    "traj_every": int,                       // OPTIONAL, default 1
+    "burn_in": int,                          // OPTIONAL, default 0
+    "radius": float,                         // OPTIONAL, default 0.5
+    "move_factor": float,                    // OPTIONAL, default 0.25
+    "upper_cutoff": float,                   // OPTIONAL, default 3.7545 (2D hard/aux), 2.0 (3D hard/aux), 2.5 (LJ), 1.5 (reweight)
+    "lower_cutoff": float,                   // OPTIONAL, default = diameter = 2*radius (1.0)
+    "no_neigh": int,                         // OPTIONAL, default 40 (2D) / 75 (3D)
+    "cell_length": float,                    // OPTIONAL (parallel), default 30
+    "buffer": float,                         // OPTIONAL (parallel), default 2
+    "x_spacing": float,                      // OPTIONAL (parallel), default grid-derived
+    "y_spacing": float                       // OPTIONAL (parallel), default grid-derived
+  }
+}

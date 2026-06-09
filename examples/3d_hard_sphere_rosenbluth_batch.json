@@ -1,0 +1,4 @@
+{ "potential": {"main": "hard_core"},
+  "sampler":   {"type": "rosenbluth"},
+  "ensemble":  {"sweep": [0,1,2,3], "dimension": 3} 
+}

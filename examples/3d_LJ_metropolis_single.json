@@ -1,0 +1,4 @@
+{ "potential": {"main": "lennard_jones", "T": 1.2},
+  "sampler":   {"type": "metropolis"},
+  "ensemble":  {"mu": -3.5, "dimension": 3} 
+}
