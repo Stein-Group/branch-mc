@@ -1,8 +1,5 @@
 """Runner: the one loop that makes a params.json runnable.
 
-TLDR: loading initial_configs, logs, checkpoints
-New feature: locking a MC run so that resubmitting the same job will not rewrite
-
 Fresh and restart are the same path. Compute the run id, look for a checkpoint,
 load it if present or initialise if not, then run `while step < target`. A
 finished run re-entered is a no-op, so requeues and array jobs are idempotent.
@@ -24,7 +21,7 @@ from . import sim_setup, hash_fingerprint, io, MC_engine
 from .state import ChainState, zero_counters
 
 LOG_HEADER = ("#MC_cycle(M)  pckng_frctn  N  add_acc add_att add_stp "
-              "rm_acc rm_stp mv_acc mv_stp")
+              "rm_acc rm_stp mv_acc mv_stp  wall_s")
 
 
 def _init_config(cfg, rng):
@@ -124,7 +121,9 @@ def run(params, root="runs"):
 
         win = 0
         while state.step < cfg.target_cycles:
+            _t = time.perf_counter()
             stats = advance(state, cfg, potential, weigher)
+            win_wall = time.perf_counter() - _t
             for k, v in stats["counters"].items():
                 state.counters[k] += v
 
@@ -133,7 +132,7 @@ def run(params, root="runs"):
                 log.write(f"{state.step/1e6:.6f}  {stats['packing_fraction']:.8f}  "
                           f"{stats['N']}  {cc['add_accept']} {cc['add_attempt']} "
                           f"{cc['add_step']} {cc['remove_accept']} {cc['remove_step']} "
-                          f"{cc['move_accept']} {cc['move_step']}")
+                          f"{cc['move_accept']} {cc['move_step']}  {win_wall:.4f}")
 
             win += 1
             if win % cfg.checkpoint_every == 0:
