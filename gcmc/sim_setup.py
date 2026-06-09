@@ -35,6 +35,15 @@ Schema
 
 trial_box_side is the full side of the trial box (twice the legacy cavity radius);
 the trial-count relation uses trial_box_side^2 as the span.
+
+
+Params are either identity bearing or not. Non-identity bearing params do not change nature of simulation.
+
+Parameters are santised. If non-valid/not-implemented config is tried to setup, meaningful error is thrown
+
+Static, immuatable Config object makes sure the critical global variable cannot be edited on the fly
+
+TODO: RNG seed (which passed on upon restart
 """
 
 from __future__ import annotations

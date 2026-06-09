@@ -1,5 +1,8 @@
 """Runner: the one loop that makes a params.json runnable.
 
+TLDR: loading initial_configs, logs, checkpoints
+New feature: locking a MC run so that resubmitting the same job will not rewrite
+
 Fresh and restart are the same path. Compute the run id, look for a checkpoint,
 load it if present or initialise if not, then run `while step < target`. A
 finished run re-entered is a no-op, so requeues and array jobs are idempotent.

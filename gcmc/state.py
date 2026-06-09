@@ -1,5 +1,7 @@
 """The live chain state.
 
+TLDR: Holds the live chain (positions, N, counters, step, and the single RNG that io checkpoints)
+
 Holds the configuration the chain evolves (positions), the cumulative step
 counter, the move counters, and the single random generator that everything
 draws from and that io checkpoints. Keeping one generator here is what makes a
@@ -16,8 +18,6 @@ def zero_counters():
     return {"add_step": 0, "add_attempt": 0, "add_accept": 0,
             "remove_step": 0, "remove_accept": 0,
             "move_step": 0, "move_accept": 0}
-
-
 @dataclass
 class ChainState:
     positions: np.ndarray
