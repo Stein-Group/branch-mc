@@ -20,7 +20,7 @@ from scipy.spatial import cKDTree
 from .trials import TrialSet
 from . import geometry
 from .samplers.base import EnergyWeigher, UniformWeigher, ReweightWeigher
-from . import reweighting
+from .samplers import reweighting
 from .samplers.rosenbluth import select_forward, select_reverse
 from .samplers.branch import count_and_sample
 from .state import zero_counters

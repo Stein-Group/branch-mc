@@ -21,7 +21,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 WORK = os.path.join(HERE, "..")
 ORIG = os.path.join(WORK, "orig")
 sys.path.insert(0, WORK)
-from gcmc import reweighting as RW  # noqa: E402
+from gcmc.samplers import reweighting as RW  # noqa: E402
 
 
 def ok(m):

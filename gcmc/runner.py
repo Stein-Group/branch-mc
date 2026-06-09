@@ -17,7 +17,7 @@ import socket
 import time
 import numpy as np
 
-from . import config, identity, io, engine
+from . import config, identity, io, MC_engine
 from .state import ChainState, zero_counters
 
 LOG_HEADER = ("#MC_cycle(M)  pckng_frctn  N  add_acc add_att add_stp "
@@ -109,12 +109,12 @@ def run(params, root="runs"):
             io.trim_log(paths.log, state.step / 1e6)
 
         potential = cfg.build_potential()
-        weigher = engine.make_weigher(cfg, potential)
+        weigher = MC_engine.make_weigher(cfg, potential)
         if cfg.mode == "parallel":
             from . import parallel
             advance = parallel.advance_parallel
         else:
-            advance = engine.advance
+            advance = MC_engine.advance
         log = io.Log(paths.log, LOG_HEADER, flush_every=1)
         info = {"step": state.step, "mu": cfg.chem_pot,
                 "potential": cfg.potential_type, "box": cfg.box}

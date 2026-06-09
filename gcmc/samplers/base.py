@@ -100,7 +100,7 @@ class ReweightWeigher:
 
     @staticmethod
     def _psi6(s):
-        from ..reweighting import psi6_magnitude
+        from .reweighting import psi6_magnitude
         return psi6_magnitude(s.cossum, s.sinsum, s.counts)
 
     def selection(self, pool):

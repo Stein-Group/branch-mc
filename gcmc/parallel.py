@@ -38,7 +38,7 @@ from scipy.spatial import cKDTree
 
 from . import decomposition, geometry
 from .trials import TrialSet
-from .engine import _weighted_trials, make_weigher
+from .MC_engine import _weighted_trials, make_weigher
 from .samplers.rosenbluth import select_forward, select_reverse
 from .state import zero_counters
 
