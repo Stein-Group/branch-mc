@@ -57,13 +57,17 @@ def save_checkpoint(paths, *, positions, step, rng, counters, params, schema=SCH
         "rng": rng,
         "params": params,
     })
-    tmp = paths.checkpoint #+ ".tmp"
+    # the temp name ends in .npz so np.savez never appends a suffix; a stale
+    # temp from a killed job (old naming) is deleted, never promoted.
+    for stale in (paths.checkpoint + ".tmp", paths.checkpoint + ".tmp.npz"):
+        if os.path.exists(stale):
+            os.remove(stale)
+    tmp = paths.checkpoint + ".tmp.npz"
     np.savez(tmp, positions=np.asarray(positions, dtype=float),
              meta=np.array(meta))
-    written = tmp if os.path.exists(tmp) else tmp + ".npz"  # np.savez may add .npz
     if os.path.exists(paths.checkpoint):
         os.replace(paths.checkpoint, paths.checkpoint_bak)
-    os.replace(written, paths.checkpoint)
+    os.replace(tmp, paths.checkpoint)
 
 
 def _read_npz(path):

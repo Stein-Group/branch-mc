@@ -12,6 +12,7 @@ same id; a stale lock past the timeout is taken over.
 
 from __future__ import annotations
 import json
+import itertools
 import os
 import socket
 import time
@@ -39,6 +40,16 @@ def _init_config(cfg, rng):
     # safe across SLURM / subprocess working directories.
     spec = cfg.initial_config
     if not spec:
+        if cfg.depth > 0:
+            # depth >= 1 insertions need an occupied cavity and a removal at
+            # N=1 can downgrade to a pure deletion, so N=0 is absorbing: a
+            # near-empty start can die and never grow. Seed a hard-core-valid
+            # grid at moderate density instead (the original relied on dense
+            # restart files for the same reason).
+            g = np.arange(0.65, cfg.box, (4.0 / 3.0) * cfg.diameter)
+            g = g[g < cfg.box - 0.5 * cfg.diameter]
+            pts = np.array(list(itertools.product(g, repeat=cfg.dimension)))
+            return pts
         return rng.uniform(0, cfg.box, size=(1, cfg.dimension))
 
     if os.path.splitext(spec)[1]:                      # has an extension -> file

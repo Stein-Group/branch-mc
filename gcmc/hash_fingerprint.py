@@ -21,11 +21,15 @@ import hashlib
 import json
 import os
 
+# upper_cutoff and no_neigh are physics-bearing (interaction range, energy
+# truncation), so they are identity. Adding them changes every run id relative
+# to the pre-fix layout; runs produced by the biased engine should not be
+# resumed anyway.
 _IDENTITY_FIELDS = (
     "potential_type", "sampler", "dimension", "chem_pot", "box", "cavity_radius",
     "trial_density", "depth", "branch", "use_depth", "move_factor",
     "temp", "rc", "eta", "gamma_max", "delta_eta", "lower_cutoff",
-    "upper_cutoff", "no_neigh"
+    "upper_cutoff", "no_neigh",
 )
 
 

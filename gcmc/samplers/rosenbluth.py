@@ -35,7 +35,8 @@ def select_forward(pool, n_atoms, weigher, *, rand, side, r_squared,
         sum_arr[i] = sum_weight
 
         cumulative = np.cumsum(probability)
-        chosen_index = np.searchsorted(cumulative, rand())
+        # rand() can land above cumulative[-1] by rounding; clip to the pool
+        chosen_index = min(int(np.searchsorted(cumulative, rand())), len(pool) - 1)
         coord, ew, cos, sin, ct = pool[chosen_index]
         c_coords.append(coord)
         c_ew.append(ew)

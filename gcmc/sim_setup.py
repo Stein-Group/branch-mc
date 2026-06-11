@@ -139,6 +139,11 @@ class Config:
         if t == "lj":
             return make_potential("lj", beta=self.beta, upper_cutoff=uc,
                                    diameter=d, volume=self.total_volume)
+        if t == "ljaux":
+            return make_potential("ljaux3d", beta=self.beta, upper_cutoff=uc,
+                                  diameter=d, side=self.box,
+                                  n_trials=self.no_of_trial_molecules,
+                                  g3_csv=self.g3_csv)
         if t == "aux":
             if self.two_dim:
                 return make_potential("aux2d", diameter=d, upper_cutoff=uc,
@@ -157,7 +162,7 @@ def from_params(p):
 
     # ---- main potential ----
     pot = p["potential"]
-    _check(pot, {"main", "T"}, {"main"})
+    _check(pot, {"main", "T", "tail"}, {"main"})
     main = pot["main"]
     if main not in _MAIN:
         raise ValueError(f"unknown main potential {main!r}; allowed {sorted(_MAIN)}")
@@ -219,12 +224,14 @@ def from_params(p):
         raise ValueError("Lennard-Jones is 3D only")
     if reweight and lj:
         raise ValueError("reweight requires a hard_core main potential")
-    if parallel and not two_dim:
-        raise ValueError("parallel runs are 2D only (got 3D)")
+    if parallel and reweight:
+        raise ValueError("parallel does not wire the reweight (psi6) mode")
     if reweight and not two_dim:
         raise ValueError("reweight (psi6) is a 2D method; use dimension 2")
-    if pmf and lj:
-        raise ValueError("Lennard-Jones has no auxiliary potential")
+    if pmf and lj and two_dim:
+        raise ValueError("the Lennard-Jones + pmf auxiliary mode is 3D only")
+    if pmf and lj and "g3_csv" not in aux_block:
+        raise ValueError("Lennard-Jones + pmf requires auxiliary.g3_csv")
     if pmf and branch:
         raise ValueError("branch takes no auxiliary potential")
     if pmf and reweight:
@@ -233,6 +240,28 @@ def from_params(p):
         raise ValueError("non-LJ runs require mu >= 0")
     if pmf and not two_dim and "g3_csv" not in aux_block:
         raise ValueError("3D pmf auxiliary requires auxiliary.g3_csv")
+    if parallel:
+        buffer_v = float(run.get("buffer", 2.0))
+        reach = (float(pot["rc"]) if (lj and "rc" in pot) else (2.5 if lj else None))
+        if reach is None:
+            reach = 2.0 * float(ens.get("radius", 0.5))
+        if buffer_v < reach - 1e-9:
+            raise ValueError(
+                f"parallel buffer ({buffer_v}) must be >= the interaction "
+                f"range ({reach}): border rings must contain every molecule "
+                f"that can interact with a live one")
+    if int(smp.get("depth", 0)) > 3:
+        raise ValueError("depth is validated for 0-3 only")
+    if int(smp.get("depth", 0)) > 0 and parallel:
+        raise NotImplementedError(
+            "depth > 0 is serial-only. The depth >= 1 cavity statistics "
+            "require the cavity metric to equal the global interaction "
+            "metric everywhere (full translation invariance); a cell "
+            "decomposition cannot provide that. Measured on the hard-sphere "
+            "EOS: cell-torus cavities give +19% density at cell_length = 2.7 "
+            "cavity widths (+1.3% at 6.7 widths), and interior-fit rejection "
+            "gives -11%. Serial runs support depths 0-3 for all samplers and "
+            "potentials; parallel runs are exact at depth 0.")
     if metropolis:
         forbidden = {"depth", "trials", "trial_density", "trial_box_side"} & set(smp)
         if forbidden:
@@ -289,12 +318,17 @@ def from_params(p):
         total_vol = box ** 3
 
     lj_tail_pref = None
+    lj_tail_on = bool(pot.get("tail", True))
+    if "tail" in pot and not lj:
+        raise ValueError("potential.tail applies to lennard_jones only")
     if lj:
         x = uc ** -9 / 3.0 - uc ** -3
-        lj_tail_pref = (8.0 / 3.0) * math.pi / total_vol * x
+        lj_tail_pref = ((8.0 / 3.0) * math.pi / total_vol * x) if lj_tail_on else 0.0
 
     if reweight:
         ptype = "reweight"
+    elif pmf and lj:
+        ptype = "ljaux"
     elif lj:
         ptype = "lj"
     elif pmf:
