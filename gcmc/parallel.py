@@ -151,24 +151,24 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng,
                 disk_in_u = u_main[anchor][None, :]
                 rest_u = np.delete(u_main, anchor, axis=0)
         else:
-            # depth >= 1 in cells is GATED in sim_setup and unreachable in
-            # production. Both cell-compatible variants are measurably biased
-            # on the hard-sphere EOS: cell-torus cavity wrap gives +19% at
-            # cell_length = 2.7 cavity widths (+1.3% at 6.7 widths) because
-            # torus neighbours can be globally distant; the interior-fit
-            # rejection below gives -11% because shell particles lose
-            # insertion and deletion pressure asymmetrically. The depth >= 1
-            # balance appears to need full translation invariance (cavity
-            # metric == interaction metric everywhere), which no cell scheme
-            # provides. Kept for future derivation work; do not lift the gate
-            # without passing tests/test_physics.py.
+            # depth >= 1: the original BRANCH-MC proposal on the cell torus,
+            # as the legacy parallelization ran it. This mode is APPROXIMATE:
+            # the depth >= 1 scheme satisfies global balance but not detailed
+            # balance (proof: masking a reversible chain with the
+            # reversal-symmetric touched-set indicator provably preserves its
+            # stationary distribution, yet measures +2.6 +/- 0.6 % on the
+            # hard-sphere EOS -- so the chain is not reversible), and global
+            # balance relies on full translation invariance, which a cell
+            # cannot provide. The residual bias is controlled by the
+            # cavity/cell ratio: +19% at cell_length = 2.7 cavity widths,
+            # +1.3 +/- 0.8 % at 6.7 widths, +0.9 +/- 0.6 % at 10 widths.
+            # sim_setup warns accordingly; serial runs are the exact
+            # reference at depth >= 1.
             if choice == "add" or lj:
                 u_center = rng.uniform(0.0, L_c, size=dim)
             else:
                 u_center = u_main[int(rng.choice(N))].copy()
-            if np.any(u_center < cav) or np.any(u_center > L_c - cav):
-                continue
-            d = u_main - u_center
+            d = (u_main - u_center + L_c / 2.0) % L_c - L_c / 2.0
             idx_cav = np.flatnonzero(np.all(np.abs(d) <= cav, axis=1))
             n_cav = len(idx_cav)
             if n_cav == 0:

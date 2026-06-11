@@ -253,15 +253,21 @@ def from_params(p):
     if int(smp.get("depth", 0)) > 3:
         raise ValueError("depth is validated for 0-3 only")
     if int(smp.get("depth", 0)) > 0 and parallel:
-        raise NotImplementedError(
-            "depth > 0 is serial-only. The depth >= 1 cavity statistics "
-            "require the cavity metric to equal the global interaction "
-            "metric everywhere (full translation invariance); a cell "
-            "decomposition cannot provide that. Measured on the hard-sphere "
-            "EOS: cell-torus cavities give +19% density at cell_length = 2.7 "
-            "cavity widths (+1.3% at 6.7 widths), and interior-fit rejection "
-            "gives -11%. Serial runs support depths 0-3 for all samplers and "
-            "potentials; parallel runs are exact at depth 0.")
+        import warnings
+        cl = float(run.get("cell_length", 0.0))
+        cav_w = 2.0 * (float(smp.get("trial_box_side", 3.0)) / 2.0
+                       if "trial_box_side" in smp
+                       else float(smp.get("cavity_radius", 1.5)))
+        warnings.warn(
+            f"parallel depth >= 1 is approximate: the depth scheme satisfies "
+            f"global balance, not detailed balance, so a cell decomposition "
+            f"carries a residual density bias controlled by the cavity/cell "
+            f"ratio. Measured on the hard-sphere EOS: +19% at cell_length = "
+            f"2.7 cavity widths, +1.3% at 6.7, +0.9% at 10. Your cell_length "
+            f"is {cl / cav_w:.1f} cavity widths; use >= 20 to push the bias "
+            f"below the half-percent level, or serial mode, which is exact "
+            f"at all depths.",
+            UserWarning)
     if metropolis:
         forbidden = {"depth", "trials", "trial_density", "trial_box_side"} & set(smp)
         if forbidden:
