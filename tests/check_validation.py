@@ -36,6 +36,8 @@ good("hard_core+pmf rosenbluth 3D", {"potential": HC, "auxiliary": {"type": "pmf
 good("lj rosenbluth 3D", {"potential": {"main": "lennard_jones", "T": 1.2}, "sampler": ROSEN,
      "ensemble": {"mu": -3.5, "dimension": 3}})
 good("branch 3D", {"potential": HC, "sampler": {"type": "branch"}, "ensemble": {"mu": 3.0, "dimension": 3}})
+good("branch + lj 3D", {"potential": {"main": "lennard_jones", "T": 1.2}, "sampler": {"type": "branch"},
+     "ensemble": {"mu": -3.0, "dimension": 3}})
 good("reweight 2D", {"potential": HC, "sampler": {"type": "reweight"}, "ensemble": {"mu": 2.0, "dimension": 2}})
 good("metropolis hard_core 3D", {"potential": HC, "sampler": {"type": "metropolis"},
      "ensemble": {"mu": 3.0, "dimension": 3}})
@@ -50,8 +52,6 @@ bad("lj in 2D", {"potential": {"main": "lennard_jones", "T": 1.2}, "sampler": RO
 bad("parallel 3D", {"potential": HC, "sampler": ROSEN, "ensemble": {"mu": 3.0, "dimension": 3},
     "run": {"kind": "parallel"}}, "2D only")
 bad("reweight 3D", {"potential": HC, "sampler": {"type": "reweight"}, "ensemble": {"mu": 2.0, "dimension": 3}}, "2D method")
-bad("branch + lj", {"potential": {"main": "lennard_jones", "T": 1.2}, "sampler": {"type": "branch"},
-    "ensemble": {"mu": -3.0, "dimension": 3}}, "hard_core")
 bad("reweight + lj", {"potential": {"main": "lennard_jones", "T": 1.2}, "sampler": {"type": "reweight"},
     "ensemble": {"mu": -3.0, "dimension": 3}}, "hard_core")
 bad("lj + pmf", {"potential": {"main": "lennard_jones", "T": 1.2}, "auxiliary": {"type": "pmf"},

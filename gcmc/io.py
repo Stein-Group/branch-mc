@@ -57,7 +57,7 @@ def save_checkpoint(paths, *, positions, step, rng, counters, params, schema=SCH
         "rng": rng,
         "params": params,
     })
-    tmp = paths.checkpoint + ".tmp"
+    tmp = paths.checkpoint #+ ".tmp"
     np.savez(tmp, positions=np.asarray(positions, dtype=float),
              meta=np.array(meta))
     written = tmp if os.path.exists(tmp) else tmp + ".npz"  # np.savez may add .npz

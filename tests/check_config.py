@@ -26,7 +26,8 @@ ARGV = {
 
 PARAMS = {
     "lj3d":  {"potential": {"main": "lennard_jones", "T": 0.85}, "ensemble": {"mu": -4.0, "dimension": 3},
-              "sampler": {"type": "rosenbluth", "trial_density": 400, "trial_box_side": 3.0, "depth": 0}},
+              "sampler": {"type": "rosenbluth", "trial_density": 400, "trial_box_side": 3.0, "depth": 0},
+              "run": {"lower_cutoff": 1.0}},   # original floors LJ at the diameter
     "hs2d":  {"potential": {"main": "hard_core"}, "ensemble": {"mu": 4.0, "dimension": 2},
               "sampler": {"type": "rosenbluth", "trial_density": 400, "trial_box_side": 3.0, "depth": 0}},
     "hs3d":  {"potential": {"main": "hard_core"}, "ensemble": {"mu": 4.0, "dimension": 3},

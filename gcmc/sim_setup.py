@@ -35,15 +35,6 @@ Schema
 
 trial_box_side is the full side of the trial box (twice the legacy cavity radius);
 the trial-count relation uses trial_box_side^2 as the span.
-
-
-Params are either identity bearing or not. Non-identity bearing params do not change nature of simulation.
-
-Parameters are santised. If non-valid/not-implemented config is tried to setup, meaningful error is thrown
-
-Static, immuatable Config object makes sure the critical global variable cannot be edited on the fly
-
-TODO: RNG seed (which passed on upon restart
 """
 
 from __future__ import annotations
@@ -226,8 +217,6 @@ def from_params(p):
     # ---- compatibility table ----
     if lj and two_dim:
         raise ValueError("Lennard-Jones is 3D only")
-    if branch and lj:
-        raise ValueError("branch requires a hard_core main potential")
     if reweight and lj:
         raise ValueError("reweight requires a hard_core main potential")
     if parallel and not two_dim:
@@ -258,9 +247,13 @@ def from_params(p):
     box = float(ens["box"]) if "box" in ens else default_side(two_dim, parallel)
 
     radius = float(run.get("radius", 0.5))
-    diameter = 2.0 * radius
-    r_squared = diameter * diameter
+    diameter = 2.0 * radius                       # physical particle size / LJ sigma
     disk = math.pi * radius * radius
+    # the single exclusion floor: hard cores exclude at the diameter, LJ at 0.85
+    # (below which the Boltzmann weight is negligible but the clique graph needs a
+    # hard edge). r_squared is just its square, used by the Rosenbluth mask.
+    lower_cutoff = float(run.get("lower_cutoff", 0.85 if lj else diameter))
+    r_squared = lower_cutoff * lower_cutoff
 
     if metropolis:
         trial_box_side = 0.0
@@ -287,7 +280,6 @@ def from_params(p):
         uc = 2.5
     else:
         uc = 3.7545 if two_dim else 2.0
-    lower_cutoff = float(run.get("lower_cutoff", diameter))
 
     if two_dim:
         vol_mol = math.pi * radius ** 2

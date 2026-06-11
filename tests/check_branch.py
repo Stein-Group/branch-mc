@@ -28,7 +28,7 @@ for dim in (2, 3):
         centers = rg.uniform(0, box, size=(n, dim))
         for k in (1, 2, 3, 4, 5):
             oc, osamp = orig.count_and_sample(centers, k, 0.5, box_lengths=box)
-            mc, msamp = branch.count_and_sample(centers, k, 0.5, box_lengths=box)
+            mc, msamp = branch.count_and_sample(centers, k, 1.0, box_lengths=box)
             checks += 1
             if oc != mc or osamp != msamp:
                 fails += 1
@@ -36,7 +36,7 @@ for dim in (2, 3):
                       f"orig=({oc},{osamp}) mine=({mc},{msamp})")
             # branch variant: k and k+1 in one build
             ock, ock1, osk, osk1 = orig.count_and_sample_branch(centers, k, 0.5, box_lengths=box)
-            mck, mck1, msk, msk1 = branch.count_and_sample_branch(centers, k, 0.5, box_lengths=box)
+            mck, mck1, msk, msk1 = branch.count_and_sample_branch(centers, k, 1.0, box_lengths=box)
             checks += 1
             if (ock, ock1, osk, osk1) != (mck, mck1, msk, msk1):
                 fails += 1

@@ -57,6 +57,7 @@ def advance_cell(main, border, n_steps, cell_dims, cfg, potential, weigher, rng)
     box = cfg.box_dims
     side = cfg.box
     diameter = cfg.diameter
+    lower = cfg.lower_cutoff      # exclusion floor (= diameter for hard cores)
     r_sq = cfg.r_squared
     uc = cfg.upper_cutoff
     nn = cfg.no_neigh
@@ -96,7 +97,7 @@ def advance_cell(main, border, n_steps, cell_dims, cfg, potential, weigher, rng)
             if lj:
                 d_new, _ = tree.query([moved], k=nn, distance_upper_bound=uc)
                 d_new = d_new[0][np.isfinite(d_new[0])]
-                if not (d_new.size and np.any(d_new < diameter)):
+                if not (d_new.size and np.any(d_new < lower)):
                     d_old, _ = tree.query([old], k=nn, distance_upper_bound=uc)
                     d_old = d_old[0][np.isfinite(d_old[0])]
 
@@ -110,7 +111,7 @@ def advance_cell(main, border, n_steps, cell_dims, cfg, potential, weigher, rng)
                         pos = np.append(without, [moved], axis=0)
                         c["move_accept"] += 1
             else:
-                if len(tree.query_ball_point([moved], diameter)[0]) == 0:
+                if len(tree.query_ball_point([moved], lower)[0]) == 0:
                     pos = np.append(without, [moved], axis=0)
                     c["move_accept"] += 1
             continue
@@ -172,13 +173,13 @@ def advance_cell(main, border, n_steps, cell_dims, cfg, potential, weigher, rng)
 
         system = with_border(disk_rest)
         tree = cKDTree(system, boxsize=box)
-        raw = geometry.find_neighbors(tree, trials, diameter, uc, nn, keep_mask=keep_mask)
+        raw = geometry.find_neighbors(tree, trials, lower, uc, nn, keep_mask=keep_mask)
         if raw is None:
             continue
         trial_set, km = _weighted_trials(raw, tree, cfg, potential, choice, N)
 
         if n_remove != 0:
-            raw_in = geometry.find_neighbors(tree, disk_in, diameter, uc, nn)
+            raw_in = geometry.find_neighbors(tree, disk_in, lower, uc, nn)
             if raw_in is None:
                 continue
             mol_in_cav, _ = _weighted_trials(raw_in, tree, cfg, potential, choice, N)

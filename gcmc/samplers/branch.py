@@ -1,6 +1,6 @@
 """BRANCH selection: k-clique enumeration over non-overlapping centres.
 
-Adjacency means "non-overlapping" (centres at least 2*radius apart), so a
+Adjacency means "non-overlapping" (centres at least `overlap_distance` apart), so a
 k-clique is a set of k mutually non-overlapping disks/spheres. This counts them
 and returns one example clique, which the engine uses as an alternative to the
 sequential Rosenbluth selection. Counting and sampling are deterministic (no
@@ -22,11 +22,11 @@ import numpy as np
 from scipy.spatial import KDTree
 
 
-def _build_adj(centers, radius, box):
+def _build_adj(centers, overlap_distance, box):
     n = len(centers)
     shifted = np.mod(centers, box)
     tree = KDTree(shifted, boxsize=box)
-    pairs = tree.query_pairs(r=2.0 * radius - 1e-12, output_type="ndarray")
+    pairs = tree.query_pairs(r=overlap_distance - 1e-12, output_type="ndarray")
     adj = np.ones((n, n), dtype=bool)
     np.fill_diagonal(adj, False)
     if len(pairs) > 0:
@@ -194,8 +194,10 @@ def _parse_box(box_lengths, dim):
     return box
 
 
-def count_and_sample(centers, k, radius=0.5, *, box_lengths):
+def count_and_sample(centers, k, overlap_distance, *, box_lengths):
     """Count non-overlapping k-disk configurations and return one example.
+    Adjacency means a pair is closer than `overlap_distance` (the exclusion
+    floor: the hard-core diameter, or the 0.85 LJ edge).
     Returns (count, sample) with sample a sorted index tuple or None."""
     centers = np.asarray(centers, dtype=np.float64)
     n = len(centers)
@@ -204,11 +206,11 @@ def count_and_sample(centers, k, radius=0.5, *, box_lengths):
         return 0, None
     if k == 1:
         return n, ((0,) if n > 0 else None)
-    adj, _ = _build_adj(centers, radius, box)
+    adj, _ = _build_adj(centers, overlap_distance, box)
     return _count_from_adj(adj, k)
 
 
-def count_and_sample_branch(centers, k, radius=0.5, *, box_lengths):
+def count_and_sample_branch(centers, k, overlap_distance, *, box_lengths):
     """Count k- and (k+1)-cliques over the same centres with one adjacency build.
     Returns (count_k, count_k1, sample_k, sample_k1)."""
     centers = np.asarray(centers, dtype=np.float64)
@@ -217,7 +219,7 @@ def count_and_sample_branch(centers, k, radius=0.5, *, box_lengths):
     box = _parse_box(box_lengths, dim)
     if k <= 0:
         return 0, 0, None, None
-    adj, _ = _build_adj(centers, radius, box)
+    adj, _ = _build_adj(centers, overlap_distance, box)
     count_k, sample_k = _count_from_adj(adj, k)
     count_k1, sample_k1 = _count_from_adj(adj, k + 1)
     return count_k, count_k1, sample_k, sample_k1

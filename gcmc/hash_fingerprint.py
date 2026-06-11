@@ -1,12 +1,5 @@
 """Run identity and on-disk layout.
 
-Saving simulation identity params in filename or log/traj header is fragile.
-Files/experiment name can be renamed/regex fails
-When saved in header, abrupt timeout/job cancellation can corroupt log/traj files, 
-especially if they are written frequently.
-
-Robust solution is to define each run with a hash of simulation identity params.
-
 A run is addressed by a deterministic hash of the parameters that make it a
 distinct experiment, never by parsing a name. Identity-bearing parameters are
 the physics and the algorithm: potential type and its physics constants, mu,
@@ -31,7 +24,8 @@ import os
 _IDENTITY_FIELDS = (
     "potential_type", "sampler", "dimension", "chem_pot", "box", "cavity_radius",
     "trial_density", "depth", "branch", "use_depth", "move_factor",
-    "temp", "rc", "eta", "gamma_max", "delta_eta",
+    "temp", "rc", "eta", "gamma_max", "delta_eta", "lower_cutoff",
+    "upper_cutoff", "no_neigh"
 )
 
 

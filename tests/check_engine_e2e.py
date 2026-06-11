@@ -34,7 +34,7 @@ PARAMS = {
              "run": {"sampling_window": 1000}},
     "lj3d": {"potential": {"main": "lennard_jones", "T": 1.2}, "ensemble": {"mu": -3.5, "dimension": 3},
              "sampler": {"type": "rosenbluth", "trials": 30, "trial_box_side": 3.0},
-             "run": {"sampling_window": 1000}},
+             "run": {"sampling_window": 1000, "lower_cutoff": 1.0}},   # original floors LJ at the diameter
     "hs2d": {"potential": {"main": "hard_core"}, "ensemble": {"mu": 1.0, "dimension": 2},
              "sampler": {"type": "rosenbluth", "trials": 30, "trial_box_side": 3.0},
              "run": {"sampling_window": 1000}},
