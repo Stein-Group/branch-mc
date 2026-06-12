@@ -1,36 +1,36 @@
 {
   "potential": {
     "main": "hard_core" | "lennard_jones",   // REQUIRED
-    "T": float                               // REQUIRED iff main = lennard_jones
+    "T": float                               // REQUIRED iff main = lennard_jones (forbidden otherwise)
   },
 
   "auxiliary": {                             // OPTIONAL block (omit = no aux). PMF only.
     "type": "pmf",
     "g3_csv": str,                           // REQUIRED iff aux present AND dimension = 3
-    "eta": float,                            // OPTIONAL, default 0.69 (2D)
+    "eta": float,                            // OPTIONAL, default 0.69 (2D analytic g(r))
     "gamma_max": float,                      // OPTIONAL, default from original schedule
     "delta_eta": float                       // OPTIONAL, default from original schedule
   },
 
   "sampler": {
     "type": "metropolis" | "rosenbluth" | "branch" | "reweight",   // REQUIRED
-    "depth": int,                            // OPTIONAL, default 0       (forbidden: metropolis)
+    "depth": int,                            // OPTIONAL, default 0, range 0-3   (forbidden: metropolis)
     "trials": int,                           // OPTIONAL, default 30      (forbidden: metropolis; XOR trial_density)
-    "trial_density": float,                  // OPTIONAL                  (forbidden: metropolis; XOR trials)
-    "trial_box_side": float,                 // OPTIONAL, default 3.0     (forbidden: metropolis)
+    "trial_density": float | [float, ...],   // OPTIONAL  (forbidden: metropolis; XOR trials).  SWEEPABLE: list = one run per value
+    "trial_box_side": float | [float, ...],  // OPTIONAL, default 3.0     (forbidden: metropolis). SWEEPABLE: list (pair with trial_density for a heatmap)
     "use_depth": bool                        // OPTIONAL, default true
   },
 
   "ensemble": {
-    "mu": float,                             // REQUIRED: exactly one of mu | sweep
-    "sweep": [float, ...],                   //   mu = one run; sweep = a batch (one run per value)
+    "mu": float | [float, ...],              // REQUIRED. SWEEPABLE: scalar = one run, list = one run per value
     "dimension": 2 | 3,                      // REQUIRED
-    "box": float                             // OPTIONAL, default by (dimension, run.kind): 75 / 200 / 20
+    "box": float                             // OPTIONAL, default by (dimension, kind): 2D single 75, 2D parallel 200, 3D single 20, 3D parallel 50
   },
 
   "run": {
     "kind": "single" | "parallel",           // OPTIONAL, default "single"
-    "n_workers": int,                        // OPTIONAL (parallel), default 1
+    "n_cores": int,                          // REQUIRED for submission. Total cores this job has. Launcher refuses if (sweep combos) x (cores/run) > n_cores. cores/run = n_workers if parallel else 1. CLI --cores overrides.
+    "n_workers": int,                        // OPTIONAL (parallel), default 1. Per-run core cost in parallel mode.
     "sampling_window": int,                  // OPTIONAL, default 1000
     "target_cycles": float,                  // OPTIONAL, default large — set for real runs
     "seed": int,                             // OPTIONAL
@@ -38,10 +38,10 @@
     "checkpoint_every": int,                 // OPTIONAL, default 1
     "traj_every": int,                       // OPTIONAL, default 1
     "burn_in": int,                          // OPTIONAL, default 0
-    "radius": float,                         // OPTIONAL, default 0.5
+    "radius": float,                         // OPTIONAL, default 0.5 (diameter = 2*radius = LJ sigma)
     "move_factor": float,                    // OPTIONAL, default 0.25
     "upper_cutoff": float,                   // OPTIONAL, default 3.7545 (2D hard/aux), 2.0 (3D hard/aux), 2.5 (LJ), 1.5 (reweight)
-    "lower_cutoff": float,                   // OPTIONAL, default = diameter = 2*radius (1.0)
+    "lower_cutoff": float,                   // OPTIONAL, default 0.85 (LJ) else diameter = 2*radius (1.0)
     "no_neigh": int,                         // OPTIONAL, default 40 (2D) / 75 (3D)
     "cell_length": float,                    // OPTIONAL (parallel), default 30
     "buffer": float,                         // OPTIONAL (parallel), default 2

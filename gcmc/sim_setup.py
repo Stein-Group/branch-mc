@@ -210,7 +210,7 @@ def from_params(p):
 
     # ---- run ----
     run = p.get("run", {})
-    _check(run, {"kind", "n_workers", "sampling_window", "target_cycles", "burn_in",
+    _check(run, {"kind", "n_workers", "n_cores", "sampling_window", "target_cycles", "burn_in",
                  "traj_every", "checkpoint_every", "seed", "initial_config",
                  "radius", "move_factor", "upper_cutoff", "lower_cutoff", "no_neigh",
                  "cell_length", "buffer", "x_spacing", "y_spacing", "full_trajectory"})
