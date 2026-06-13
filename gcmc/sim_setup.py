@@ -81,6 +81,8 @@ class Config:
     sampler: str
     dimension: int
     chem_pot: float
+    ensemble_type: str
+    target_n: int | None
     box: float
     cavity_radius: float
     trial_box_side: float
@@ -136,7 +138,7 @@ class Config:
         t, uc, d = self.potential_type, self.upper_cutoff, self.diameter
         if t == "hard_sphere":
             return make_potential("hard_sphere", diameter=d, upper_cutoff=uc)
-        if t == "lj":
+        if t in ("lj", "ljbranch"):
             return make_potential("lj", beta=self.beta, upper_cutoff=uc,
                                    diameter=d, volume=self.total_volume)
         if t == "ljaux":
@@ -185,20 +187,38 @@ def from_params(p):
 
     # ---- ensemble ----
     ens = p["ensemble"]
-    _check(ens, {"mu", "sweep", "dimension", "box"}, {"dimension"})
+    _check(ens, {"mu", "sweep", "dimension", "box", "type",
+                 "N", "packing_fraction"}, {"dimension"})
     dim = int(ens["dimension"])
     if dim not in (2, 3):
         raise ValueError("dimension must be 2 or 3")
     two_dim = dim == 2
-    has_mu, has_sweep = "mu" in ens, "sweep" in ens
-    if has_mu and has_sweep:
-        raise ValueError("ensemble takes either 'mu' or 'sweep', not both")
-    if not has_mu and not has_sweep:
-        raise ValueError("ensemble needs 'mu' (one run) or 'sweep' (a batch)")
-    if has_sweep:
-        raise ValueError("this config has a 'sweep'; launch it with gcmc.launcher, "
-                         "which expands it into one run per mu")
-    mu = float(ens["mu"])
+    ens_type = ens.get("type", "muVT")
+    if ens_type not in ("muVT", "NVT"):
+        raise ValueError("ensemble.type must be 'muVT' or 'NVT'")
+    nvt = ens_type == "NVT"
+    if nvt:
+        # NVT: fixed particle number, no chemical potential. Target given as an
+        # exact integer N, or as a packing fraction converted to the nearest
+        # integer N (held exactly thereafter). mu is meaningless here.
+        if "mu" in ens or "sweep" in ens:
+            raise ValueError("NVT takes no 'mu'/'sweep' (N is fixed, mu undefined)")
+        has_n, has_pf = "N" in ens, "packing_fraction" in ens
+        if has_n == has_pf:
+            raise ValueError("NVT needs exactly one of 'N' or 'packing_fraction'")
+        mu = 0.0   # unused under NVT; the prefactor cancels in repacking
+    else:
+        has_mu, has_sweep = "mu" in ens, "sweep" in ens
+        if "N" in ens or "packing_fraction" in ens:
+            raise ValueError("'N'/'packing_fraction' are NVT-only; set ensemble.type='NVT'")
+        if has_mu and has_sweep:
+            raise ValueError("ensemble takes either 'mu' or 'sweep', not both")
+        if not has_mu and not has_sweep:
+            raise ValueError("ensemble needs 'mu' (one run) or 'sweep' (a batch)")
+        if has_sweep:
+            raise ValueError("this config has a 'sweep'; launch it with gcmc.launcher, "
+                             "which expands it into one run per mu")
+        mu = float(ens["mu"])
 
     # ---- auxiliary ----
     aux_block = p.get("auxiliary")
@@ -287,7 +307,8 @@ def from_params(p):
     # the single exclusion floor: hard cores exclude at the diameter, LJ at 0.85
     # (below which the Boltzmann weight is negligible but the clique graph needs a
     # hard edge). r_squared is just its square, used by the Rosenbluth mask.
-    lower_cutoff = float(run.get("lower_cutoff", 0.85 if lj else diameter))
+    _lower_default = 0.9 if (lj and branch) else (0.85 if lj else diameter)
+    lower_cutoff = float(run.get("lower_cutoff", _lower_default))
     r_squared = lower_cutoff * lower_cutoff
 
     if metropolis:
@@ -323,6 +344,19 @@ def from_params(p):
         vol_mol = (4.0 / 3.0) * math.pi * radius ** 3
         total_vol = box ** 3
 
+    # NVT target as an exact integer N
+    target_n = None
+    if nvt:
+        if "N" in ens:
+            target_n = int(ens["N"])
+            if target_n < 0:
+                raise ValueError("ensemble.N must be >= 0")
+        else:
+            pf = float(ens["packing_fraction"])
+            if not 0.0 <= pf < 1.0:
+                raise ValueError("packing_fraction must be in [0, 1)")
+            target_n = int(round(pf * total_vol / vol_mol))
+
     lj_tail_pref = None
     lj_tail_on = bool(pot.get("tail", True))
     if "tail" in pot and not lj:
@@ -335,6 +369,12 @@ def from_params(p):
         ptype = "reweight"
     elif pmf and lj:
         ptype = "ljaux"
+    elif lj and branch:
+        # true LJ + branch: k-clique enumeration with full Rosenbluth weighting
+        # under the real LJ energy (no hard-core auxiliary). Distinct algorithm
+        # and acceptance from the rosenbluth/metropolis lj path, so it gets its
+        # own potential_type and a tighter default exclusion floor.
+        ptype = "ljbranch"
     elif lj:
         ptype = "lj"
     elif pmf:
@@ -343,7 +383,8 @@ def from_params(p):
         ptype = "hard_sphere"
 
     return Config(
-        potential_type=ptype, sampler=sampler, dimension=dim, chem_pot=mu, box=box,
+        potential_type=ptype, sampler=sampler, dimension=dim, chem_pot=mu,
+        ensemble_type=ens_type, target_n=target_n, box=box,
         cavity_radius=cav, trial_box_side=trial_box_side, trial_density=trial_density,
         depth=(0 if metropolis else int(smp.get("depth", 0))),
         branch=branch, metropolis=metropolis,

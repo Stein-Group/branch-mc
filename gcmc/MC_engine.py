@@ -297,6 +297,7 @@ def advance(state, cfg, potential, weigher):
     beta = cfg.beta
     temp = cfg.temp
     mu = cfg.chem_pot
+    nvt = cfg.ensemble_type == "NVT"
     total_vol = cfg.total_volume
     ljaux = cfg.potential_type == "ljaux"
     ljbranch = cfg.potential_type == "ljbranch"   # true LJ+branch, no auxiliary
@@ -314,7 +315,12 @@ def advance(state, cfg, potential, weigher):
     step = 0
     while step < cfg.sampling_window:
         N = len(pos)
-        choice = "add" if N == 0 else rng.choice(["move", "add", "remove"], p=[0.5, 0.25, 0.25])
+        if nvt:
+            # NVT: only translations and number-conserving repacking moves;
+            # no insertions or deletions, so N stays at the target exactly.
+            choice = "repack" if N > 0 else "move"
+        else:
+            choice = "add" if N == 0 else rng.choice(["move", "add", "remove"], p=[0.5, 0.25, 0.25])
 
         # ---------------------------------------------------------- translate
         if choice == "move" and N > 0:
@@ -360,7 +366,10 @@ def advance(state, cfg, potential, weigher):
         if choice == "remove" and N == 0:
             continue
 
-        if choice == "add":
+        if choice == "repack":
+            c["repack_step"] = c.get("repack_step", 0) + 1
+            n_add = n_remove = depth + 1     # remove k, insert k; N conserved
+        elif choice == "add":
             c["add_step"] += 1
             n_add, n_remove = depth + 1, depth
         else:
@@ -384,7 +393,7 @@ def advance(state, cfg, potential, weigher):
             if choice == "add":
                 center = rng.uniform(0, side, size=3)[:dim]
                 anchor = -1
-            else:
+            else:   # remove or repack: local, anchored on an existing particle
                 anchor = int(rng.choice(N))
                 center = (pos[anchor]
                           + rng.uniform(-cfg.cavity_radius, cfg.cavity_radius,
@@ -400,7 +409,7 @@ def advance(state, cfg, potential, weigher):
         else:
             if choice == "add" or lj:
                 center = rng.uniform(0, side, size=3)[:dim]
-            else:
+            else:   # remove or repack (non-lj): centre on an existing particle
                 center = pos[int(rng.choice(N))]
             anchor = -1
             idx_cav = geometry.indices_in_cavity(pos, center,
@@ -580,7 +589,29 @@ def advance(state, cfg, potential, weigher):
         corr = 0.0
 
         # acceptance
-        if choice == "add":
+        if choice == "repack":
+            c["repack_attempt"] = c.get("repack_attempt", 0) + 1
+            # Number-conserving move: remove k, insert k in one step. The
+            # chemical-potential prefactor cancels identically (the e^{beta mu}
+            # of the k insertions against the e^{-beta mu} of the k deletions,
+            # and the V/N number factors), leaving only the configurational
+            # Rosenbluth ratio and the energy change. n_add == n_remove makes
+            # the k_trials factors of the forward and reverse equal, so they too
+            # cancel and no count prefactor remains.
+            mu_excess = -sum_new + sum_current
+            if ljaux:
+                u_ins = _lj_set_energy(chosen_coords, disk_rest, box, uc) if len(chosen_coords) else 0.0
+                u_rem = _lj_set_energy(disk_in, disk_rest, box, uc) if len(disk_in) else 0.0
+                delta_E = ((delta_E_lj or 0.0) + (e_u_r_new - e_u_r_current)
+                           + beta * (u_ins - u_rem))
+            else:
+                delta_E = delta_E_lj if delta_E_lj is not None else (0.0 if lj else (e_u_r_new - e_u_r_current))
+            log_alpha = mu_excess + delta_E - corr
+            log_alpha = max(0.0, log_alpha)
+            if log_alpha <= -np.log(rng.uniform(0, 1)):
+                pos = np.append(disk_rest, chosen_coords, axis=0) if len(chosen_coords) else disk_rest
+                c["repack_accept"] = c.get("repack_accept", 0) + 1
+        elif choice == "add":
             c["add_attempt"] += 1
             mu_ideal = -np.log(total_vol / (N + 1))
             if branch:
