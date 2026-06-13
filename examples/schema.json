@@ -14,7 +14,7 @@
 
   "sampler": {
     "type": "metropolis" | "rosenbluth" | "branch" | "reweight",   // REQUIRED
-    "depth": int,                            // OPTIONAL, default 0, range 0-3   (forbidden: metropolis)
+    "depth": int,                            // OPTIONAL, default 0, range 0-3   (forbidden: metropolis). NVT: depth d => repack removes/adds d+1 disks
     "trials": int,                           // OPTIONAL, default 30      (forbidden: metropolis; XOR trial_density)
     "trial_density": float | [float, ...],   // OPTIONAL  (forbidden: metropolis; XOR trials).  SWEEPABLE: list = one run per value
     "trial_box_side": float | [float, ...],  // OPTIONAL, default 3.0     (forbidden: metropolis). SWEEPABLE: list (pair with trial_density for a heatmap)
@@ -22,7 +22,12 @@
   },
 
   "ensemble": {
-    "mu": float | [float, ...],              // REQUIRED. SWEEPABLE: scalar = one run, list = one run per value
+    "type": "muVT" | "NVT",                  // OPTIONAL, default "muVT"
+    // --- muVT (grand canonical): supply mu, no N/packing_fraction ---
+    "mu": float | [float, ...],              // REQUIRED for muVT. SWEEPABLE: scalar = one run, list = one run per value
+    // --- NVT (canonical): supply exactly one of N or packing_fraction, no mu ---
+    "N": int | [int, ...],                   // NVT: exact particle count. SWEEPABLE
+    "packing_fraction": float | [float,...], // NVT: converted to nearest integer N = round(eta * V / v_particle). SWEEPABLE
     "dimension": 2 | 3,                      // REQUIRED
     "box": float                             // OPTIONAL, default by (dimension, kind): 2D single 75, 2D parallel 200, 3D single 20, 3D parallel 50
   },
@@ -34,14 +39,14 @@
     "sampling_window": int,                  // OPTIONAL, default 1000
     "target_cycles": float,                  // OPTIONAL, default large — set for real runs
     "seed": int,                             // OPTIONAL
-    "initial_config": str,                   // OPTIONAL (file or dir; absolute path recommended)
+    "initial_config": str,                   // OPTIONAL (file or dir; absolute path). Omit to start from a grid: muVT seeds a moderate-density lattice, NVT seeds EXACTLY the target N, both then equilibrate in place
     "checkpoint_every": int,                 // OPTIONAL, default 1
     "traj_every": int,                       // OPTIONAL, default 1
     "burn_in": int,                          // OPTIONAL, default 0
     "radius": float,                         // OPTIONAL, default 0.5 (diameter = 2*radius = LJ sigma)
     "move_factor": float,                    // OPTIONAL, default 0.25
     "upper_cutoff": float,                   // OPTIONAL, default 3.7545 (2D hard/aux), 2.0 (3D hard/aux), 2.5 (LJ), 1.5 (reweight)
-    "lower_cutoff": float,                   // OPTIONAL, default 0.85 (LJ) else diameter = 2*radius (1.0)
+    "lower_cutoff": float,                   // OPTIONAL, default 0.85 (LJ), 0.9 (LJ+branch), else diameter = 2*radius (1.0)
     "no_neigh": int,                         // OPTIONAL, default 40 (2D) / 75 (3D)
     "cell_length": float,                    // OPTIONAL (parallel), default 30
     "buffer": float,                         // OPTIONAL (parallel), default 2

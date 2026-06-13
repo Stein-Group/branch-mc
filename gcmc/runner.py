@@ -40,6 +40,28 @@ def _init_config(cfg, rng):
     # safe across SLURM / subprocess working directories.
     spec = cfg.initial_config
     if not spec:
+        if getattr(cfg, "target_n", None) is not None:
+            # NVT: seed EXACTLY target_n non-overlapping particles on a grid.
+            # Repacking conserves N, so the starting count must be the target;
+            # the configuration then equilibrates in place from this lattice.
+            n = cfg.target_n
+            if n == 0:
+                return np.empty((0, cfg.dimension))
+            # smallest cubic grid with at least n valid sites, spacing >= diameter
+            import math as _m
+            per = max(2, int(_m.ceil(n ** (1.0 / cfg.dimension))))
+            while True:
+                step = cfg.box / per
+                if step < cfg.diameter:        # too tight: would overlap
+                    raise ValueError(
+                        f"cannot place {n} particles in box {cfg.box} without "
+                        f"overlap (grid spacing {step:.3f} < diameter "
+                        f"{cfg.diameter}); reduce N/packing_fraction or enlarge box")
+                g = (np.arange(per) + 0.5) * step
+                pts = np.array(list(itertools.product(g, repeat=cfg.dimension)))
+                if len(pts) >= n:
+                    return pts[:n]
+                per += 1
         if cfg.depth > 0:
             # depth >= 1 insertions need an occupied cavity and a removal at
             # N=1 can downgrade to a pure deletion, so N=0 is absorbing: a

@@ -29,7 +29,7 @@ _IDENTITY_FIELDS = (
     "potential_type", "sampler", "dimension", "chem_pot", "box", "cavity_radius",
     "trial_density", "depth", "branch", "use_depth", "move_factor",
     "temp", "rc", "eta", "gamma_max", "delta_eta", "lower_cutoff",
-    "upper_cutoff", "no_neigh",
+    "upper_cutoff", "no_neigh", "ensemble_type", "target_n",
 )
 
 
@@ -61,8 +61,11 @@ class RunPaths:
 
 def run_paths(cfg, root="runs"):
     rid = run_id(cfg)
-    mu_tag = format(cfg.chem_pot, ".4g").replace("-", "m").replace(".", "p")
-    d = os.path.join(root, f"{rid}__mu{mu_tag}")
+    if getattr(cfg, "ensemble_type", "muVT") == "NVT":
+        tag = f"N{cfg.target_n}"
+    else:
+        tag = "mu" + format(cfg.chem_pot, ".4g").replace("-", "m").replace(".", "p")
+    d = os.path.join(root, f"{rid}__{tag}")
     return RunPaths(
         directory=d,
         checkpoint=os.path.join(d, "checkpoint.npz"),
