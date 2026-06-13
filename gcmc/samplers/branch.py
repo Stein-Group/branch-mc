@@ -223,3 +223,104 @@ def count_and_sample_branch(centers, k, overlap_distance, *, box_lengths):
     count_k, sample_k = _count_from_adj(adj, k)
     count_k1, sample_k1 = _count_from_adj(adj, k + 1)
     return count_k, count_k1, sample_k, sample_k1
+
+
+# ---------------------------------------------------------------------------
+# True LJ + branch (no auxiliary): full Rosenbluth weighting over k-cliques.
+#
+# Graph for THIS mode differs from the legacy non-overlap graph: an edge means
+# the pair separation lies in the band [lower, upper] -- both non-overlapping
+# (>= lower) AND within interaction range (<= upper). A k-clique is then k
+# trial centres that are mutually in-band: a compatible group to insert at once.
+#
+# We enumerate every k-clique and, at each one, evaluate the inserted group's
+# LJ energy to form its Rosenbluth weight exp(-beta U_clique). The full sum W is
+# accumulated and one clique is drawn proportional to its weight, all in a
+# single streaming pass (reservoir sampling) so memory stays O(1) in the clique
+# count -- we never materialise the clique list.
+# ---------------------------------------------------------------------------
+
+def _build_band_adj(centers, lower, upper, box):
+    """Edge iff lower <= dist <= upper (minimum image). Returns bool adjacency."""
+    n = len(centers)
+    shifted = np.mod(centers, box)
+    tree = KDTree(shifted, boxsize=box)
+    near = tree.query_pairs(r=upper, output_type="ndarray")
+    adj = np.zeros((n, n), dtype=bool)
+    if len(near) > 0:
+        # filter the within-upper pairs down to those also >= lower
+        d = np.linalg.norm(
+            (shifted[near[:, 0]] - shifted[near[:, 1]]
+             - box * np.round((shifted[near[:, 0]] - shifted[near[:, 1]]) / box)),
+            axis=1)
+        keep = near[d >= lower]
+        adj[keep[:, 0], keep[:, 1]] = True
+        adj[keep[:, 1], keep[:, 0]] = True
+    return adj
+
+
+def _enumerate_cliques(adj, k):
+    """Yield every k-clique as a sorted tuple of vertex indices. Uses the same
+    degeneracy-ordered recursion as the counter, but emits members at the leaf
+    instead of incrementing. Streaming: a generator, nothing stored."""
+    n = adj.shape[0]
+    if k <= 0 or n < k:
+        return
+    if k == 1:
+        for v in range(n):
+            yield (v,)
+        return
+    rank = _degeneracy_rank(adj, n)
+
+    def recurse(cand, need, prefix):
+        if need == 0:
+            yield tuple(sorted(prefix))
+            return
+        if len(cand) < need:
+            return
+        for ii, v in enumerate(cand):
+            nxt = [u for u in cand[ii + 1:] if adj[v, u]]
+            if len(nxt) >= need - 1:
+                yield from recurse(nxt, need - 1, prefix + [v])
+
+    for v in range(n):
+        fwd = [u for u in range(n) if adj[v, u] and rank[u] > rank[v]]
+        if len(fwd) >= k - 1:
+            yield from recurse(fwd, k - 1, [v])
+
+
+def ljbranch_weight_sum(centers, k, lower, upper, rest, box, rc, beta,
+                        lj_energy_fn, *, rng=None, removed=None, rest_tree=None):
+    """Stream all k-cliques of the band graph; accumulate the Rosenbluth weight
+    W = sum_cliques exp(-beta U_clique). U_clique = (clique members vs `rest`
+    within rc) + (intra-clique member pairs).
+
+    If `rng` is given, also reservoir-sample one clique proportional to its
+    weight and return its member centres; this is the forward (insertion) use.
+    If `removed` (a sorted index tuple) is given instead, the reverse use only
+    needs the sum (the removed group is one member of the population), so no
+    sampling is done.
+
+    `rest_tree`, if given, is a prebuilt cKDTree(rest, boxsize=box) reused for
+    every clique's energy (the rest set is constant across cliques in one move),
+    avoiding a tree rebuild per clique. `lj_energy_fn` must accept it as a
+    trailing `rest_tree=` keyword.
+
+    Returns (W, count, chosen_coords_or_None). W is the plain (non-log) sum.
+    """
+    centers = np.asarray(centers, float)
+    adj = _build_band_adj(centers, lower, upper, box)
+    W = 0.0
+    count = 0
+    chosen = None
+    for clique in _enumerate_cliques(adj, k):
+        members = centers[list(clique)]
+        u = lj_energy_fn(members, rest, box, rc, rest_tree=rest_tree)
+        w = np.exp(-beta * u)
+        W += w
+        count += 1
+        if rng is not None and w > 0.0:
+            # reservoir sampling weighted by w: keep current with prob w/W
+            if rng.uniform(0.0, W) <= w:
+                chosen = members
+    return W, count, chosen

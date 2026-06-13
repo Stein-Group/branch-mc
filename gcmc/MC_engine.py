@@ -32,13 +32,14 @@ from .samplers.base import EnergyWeigher, UniformWeigher, ReweightWeigher
 from .samplers import reweighting
 from .samplers.rosenbluth import select_forward, select_reverse
 from .samplers.branch import count_and_sample
+from .samplers import branch as branch_mod
 from .state import zero_counters
 
 
 def make_weigher(cfg, potential):
     if cfg.potential_type == "hard_sphere":
         return UniformWeigher()
-    if cfg.potential_type in ("lj", "aux", "ljaux"):
+    if cfg.potential_type in ("lj", "aux", "ljaux", "ljbranch"):
         return EnergyWeigher(potential)
     if cfg.potential_type == "reweight":
         if not cfg.two_dim:
@@ -53,7 +54,9 @@ def _weighted_trials(raw, kdtree, cfg, potential, choice, n_full):
     coords, dists, idxs, km = raw
     g1 = cfg.gamma_dict[1]
     t = cfg.potential_type
-    if t == "hard_sphere":
+    if t in ("hard_sphere", "ljbranch"):
+        # ljbranch weights cliques (not single trials) downstream by the real LJ
+        # energy; the pool itself is unweighted, exactly like the hard-core pool
         return TrialSet(coords, np.ones(len(coords))), km
     if t == "ljaux":
         w, ref = potential.weight_bulk(dists, coords=coords, idxs=idxs,
@@ -210,28 +213,59 @@ def _lj_energy(dists, rc):
     return float(np.sum(4.0 * ir6 * (ir6 - 1.0)))
 
 
-def _lj_set_energy(coords, rest, box, rc):
+def _ljbranch_forward(pool_coords, k, lower, rest, box, rc, beta, rng, upper):
+    """Forward (insertion) Rosenbluth weight over all k-cliques of the band
+    graph, with one clique drawn proportional to exp(-beta U_clique).
+    Returns (chosen_coords, log W_new) or (None, None) if no clique exists."""
+    rest_tree = cKDTree(rest, boxsize=box) if len(rest) > 0 else None
+    W, count, chosen = branch_mod.ljbranch_weight_sum(
+        pool_coords, k, lower, upper, rest, box, rc, beta,
+        _lj_set_energy, rng=rng, rest_tree=rest_tree)
+    if count == 0 or chosen is None or W <= 0.0:
+        return None, None
+    return chosen, np.log(W)
+
+
+def _ljbranch_reverse(pool_coords, k, lower, removed, rest, box, rc, beta, upper):
+    """Reverse (deletion) Rosenbluth weight: the SAME all-clique sum on the
+    current pool. The removed group is one member of the population, so only the
+    sum is needed. Returns log W_curr, or -inf if the population is empty."""
+    rest_tree = cKDTree(rest, boxsize=box) if len(rest) > 0 else None
+    W, count, _ = branch_mod.ljbranch_weight_sum(
+        pool_coords, k, lower, upper, rest, box, rc, beta,
+        _lj_set_energy, rng=None, rest_tree=rest_tree)
+    if count == 0 or W <= 0.0:
+        return -np.inf
+    return np.log(W)
+
+
+def _lj_set_energy(coords, rest, box, rc, rest_tree=None):
     """Total LJ pair energy contributed by `coords`: each point against `rest`
     within rc, plus pairs among `coords` (relevant only for depth>0, where more
-    than one particle is inserted/removed at once). sigma = 1 (reduced units)."""
+    than one particle is inserted/removed at once). sigma = 1 (reduced units).
+
+    `rest_tree` may be a prebuilt cKDTree(rest, boxsize=box); passing it avoids
+    rebuilding the same tree once per clique in the ljbranch weight sum. When
+    omitted the tree is built here, so every other caller is unchanged."""
     coords = np.asarray(coords, float)
     if len(coords) == 0:
         return 0.0
     box_arr = np.asarray(box, float)
     total = 0.0
     if len(rest) > 0:
-        tree = cKDTree(rest, boxsize=box)
-        for pt in coords:
-            idxs = tree.query_ball_point(pt, rc)
+        tree = rest_tree if rest_tree is not None else cKDTree(rest, boxsize=box)
+        # one batched neighbour query for all members, not one query per member
+        nbr = tree.query_ball_point(coords, rc)
+        for pt, idxs in zip(coords, nbr):
             if idxs:
                 dvec = rest[idxs] - pt
                 dvec -= np.round(dvec / box_arr) * box_arr
                 total += _lj_energy(np.sqrt((dvec ** 2).sum(axis=1)), rc)
-    for i in range(len(coords)):
-        for j in range(i + 1, len(coords)):
-            dvec = coords[i] - coords[j]
-            dvec -= np.round(dvec / box_arr) * box_arr
-            total += _lj_energy(np.array([np.sqrt((dvec ** 2).sum())]), rc)
+    if len(coords) > 1:
+        ii, jj = np.triu_indices(len(coords), k=1)
+        dvec = coords[ii] - coords[jj]
+        dvec -= np.round(dvec / box_arr) * box_arr
+        total += _lj_energy(np.sqrt((dvec ** 2).sum(axis=1)), rc)
     return total
 
 
@@ -265,7 +299,8 @@ def advance(state, cfg, potential, weigher):
     mu = cfg.chem_pot
     total_vol = cfg.total_volume
     ljaux = cfg.potential_type == "ljaux"
-    lj = cfg.potential_type == "lj" or ljaux   # LJ physics: floor, translation, tail
+    ljbranch = cfg.potential_type == "ljbranch"   # true LJ+branch, no auxiliary
+    lj = cfg.potential_type in ("lj", "ljbranch") or ljaux  # LJ physics: floor, translation, tail
     aux = cfg.potential_type == "aux"
     branch = cfg.branch
     reweight = cfg.potential_type == "reweight"
@@ -458,20 +493,25 @@ def advance(state, cfg, potential, weigher):
             if len(trial_set) < n_add:
                 continue
             if branch:
-                num_new, idx = count_and_sample(pool.coords, n_add,
-                                                lower, box_lengths=box)
-                if num_new == 0:
-                    continue
-                chosen_coords = pool.coords[list(idx)]
-                if lj:
-                    # clique count is the multiplicity; the selected trial's LJ
-                    # energy is folded into the Rosenbluth weight (single sample,
-                    # unbiased for sum_valid exp[-b u]).
-                    u_ins = _lj_set_energy(chosen_coords, disk_rest, box, uc)
-                    sum_new = np.log(num_new) - beta * u_ins
+                if ljbranch:
+                    # true LJ+branch: full Rosenbluth sum over all k-cliques,
+                    # selection proportional to exp(-beta U_clique). Returns the
+                    # chosen clique's coords and W_new = sum over cliques.
+                    _band_upper = 2.0 * cfg.cavity_radius
+                    chosen_coords, sum_new = _ljbranch_forward(
+                        pool.coords, n_add, lower, disk_rest, box, uc, beta,
+                        rng, _band_upper)
+                    if chosen_coords is None:
+                        continue
+                    e_u_r_new = 0.0
                 else:
+                    num_new, idx = count_and_sample(pool.coords, n_add,
+                                                    lower, box_lengths=box)
+                    if num_new == 0:
+                        continue
+                    chosen_coords = pool.coords[list(idx)]
                     sum_new = np.log(num_new)
-                e_u_r_new = 0.0
+                    e_u_r_new = 0.0
             else:
                 chosen, sum_new_arr = select_forward(pool, n_add, weigher, rand=rand,
                                                      side=side, r_squared=r_sq, gamma_schedule=gdict)
@@ -492,25 +532,23 @@ def advance(state, cfg, potential, weigher):
         # reverse (current configuration)
         if n_remove != 0:
             if branch:
-                num_cur, _ = count_and_sample(pool.coords, n_remove,
-                                              lower, box_lengths=box)
-                if num_cur <= 0:
-                    sum_current = -np.inf
-                elif lj:
-                    # exact mirror of sum_new: the count of valid configurations
-                    # times the Boltzmann factor of the one being reversed. The
-                    # removed set is itself a member of the counted population
-                    # (it sits in the pool), so no ghost sampling is needed.
-                    # The previous single-ghost estimator was biased twice over:
-                    # an unbiased estimate of W in the acceptance *denominator*
-                    # is not an unbiased acceptance (E[1/W] != 1/E[W]), and the
-                    # ghost was drawn from the unmasked trial set while the
-                    # count ran over the masked, merged pool.
-                    u_rem = _lj_set_energy(disk_in, disk_rest, box, uc)
-                    sum_current = np.log(num_cur) - beta * u_rem
+                if ljbranch:
+                    # reverse Rosenbluth weight W_curr: the same all-clique sum
+                    # on the CURRENT configuration's pool, with the removed set
+                    # guaranteed to be one member. Identical enumerator+weight
+                    # as the forward, so detailed balance holds by construction.
+                    sum_current = _ljbranch_reverse(
+                        pool.coords, n_remove, lower, disk_in, disk_rest,
+                        box, uc, beta, 2.0 * cfg.cavity_radius)
+                    e_u_r_current = 0.0
                 else:
-                    sum_current = np.log(num_cur)
-                e_u_r_current = 0.0
+                    num_cur, _ = count_and_sample(pool.coords, n_remove,
+                                                  lower, box_lengths=box)
+                    if num_cur <= 0:
+                        sum_current = -np.inf
+                    else:
+                        sum_current = np.log(num_cur)
+                    e_u_r_current = 0.0
             else:
                 trimmed = trial_set.mask(km)
                 trimmed = trimmed if len(trimmed) != 0 else None
