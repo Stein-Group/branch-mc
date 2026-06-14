@@ -44,8 +44,8 @@ _THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
 # (axis label, params section, key). Order fixes the product / id ordering.
 _AXES = (("mu", "ensemble", "mu"),
          ("trial_density", "sampler", "trial_density"),
-         ("trial_box_side", "sampler", "trial_box_side"))
-
+         ("trial_box_side", "sampler", "trial_box_side"),
+         ("packing_fraction", "ensemble", "packing_fraction"))
 
 def _as_list(v):
     return list(v) if isinstance(v, (list, tuple)) else [v]

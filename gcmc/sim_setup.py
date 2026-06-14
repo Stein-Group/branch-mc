@@ -206,6 +206,15 @@ def from_params(p):
         has_n, has_pf = "N" in ens, "packing_fraction" in ens
         if has_n == has_pf:
             raise ValueError("NVT needs exactly one of 'N' or 'packing_fraction'")
+        _swept = next((k for k in ("N", "packing_fraction")
+                       if isinstance(ens.get(k), list)), None)
+        if _swept is not None:
+            raise ValueError(
+                f"ensemble.{_swept} is a list (a sweep), but a single run got it "
+                f"unexpanded. Launch sweeps with `python -m gcmc.launcher` (not "
+                f"`gcmc run`); if you already did, the launcher on this machine "
+                f"is an older version that does not expand '{_swept}' -- update "
+                f"gcmc/launcher.py.")
         mu = 0.0   # unused under NVT; the prefactor cancels in repacking
     else:
         has_mu, has_sweep = "mu" in ens, "sweep" in ens
@@ -215,6 +224,11 @@ def from_params(p):
             raise ValueError("ensemble takes either 'mu' or 'sweep', not both")
         if not has_mu and not has_sweep:
             raise ValueError("ensemble needs 'mu' (one run) or 'sweep' (a batch)")
+        if isinstance(ens.get("mu"), list):
+            raise ValueError(
+                "ensemble.mu is a list (a sweep) but a single run got it "
+                "unexpanded. Launch sweeps with `python -m gcmc.launcher`; if "
+                "you did, gcmc/launcher.py on this machine is outdated.")
         if has_sweep:
             raise ValueError("this config has a 'sweep'; launch it with gcmc.launcher, "
                              "which expands it into one run per mu")
