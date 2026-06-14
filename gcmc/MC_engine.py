@@ -298,6 +298,10 @@ def advance(state, cfg, potential, weigher):
     temp = cfg.temp
     mu = cfg.chem_pot
     nvt = cfg.ensemble_type == "NVT"
+    # quenched-annealed frozen matrix: obstacles that enter the overlap test but
+    # are never inserted/deleted/moved/counted. Empty => ordinary bulk run.
+    matrix = getattr(cfg, "matrix_positions", None)
+    has_matrix = matrix is not None and len(matrix) > 0
     total_vol = cfg.total_volume
     ljaux = cfg.potential_type == "ljaux"
     ljbranch = cfg.potential_type == "ljbranch"   # true LJ+branch, no auxiliary
@@ -337,7 +341,11 @@ def advance(state, cfg, potential, weigher):
                 ranf3 = (ranf1 + ranf2) % 1
                 mz = (old[2] + mf * (ranf3 - 0.5)) % side
                 moved = np.array([mx, my, mz])
-            tree = cKDTree(without, boxsize=box)
+            # translation overlap test must also see the frozen matrix, so a
+            # fluid particle cannot move onto an obstacle. Matrix appended after
+            # `without`; it is never selected as the moved particle.
+            tree = cKDTree(np.append(without, matrix, axis=0) if has_matrix else without,
+                           boxsize=box)
             if lj:
                 d_new, _ = tree.query([moved], k=nn, distance_upper_bound=uc)
                 d_new = d_new[0][np.isfinite(d_new[0])]
@@ -367,7 +375,7 @@ def advance(state, cfg, potential, weigher):
             continue
 
         if choice == "repack":
-            c["repack_step"] = c.get("repack_step", 0) + 1
+            c["repack_step"] += 1
             n_add = n_remove = depth + 1     # remove k, insert k; N conserved
         elif choice == "add":
             c["add_step"] += 1
@@ -416,9 +424,21 @@ def advance(state, cfg, potential, weigher):
                                                  cfg.cavity_radius, side, two_d)
             n_cav = len(idx_cav)
             if n_cav == 0:
-                continue
-            if n_cav < n_remove:
+                # empty cavity. An ADD needs nothing to remove, so it kicks down
+                # to a pure depth-0 insertion (n_add=1, n_remove=0) rather than
+                # being abandoned -- abandoning it is what drained the fluid at
+                # low density, where most global add-centres land in empty space.
+                # REMOVE/REPACK genuinely have nothing in the cavity to act on.
                 if choice == "add":
+                    n_add, n_remove = 1, 0
+                else:
+                    continue
+            elif n_cav < n_remove:
+                if choice == "repack":
+                    # repack must stay balanced: remove and add the same count,
+                    # capped at what the cavity actually holds, so N is conserved
+                    n_add = n_remove = n_cav
+                elif choice == "add":
                     n_add, n_remove = n_cav, n_cav - 1
                 else:
                     n_add, n_remove = n_cav - 1, n_cav
@@ -464,7 +484,12 @@ def advance(state, cfg, potential, weigher):
         if n_remove != 0:
             keep_mask[rng.choice(n_trials, size=n_remove, replace=False)] = False
 
-        tree = cKDTree(disk_rest, boxsize=box)
+        # exclusion tree: fluid-rest PLUS frozen matrix. Trials/shadows that
+        # overlap either are rejected. The matrix is appended after disk_rest so
+        # the first len(disk_rest) tree indices are still the mobile fluid, which
+        # is all the downstream weight/selection logic ever indexes into.
+        excl = np.append(disk_rest, matrix, axis=0) if has_matrix else disk_rest
+        tree = cKDTree(excl, boxsize=box)
         raw = geometry.find_neighbors(tree, trials, lower, uc, nn, keep_mask=keep_mask)
         if raw is None:
             if n_add != 0:
@@ -590,7 +615,7 @@ def advance(state, cfg, potential, weigher):
 
         # acceptance
         if choice == "repack":
-            c["repack_attempt"] = c.get("repack_attempt", 0) + 1
+            c["repack_attempt"] += 1
             # Number-conserving move: remove k, insert k in one step. The
             # chemical-potential prefactor cancels identically (the e^{beta mu}
             # of the k insertions against the e^{-beta mu} of the k deletions,
@@ -610,7 +635,7 @@ def advance(state, cfg, potential, weigher):
             log_alpha = max(0.0, log_alpha)
             if log_alpha <= -np.log(rng.uniform(0, 1)):
                 pos = np.append(disk_rest, chosen_coords, axis=0) if len(chosen_coords) else disk_rest
-                c["repack_accept"] = c.get("repack_accept", 0) + 1
+                c["repack_accept"] += 1
         elif choice == "add":
             c["add_attempt"] += 1
             mu_ideal = -np.log(total_vol / (N + 1))

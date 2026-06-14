@@ -93,6 +93,13 @@ def load_checkpoint(paths):
 
 # ---------------------------------------------------------------- trajectory
 def write_frame(paths, positions, *, two_dim, box, info, append):
+    """Write one configuration to the extxyz trajectory.
+
+    append=False overwrites the file, leaving a single snapshot (the
+    save-last-frame mode). append=True adds the frame to a growing trajectory.
+    The caller (runner) decides which from the single `traj_every` knob:
+    traj_every == 0 -> overwrite (last frame only); traj_every >= 1 -> append.
+    """
     pos = np.asarray(positions, dtype=float)
     if two_dim:
         pos = np.column_stack([pos, np.zeros(len(pos))])
@@ -130,6 +137,39 @@ class Log:
         self._f.close()
 
 
+def trim_trajectory(path, max_step):
+    """Drop trajectory frames whose stored step exceeds the checkpoint step, so
+    a resumed append-mode run does not duplicate frames written after the last
+    checkpoint but before a kill. No-op if the file is absent. Frames are extxyz
+    blocks: a count line, a comment line carrying `step=<int>`, then that many
+    atom lines. We keep whole frames with step <= max_step."""
+    if not os.path.exists(path):
+        return
+    import re
+    with open(path) as f:
+        lines = f.readlines()
+    kept = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        try:
+            natoms = int(lines[i].strip())
+        except (ValueError, IndexError):
+            # not a frame header; keep the stray line and advance
+            kept.append(lines[i]); i += 1
+            continue
+        block = lines[i:i + natoms + 2]          # header + comment + atoms
+        m = re.search(r"step=(\d+)", block[1]) if len(block) > 1 else None
+        step = int(m.group(1)) if m else 0
+        if step <= max_step:
+            kept.extend(block)
+        i += natoms + 2
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.writelines(kept)
+    os.replace(tmp, path)
+
+
 def trim_log(path, max_cycle_millions):
     """Drop data rows whose leading MC-cycle value (in millions) exceeds the
     checkpoint, keeping the header. No-op if the file is absent."""
@@ -154,6 +194,85 @@ def trim_log(path, max_cycle_millions):
     with open(tmp, "w") as f:
         f.writelines(kept)
     os.replace(tmp, path)
+
+
+def _coerce_positions(pos, dimension, n_expected, path):
+    """Turn whatever a checkpoint stored under `positions` into a clean
+    (N, dimension) array, or raise loudly. Handles the layouts seen in the wild:
+      - (N, dim)               : the canonical form, used as-is
+      - (dim, N)               : transposed -> transpose back
+      - (1, N*dim) / (N*dim,)  : flattened -> reshape to (-1, dim)
+    `n_expected` (from meta['n'], if present) disambiguates. We never silently
+    return a 1-row array from a flattened blob: that is the bug that made a
+    415-sphere matrix load as a single obstacle and run as bulk GCMC."""
+    pos = np.asarray(pos, dtype=float)
+    pos = np.squeeze(pos)
+    # flat vector of all coordinates -> (N, dim)
+    if pos.ndim == 1:
+        if pos.size % dimension != 0:
+            raise ValueError(
+                f"{path}: positions is a flat array of length {pos.size}, not "
+                f"divisible by dimension {dimension}; cannot reshape to coords")
+        pos = pos.reshape(-1, dimension)
+    elif pos.ndim == 2:
+        r, c = pos.shape
+        if c == dimension:
+            pass                                   # (N, dim) already
+        elif r == dimension and c != dimension:
+            pos = pos.T                            # (dim, N) -> (N, dim)
+        elif r == 1 and c % dimension == 0:
+            pos = pos.reshape(-1, dimension)       # (1, N*dim) flattened
+        elif c % dimension == 0 and r == 1:
+            pos = pos.reshape(-1, dimension)
+        elif c > dimension:
+            pos = pos[:, :dimension]               # extra columns (e.g. 2D pad)
+        else:
+            raise ValueError(
+                f"{path}: positions has shape {(r, c)}, cannot interpret as "
+                f"(N, {dimension}) coordinates")
+    else:
+        raise ValueError(f"{path}: positions has {pos.ndim} dimensions; "
+                         f"expected a 1- or 2-D coordinate array")
+    if n_expected is not None and len(pos) != n_expected:
+        raise ValueError(
+            f"{path}: loaded {len(pos)} positions but the checkpoint meta says "
+            f"n={n_expected}. The file layout is not understood; refusing to run "
+            f"a quenched-annealed simulation with the wrong matrix.")
+    if len(pos) < 2:
+        raise ValueError(
+            f"{path}: matrix loaded as {len(pos)} obstacle(s). A frozen matrix "
+            f"needs many spheres; a single point means the file layout was "
+            f"misread. Check that the matrix checkpoint stores positions as "
+            f"an (N, {dimension}) array.")
+    return pos
+
+
+def load_matrix(path, dimension):
+    """Load a frozen matrix configuration for a quenched-annealed run. Accepts
+    whatever an NVT matrix-generation run produced:
+      - .npz   : a checkpoint (reads the `positions` array)
+      - .extxyz/.xyz via ASE if the header looks like extxyz, else plain floats
+    Returns an (N, dimension) array. The file is authoritative in-box coords."""
+    import os
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".npz":
+        with np.load(path, allow_pickle=False) as data:
+            pos = np.asarray(data["positions"], dtype=float)
+            # the expected number of particles, if the checkpoint recorded it
+            n_expected = None
+            if "meta" in data:
+                try:
+                    n_expected = int(json.loads(str(data["meta"])).get("n"))
+                except Exception:
+                    n_expected = None
+        pos = _coerce_positions(pos, dimension, n_expected, path)
+        return np.ascontiguousarray(pos)
+    if ext == ".extxyz":
+        from ase.io import read as ase_read
+        atoms = ase_read(path, format="extxyz")
+        return np.ascontiguousarray(np.asarray(atoms.get_positions(), float)[:, :dimension])
+    # plain coordinate file (x y z per line), same as load_config_file
+    return load_config_file(path, dimension)
 
 
 def load_config_file(path, dimension):

@@ -126,8 +126,13 @@ class Config:
     burn_in: int
     traj_every: int
     checkpoint_every: int
-    full_trajectory: bool
     initial_config: str | None
+    # quenched-annealed matrix: frozen obstacle positions the fluid cannot
+    # overlap but which are never inserted/deleted/moved/counted. Default empty
+    # => ordinary bulk run, bit-identical to before. matrix_config is the file
+    # path (loaded by the runner); matrix_positions holds the loaded coordinates.
+    matrix_config: str | None = None
+    matrix_positions: object = None   # np.ndarray (n_matrix, dim) or None
 
     @property
     def box_dims(self):
@@ -194,9 +199,10 @@ def from_params(p):
         raise ValueError("dimension must be 2 or 3")
     two_dim = dim == 2
     ens_type = ens.get("type", "muVT")
-    if ens_type not in ("muVT", "NVT"):
-        raise ValueError("ensemble.type must be 'muVT' or 'NVT'")
+    if ens_type not in ("muVT", "NVT", "QA"):
+        raise ValueError("ensemble.type must be 'muVT', 'NVT', or 'QA'")
     nvt = ens_type == "NVT"
+    qa = ens_type == "QA"
     if nvt:
         # NVT: fixed particle number, no chemical potential. Target given as an
         # exact integer N, or as a packing fraction converted to the nearest
@@ -246,8 +252,12 @@ def from_params(p):
     run = p.get("run", {})
     _check(run, {"kind", "n_workers", "n_cores", "sampling_window", "target_cycles", "burn_in",
                  "traj_every", "checkpoint_every", "seed", "initial_config",
+                 "matrix_config",
                  "radius", "move_factor", "upper_cutoff", "lower_cutoff", "no_neigh",
-                 "cell_length", "buffer", "x_spacing", "y_spacing", "full_trajectory"})
+                 "cell_length", "buffer", "x_spacing", "y_spacing"})
+    if int(run.get("traj_every", 0)) < 0:
+        raise ValueError("run.traj_every must be >= 0 (0 = save only the last "
+                         "frame; N >= 1 = append every N windows)")
     kind = run.get("kind", "single")
     if kind not in ("single", "parallel"):
         raise ValueError("run.kind must be 'single' or 'parallel'")
@@ -270,8 +280,12 @@ def from_params(p):
         raise ValueError("branch takes no auxiliary potential")
     if pmf and reweight:
         raise ValueError("reweight uses psi6, not a pmf auxiliary; remove the auxiliary block")
-    if not lj and mu < 0:
-        raise ValueError("non-LJ runs require mu >= 0")
+    if not lj and mu < 0 and not qa:
+        # bulk hard-core fluids want mu >= 0; but a quenched-annealed run (frozen
+        # matrix) lives at low fluid density where mu is naturally negative -- the
+        # entire dilute branch of the adsorption isotherm. Allow it there.
+        raise ValueError("non-LJ runs require mu >= 0 (except quenched-annealed "
+                         "matrix runs, where the dilute isotherm has mu < 0)")
     if pmf and not two_dim and "g3_csv" not in aux_block:
         raise ValueError("3D pmf auxiliary requires auxiliary.g3_csv")
     if parallel:
@@ -396,6 +410,38 @@ def from_params(p):
     else:
         ptype = "hard_sphere"
 
+    has_matrix_cfg = run.get("matrix_config") is not None
+    if qa and not has_matrix_cfg:
+        raise ValueError(
+            "ensemble.type='QA' (quenched-annealed) requires run.matrix_config: "
+            "an absolute path to the frozen matrix configuration (an NVT "
+            "checkpoint.npz, .extxyz, or plain x y z file).")
+    if has_matrix_cfg and not qa:
+        raise ValueError(
+            "run.matrix_config is only valid with ensemble.type='QA'. A frozen "
+            "matrix defines a quenched-annealed run; set ensemble.type='QA' "
+            "(it is grand-canonical, so give a chemical potential mu, not N).")
+    if qa:
+        # QA support is implemented only on the deep serial rosenbluth/branch
+        # path. Reject every combination that would silently ignore the matrix
+        # and produce fluid overlapping the frozen obstacles with no error.
+        if ptype not in ("hard_sphere", "ljbranch"):
+            raise ValueError(
+                f"QA runs support hard-core and LJ+branch potentials only, not "
+                f"{ptype!r}; the other modes pass kd-tree neighbour indices "
+                f"downstream where frozen-matrix indices would be misread as "
+                f"fluid particles")
+        if metropolis:
+            raise ValueError(
+                "QA runs are not supported with the 'metropolis' sampler: its "
+                "insertion/translation overlap test is built on the fluid only "
+                "and would let fluid overlap the frozen matrix. Use 'rosenbluth' "
+                "or 'branch'.")
+        if kind == "parallel":
+            raise ValueError(
+                "QA runs are not supported with run.kind='parallel': the domain "
+                "decomposition carries only the fluid in each cell and would "
+                "drop the frozen matrix. Use run.kind='single'.")
     return Config(
         potential_type=ptype, sampler=sampler, dimension=dim, chem_pot=mu,
         ensemble_type=ens_type, target_n=target_n, box=box,
@@ -423,8 +469,8 @@ def from_params(p):
         sampling_window=int(run.get("sampling_window", 1000)),
         target_cycles=float(run.get("target_cycles", 1.0025e9)),
         burn_in=int(run.get("burn_in", 0)),
-        traj_every=int(run.get("traj_every", 1)),
+        traj_every=int(run.get("traj_every", 0)),
         checkpoint_every=int(run.get("checkpoint_every", 1)),
-        full_trajectory=bool(run.get("full_trajectory", False)),
         initial_config=run.get("initial_config"),
+        matrix_config=run.get("matrix_config"),
     )

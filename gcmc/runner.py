@@ -40,6 +40,28 @@ def _init_config(cfg, rng):
     # safe across SLURM / subprocess working directories.
     spec = cfg.initial_config
     if not spec:
+        mpos = getattr(cfg, "matrix_positions", None)
+        if mpos is not None and len(mpos) > 0 and getattr(cfg, "target_n", None) is None:
+            # quenched-annealed muVT: seed a few valid fluid particles (the
+            # depth>=1 proposal needs an anchor and cannot grow from N=0), each
+            # clearing the matrix and the others. GCMC then fills the pores.
+            from scipy.spatial import cKDTree as _KD
+            box = cfg.box
+            tree_m = _KD(np.asarray(mpos, float) % box, boxsize=[box] * cfg.dimension)
+            placed = []
+            target_seed = 20            # small; enough to bootstrap insertion
+            for _ in range(target_seed * 200):
+                if len(placed) >= target_seed:
+                    break
+                pt = rng.uniform(0, box, cfg.dimension)
+                if tree_m.query(pt % box, k=1)[0] < cfg.diameter:
+                    continue            # overlaps matrix
+                if placed:
+                    tp = _KD(np.array(placed) % box, boxsize=[box] * cfg.dimension)
+                    if tp.query(pt % box, k=1)[0] < cfg.diameter:
+                        continue        # overlaps an already-placed fluid sphere
+                placed.append(pt)
+            return (np.array(placed) if placed else np.empty((0, cfg.dimension)))
         if getattr(cfg, "target_n", None) is not None:
             # NVT: seed EXACTLY target_n non-overlapping particles on a grid.
             # Repacking conserves N, so the starting count must be the target;
@@ -119,14 +141,65 @@ def _save(paths, cfg, state, params):
                        params=params)
 
 
+def _find_matrix_snapshot(params, root, dimension):
+    """On resume with the external matrix gone, locate the run directory whose
+    params match and return its matrix.npz snapshot path (or None)."""
+    import os, json, glob
+    target = json.dumps(params, sort_keys=True)
+    for snap in glob.glob(os.path.join(root, "*", "matrix.npz")):
+        pj = os.path.join(os.path.dirname(snap), "params.json")
+        if os.path.exists(pj):
+            try:
+                if json.dumps(json.load(open(pj)), sort_keys=True) == target:
+                    return snap
+            except Exception:
+                continue
+    return None
+
+
 def run(params, root="runs"):
     if isinstance(params, str):
         with open(params) as f:
             params = json.load(f)
 
     cfg = sim_setup.from_params(params)
-    paths = hash_fingerprint.run_paths(cfg, root)
-    io.ensure_run_dir(paths, params)
+    if cfg.matrix_config is not None:
+        import dataclasses, os
+        import numpy as _np
+        mpath = os.path.abspath(cfg.matrix_config)
+        # On a fresh launch we load the external matrix to compute the
+        # content-addressed run dir, then snapshot it inside. On a resume the
+        # snapshot in the (params-determined) run dir is authoritative, so the
+        # external file may be gone -- find the run dir by probing the snapshot.
+        if os.path.exists(mpath):
+            mpos = io.load_matrix(mpath, cfg.dimension)
+            cfg = dataclasses.replace(cfg, matrix_positions=mpos)
+            paths = hash_fingerprint.run_paths(cfg, root)
+            io.ensure_run_dir(paths, params)
+            snap = os.path.join(paths.directory, "matrix.npz")
+            if os.path.exists(snap):
+                cfg = dataclasses.replace(
+                    cfg, matrix_positions=io.load_matrix(snap, cfg.dimension))
+            else:
+                _np.savez(snap, positions=_np.asarray(mpos, float))
+            print(f"loaded frozen matrix: {len(mpos)} obstacles from {mpath}")
+        else:
+            # external matrix gone: this must be a resume. Find the existing run
+            # dir whose params.json matches and load its matrix snapshot.
+            snap = _find_matrix_snapshot(params, root, cfg.dimension)
+            if snap is None:
+                raise FileNotFoundError(
+                    f"matrix_config not found: {mpath}, and no existing run "
+                    f"snapshot under {root!r} to resume from. Restore the matrix "
+                    f"file or the run directory.")
+            mpos = io.load_matrix(snap, cfg.dimension)
+            cfg = dataclasses.replace(cfg, matrix_positions=mpos)
+            paths = hash_fingerprint.run_paths(cfg, root)
+            io.ensure_run_dir(paths, params)
+            print(f"resumed frozen matrix: {len(mpos)} obstacles from {snap}")
+    else:
+        paths = hash_fingerprint.run_paths(cfg, root)
+        io.ensure_run_dir(paths, params)
     acquire_lock(paths)
 
     try:
@@ -140,6 +213,8 @@ def run(params, root="runs"):
             state = ChainState(positions=ckpt["positions"], step=int(ckpt["step"]),
                                rng=gen, counters=dict(ckpt["counters"]))
             io.trim_log(paths.log, state.step / 1e6)
+            if cfg.traj_every >= 1:
+                io.trim_trajectory(paths.trajectory, state.step)
 
         potential = cfg.build_potential()
         weigher = MC_engine.make_weigher(cfg, potential)
@@ -170,16 +245,23 @@ def run(params, root="runs"):
             win += 1
             if win % cfg.checkpoint_every == 0:
                 _save(paths, cfg, state, params)
-            if win % cfg.traj_every == 0:
+            if cfg.traj_every >= 1 and win % cfg.traj_every == 0:
                 info["step"] = state.step
                 io.write_frame(paths, state.positions, two_dim=cfg.two_dim,
-                               box=cfg.box, info=info, append=cfg.full_trajectory)
+                               box=cfg.box, info=info, append=True)
 
         log.close()
         _save(paths, cfg, state, params)
         info["step"] = state.step
-        io.write_frame(paths, state.positions, two_dim=cfg.two_dim, box=cfg.box,
-                       info=info, append=cfg.full_trajectory)
+        if cfg.traj_every == 0:
+            # save-last-frame mode: one overwritten snapshot
+            io.write_frame(paths, state.positions, two_dim=cfg.two_dim,
+                           box=cfg.box, info=info, append=False)
+        elif win % cfg.traj_every != 0:
+            # append mode: the last window was not on the cadence, so its frame
+            # has not been written yet -- append it so the final state is saved
+            io.write_frame(paths, state.positions, two_dim=cfg.two_dim,
+                           box=cfg.box, info=info, append=True)
         return state, paths
     finally:
         release_lock(paths)

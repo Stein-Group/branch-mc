@@ -1,56 +1,313 @@
 {
-  "potential": {
-    "main": "hard_core" | "lennard_jones",   // REQUIRED
-    "T": float                               // REQUIRED iff main = lennard_jones (forbidden otherwise)
-  },
-
-  "auxiliary": {                             // OPTIONAL block (omit = no aux). PMF only.
-    "type": "pmf",
-    "g3_csv": str,                           // REQUIRED iff aux present AND dimension = 3
-    "eta": float,                            // OPTIONAL, default 0.69 (2D analytic g(r))
-    "gamma_max": float,                      // OPTIONAL, default from original schedule
-    "delta_eta": float                       // OPTIONAL, default from original schedule
-  },
-
-  "sampler": {
-    "type": "metropolis" | "rosenbluth" | "branch" | "reweight",   // REQUIRED
-    "depth": int,                            // OPTIONAL, default 0, range 0-3   (forbidden: metropolis). NVT: depth d => repack removes/adds d+1 disks
-    "trials": int,                           // OPTIONAL, default 30      (forbidden: metropolis; XOR trial_density)
-    "trial_density": float | [float, ...],   // OPTIONAL  (forbidden: metropolis; XOR trials).  SWEEPABLE: list = one run per value
-    "trial_box_side": float | [float, ...],  // OPTIONAL, default 3.0     (forbidden: metropolis). SWEEPABLE: list (pair with trial_density for a heatmap)
-    "use_depth": bool                        // OPTIONAL, default true
-  },
-
-  "ensemble": {
-    "type": "muVT" | "NVT",                  // OPTIONAL, default "muVT"
-    // --- muVT (grand canonical): supply mu, no N/packing_fraction ---
-    "mu": float | [float, ...],              // REQUIRED for muVT. SWEEPABLE: scalar = one run, list = one run per value
-    // --- NVT (canonical): supply exactly one of N or packing_fraction, no mu ---
-    "N": int | [int, ...],                   // NVT: exact particle count. SWEEPABLE
-    "packing_fraction": float | [float,...], // NVT: converted to nearest integer N = round(eta * V / v_particle). SWEEPABLE
-    "dimension": 2 | 3,                      // REQUIRED
-    "box": float                             // OPTIONAL, default by (dimension, kind): 2D single 75, 2D parallel 200, 3D single 20, 3D parallel 50
-  },
-
-  "run": {
-    "kind": "single" | "parallel",           // OPTIONAL, default "single"
-    "n_cores": int,                          // REQUIRED for submission. Total cores this job has. Launcher refuses if (sweep combos) x (cores/run) > n_cores. cores/run = n_workers if parallel else 1. CLI --cores overrides.
-    "n_workers": int,                        // OPTIONAL (parallel), default 1. Per-run core cost in parallel mode.
-    "sampling_window": int,                  // OPTIONAL, default 1000
-    "target_cycles": float,                  // OPTIONAL, default large — set for real runs
-    "seed": int,                             // OPTIONAL
-    "initial_config": str,                   // OPTIONAL (file or dir; absolute path). Omit to start from a grid: muVT seeds a moderate-density lattice, NVT seeds EXACTLY the target N, both then equilibrate in place
-    "checkpoint_every": int,                 // OPTIONAL, default 1
-    "traj_every": int,                       // OPTIONAL, default 1
-    "burn_in": int,                          // OPTIONAL, default 0
-    "radius": float,                         // OPTIONAL, default 0.5 (diameter = 2*radius = LJ sigma)
-    "move_factor": float,                    // OPTIONAL, default 0.25
-    "upper_cutoff": float,                   // OPTIONAL, default 3.7545 (2D hard/aux), 2.0 (3D hard/aux), 2.5 (LJ), 1.5 (reweight)
-    "lower_cutoff": float,                   // OPTIONAL, default 0.85 (LJ), 0.9 (LJ+branch), else diameter = 2*radius (1.0)
-    "no_neigh": int,                         // OPTIONAL, default 40 (2D) / 75 (3D)
-    "cell_length": float,                    // OPTIONAL (parallel), default 30
-    "buffer": float,                         // OPTIONAL (parallel), default 2
-    "x_spacing": float,                      // OPTIONAL (parallel), default grid-derived
-    "y_spacing": float                       // OPTIONAL (parallel), default grid-derived
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "gcmc params.json",
+  "description": "Input template for a GCMC run or sweep. Pass to `python -m gcmc run` for one run, or to `python -m gcmc.launcher` for a sweep. For sweeps, set ensemble.mu, sampler.trial_density, and/or sampler.trial_box_side to a LIST; the launcher takes the Cartesian product (two lists = a heatmap). Every other field stays scalar. Ensembles: muVT (grand canonical), NVT (canonical, repacking), QA (quenched-annealed fluid in a frozen matrix; set ensemble.type='QA' and run.matrix_config).",
+  "type": "object",
+  "required": [
+    "potential",
+    "sampler",
+    "ensemble",
+    "run"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "potential": {
+      "type": "object",
+      "required": [
+        "main"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "main": {
+          "enum": [
+            "hard_core",
+            "lennard_jones"
+          ],
+          "description": "hard_core: athermal exclusion. lennard_jones: requires T."
+        },
+        "T": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Reduced temperature T*; required iff main == lennard_jones, forbidden otherwise."
+        },
+        "tail": {
+          "type": "boolean",
+          "default": true,
+          "description": "LJ long-range tail correction; lennard_jones only."
+        }
+      }
+    },
+    "auxiliary": {
+      "type": "object",
+      "description": "OPTIONAL. Omit for no auxiliary (pure main potential). pmf adds a g3 selection bias that divides out of the density.",
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "pmf"
+          ]
+        },
+        "g3_csv": {
+          "type": "string",
+          "description": "Path to the g3 table; required in 3D."
+        },
+        "eta": {
+          "type": "number",
+          "description": "2D analytic g(r) packing fraction (2D pmf only)."
+        },
+        "gamma_max": {
+          "type": "number"
+        },
+        "delta_eta": {
+          "type": "number"
+        }
+      }
+    },
+    "sampler": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "metropolis",
+            "rosenbluth",
+            "branch",
+            "reweight"
+          ],
+          "description": "metropolis: single-particle. rosenbluth/branch: cavity-biased insertion (depth 0-3). reweight: 2D hexatic."
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3,
+          "description": "Cavity recursion depth; forbidden for metropolis. Validated 0-3."
+        },
+        "use_depth": {
+          "type": "boolean"
+        },
+        "trials": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Fixed trial count per cavity. Mutually exclusive with trial_density; forbidden for metropolis."
+        },
+        "trial_density": {
+          "description": "Trial count set by density x trial-box span. Forbidden for metropolis. SWEEPABLE: a list builds one run per value.",
+          "oneOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "minItems": 1
+            }
+          ]
+        },
+        "trial_box_side": {
+          "description": "Full side of the trial box (twice the legacy cavity radius). Forbidden for metropolis. SWEEPABLE: a list builds one run per value (pair with trial_density for a heatmap).",
+          "oneOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "minItems": 1
+            }
+          ]
+        }
+      }
+    },
+    "ensemble": {
+      "type": "object",
+      "required": [
+        "dimension",
+        "box"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "mu": {
+          "description": "Chemical potential mu* (TOTAL: activity z = exp(beta*mu)). REQUIRED for muVT and QA; forbidden for NVT. QA may use mu < 0. SWEEPABLE: a list builds one run per value.",
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 1
+            }
+          ]
+        },
+        "sweep": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "Legacy mu sweep list; prefer a list under ensemble.mu."
+        },
+        "dimension": {
+          "enum": [
+            2,
+            3
+          ]
+        },
+        "box": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Box side; volume = box^dimension."
+        },
+        "type": {
+          "enum": [
+            "muVT",
+            "NVT",
+            "QA"
+          ],
+          "default": "muVT",
+          "description": "muVT: grand canonical (give mu). NVT: canonical (give exactly one of N or packing_fraction, no mu). QA: quenched-annealed = muVT in a frozen matrix (give mu AND run.matrix_config; mu may be < 0 for the dilute isotherm)."
+        },
+        "N": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "minItems": 1
+            }
+          ],
+          "description": "NVT only: exact particle count, held fixed by repacking. SWEEPABLE. Mutually exclusive with packing_fraction."
+        },
+        "packing_fraction": {
+          "oneOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "minItems": 1
+            }
+          ],
+          "description": "NVT only: converted to nearest integer N = round(eta * V / v_particle), then held exactly. SWEEPABLE."
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "required": [
+        "kind",
+        "n_cores"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "single",
+            "parallel"
+          ],
+          "description": "single: one serial chain (1 core). parallel: cell-decomposed (uses n_workers cores)."
+        },
+        "n_cores": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "REQUIRED. Total cores available this job. The launcher refuses to start if (number of sweep combinations) x (cores per run) exceeds this. cores-per-run = n_workers if parallel else 1. Can be overridden on the CLI with --cores."
+        },
+        "n_workers": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Worker processes for a parallel run; this is the per-run core cost. Required iff kind == parallel."
+        },
+        "cell_length": {
+          "type": "number",
+          "description": "Parallel cell side; must exceed 2 x cavity radius. >= 10 cavity widths recommended for depth >= 1 (approximate mode)."
+        },
+        "buffer": {
+          "type": "number",
+          "description": "Frozen-border width; must be >= interaction range (rc for LJ, diameter for hard core)."
+        },
+        "sampling_window": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Moves per window (one measurement)."
+        },
+        "target_cycles": {
+          "type": "number",
+          "description": "Total moves to run."
+        },
+        "burn_in": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "traj_every": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Trajectory saving. 0 (default) = save ONLY the last frame (one overwritten snapshot in trajectory.extxyz). N >= 1 = append every N-th window's configuration to a growing trajectory (N=1 saves every window). Use traj_every=1 for QA RDF runs, which need every frame. On resume, an append-mode trajectory is trimmed to the checkpoint step so frames are never duplicated."
+        },
+        "checkpoint_every": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "initial_config": {
+          "type": "string",
+          "description": "Path to a starting configuration; omit to start fresh."
+        },
+        "radius": {
+          "type": "number",
+          "description": "Particle radius (diameter = 2 x radius = LJ sigma)."
+        },
+        "move_factor": {
+          "type": "number"
+        },
+        "upper_cutoff": {
+          "type": "number"
+        },
+        "lower_cutoff": {
+          "type": "number"
+        },
+        "no_neigh": {
+          "type": "integer"
+        },
+        "x_spacing": {
+          "type": "number"
+        },
+        "y_spacing": {
+          "type": "number"
+        },
+        "matrix_config": {
+          "type": "string",
+          "description": "REQUIRED iff ensemble.type='QA'; forbidden otherwise. Absolute path to the frozen matrix configuration (an NVT checkpoint.npz, .extxyz, or plain 'x y z' file). The fluid cannot overlap these obstacles, which are never inserted/deleted/moved/counted. The matrix content is folded into the run-id hash (distinct realizations -> distinct dirs) and snapshotted into the run directory as matrix.npz, so a resume is self-contained even if the source file moves. QA supports hard_core or LJ+branch, sampler rosenbluth/branch, and run.kind='single' only."
+        }
+      }
+    }
   }
 }

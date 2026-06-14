@@ -43,8 +43,22 @@ def identity_dict(cfg):
     return {k: _canon(getattr(cfg, k)) for k in _IDENTITY_FIELDS}
 
 
+def _matrix_digest(cfg):
+    mpos = getattr(cfg, "matrix_positions", None)
+    if mpos is None or len(mpos) == 0:
+        return ""
+    import numpy as np
+    # round to a stable precision so floating noise in I/O does not change the id
+    rounded = np.round(np.asarray(mpos, float), 6)
+    return hashlib.sha1(rounded.tobytes()).hexdigest()[:12]
+
+
 def run_id(cfg):
-    blob = json.dumps(identity_dict(cfg), sort_keys=True, separators=(",", ":"))
+    ident = identity_dict(cfg)
+    mdig = _matrix_digest(cfg)
+    if mdig:
+        ident["matrix"] = mdig
+    blob = json.dumps(ident, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(blob.encode()).hexdigest()[:12]
 
 
@@ -65,6 +79,8 @@ def run_paths(cfg, root="runs"):
         tag = f"N{cfg.target_n}"
     else:
         tag = "mu" + format(cfg.chem_pot, ".4g").replace("-", "m").replace(".", "p")
+    if _matrix_digest(cfg):
+        tag = "qa_" + tag      # quenched-annealed (frozen matrix present)
     d = os.path.join(root, f"{rid}__{tag}")
     return RunPaths(
         directory=d,
