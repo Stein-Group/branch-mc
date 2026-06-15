@@ -25,6 +25,13 @@ class ChainState:
     step: int
     rng: np.random.Generator
     counters: dict = field(default_factory=zero_counters)
+    # target-mu control (muVT only): `mu` is the live, adjusted chemical
+    # potential (None => use the fixed cfg.chem_pot, the default fixed-mu run);
+    # `n_history` is the rolling window of per-window N used for the running mean
+    # that the controller steers. Both are checkpointed so a resume continues
+    # the search rather than restarting it.
+    mu: float | None = None
+    n_history: list = field(default_factory=list)
 
     @classmethod
     def fresh(cls, dimension, seed=None):

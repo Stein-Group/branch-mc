@@ -75,12 +75,29 @@ class RunPaths:
 
 def run_paths(cfg, root="runs"):
     rid = run_id(cfg)
+    def _fmt(x):
+        return format(x, ".4g").replace("-", "m").replace(".", "p")
     if getattr(cfg, "ensemble_type", "muVT") == "NVT":
         tag = f"N{cfg.target_n}"
+    elif getattr(cfg, "target_count", None) is not None:
+        # target-mu control: name by the target (the swept axis), not mu (which
+        # is measured and identical across a target sweep). This makes the run
+        # dirs eyeball-distinguishable when sweeping target_N/eta/density.
+        tag = "tgtN" + _fmt(cfg.target_count)
     else:
-        tag = "mu" + format(cfg.chem_pot, ".4g").replace("-", "m").replace(".", "p")
+        tag = "mu" + _fmt(cfg.chem_pot)
     if _matrix_digest(cfg):
         tag = "qa_" + tag      # quenched-annealed (frozen matrix present)
+        # fold the matrix realization id into the name so a target sweep (same
+        # target, different matrices) gives eyeball-distinguishable dirs. Use the
+        # realization's source-dir name (e.g. ".../35baa13fed99__N507/traj...").
+        mc = getattr(cfg, "matrix_config", None)
+        if mc:
+            import os as _os
+            real = _os.path.basename(_os.path.dirname(_os.path.abspath(mc)))
+            real = real.split("__")[0] if real else ""   # the short hash part
+            if real:
+                tag = f"{tag}_{real[:8]}"
     d = os.path.join(root, f"{rid}__{tag}")
     return RunPaths(
         directory=d,

@@ -13,6 +13,7 @@ same id; a stale lock past the timeout is taken over.
 from __future__ import annotations
 import json
 import itertools
+import math
 import os
 import socket
 import time
@@ -22,7 +23,7 @@ from . import sim_setup, hash_fingerprint, io, MC_engine
 from .state import ChainState, zero_counters
 
 LOG_HEADER = ("#MC_cycle(M)  pckng_frctn  N  add_acc add_att add_stp "
-              "rm_acc rm_stp mv_acc mv_stp  wall_s")
+              "rm_acc rm_stp mv_acc mv_stp  wall_s  mu  avgN  density")
 
 
 def _init_config(cfg, rng):
@@ -138,7 +139,7 @@ def release_lock(paths):
 def _save(paths, cfg, state, params):
     io.save_checkpoint(paths, positions=state.positions, step=state.step,
                        rng=io.rng_state(state.rng), counters=state.counters,
-                       params=params)
+                       params=params, mu=state.mu, n_history=state.n_history)
 
 
 def _find_matrix_snapshot(params, root, dimension):
@@ -211,7 +212,9 @@ def run(params, root="runs"):
         else:
             gen = io.set_rng_state(np.random.default_rng(), ckpt["rng"])
             state = ChainState(positions=ckpt["positions"], step=int(ckpt["step"]),
-                               rng=gen, counters=dict(ckpt["counters"]))
+                               rng=gen, counters=dict(ckpt["counters"]),
+                               mu=ckpt.get("mu"),
+                               n_history=list(ckpt.get("n_history", [])))
             io.trim_log(paths.log, state.step / 1e6)
             if cfg.traj_every >= 1:
                 io.trim_trajectory(paths.trajectory, state.step)
@@ -227,6 +230,15 @@ def run(params, root="runs"):
         info = {"step": state.step, "mu": cfg.chem_pot,
                 "potential": cfg.potential_type, "box": cfg.box}
 
+        # target-mu control (muVT only): drive mu so the running-mean N hits
+        # cfg.target_count. state.mu carries the live mu (init from cfg on a
+        # fresh run; preserved across resume). state.n_history is the rolling
+        # window of N feeding the running mean the controller steers.
+        targeting = cfg.target_count is not None
+        if targeting and state.mu is None:
+            state.mu = cfg.chem_pot
+        V = cfg.total_volume
+
         win = 0
         while state.step < cfg.target_cycles:
             _t = time.perf_counter()
@@ -235,18 +247,35 @@ def run(params, root="runs"):
             for k, v in stats["counters"].items():
                 state.counters[k] += v
 
+            # running mean of N over the control window
+            state.n_history.append(stats["N"])
+            if len(state.n_history) > cfg.control_window:
+                state.n_history = state.n_history[-cfg.control_window:]
+            avg_n = sum(state.n_history) / len(state.n_history)
+
+            if targeting:
+                # Robbins-Monro update on log-N: mu += gamma * (lnN_target - lnN).
+                # Gain decays as gamma0/(1+win/tau) so mu converges and settles.
+                gamma = cfg.control_gain / (1.0 + win / cfg.control_gain_tau)
+                avg_safe = max(avg_n, 0.5)         # guard log at near-empty
+                state.mu += gamma * (math.log(cfg.target_count) - math.log(avg_safe))
+
+            cur_mu = state.mu if state.mu is not None else cfg.chem_pot
+
             if state.step >= cfg.burn_in:
                 cc = stats["counters"]
                 log.write(f"{state.step/1e6:.6f}  {stats['packing_fraction']:.8f}  "
                           f"{stats['N']}  {cc['add_accept']} {cc['add_attempt']} "
                           f"{cc['add_step']} {cc['remove_accept']} {cc['remove_step']} "
-                          f"{cc['move_accept']} {cc['move_step']}  {win_wall:.4f}")
+                          f"{cc['move_accept']} {cc['move_step']}  {win_wall:.4f}  "
+                          f"{cur_mu:.6f}  {avg_n:.4f}  {avg_n / V:.8f}")
 
             win += 1
             if win % cfg.checkpoint_every == 0:
                 _save(paths, cfg, state, params)
             if cfg.traj_every >= 1 and win % cfg.traj_every == 0:
                 info["step"] = state.step
+                info["mu"] = cur_mu
                 io.write_frame(paths, state.positions, two_dim=cfg.two_dim,
                                box=cfg.box, info=info, append=True)
 

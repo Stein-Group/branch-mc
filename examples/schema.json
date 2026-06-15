@@ -141,7 +141,7 @@
       "additionalProperties": false,
       "properties": {
         "mu": {
-          "description": "Chemical potential mu* (TOTAL: activity z = exp(beta*mu)). REQUIRED for muVT and QA; forbidden for NVT. QA may use mu < 0. SWEEPABLE: a list builds one run per value.",
+          "description": "Chemical potential mu* (TOTAL: activity z = exp(beta*mu)). REQUIRED for muVT and QA; forbidden for NVT. QA may use mu < 0. SWEEPABLE: a list builds one run per value. With a target, mu is an OPTIONAL starting seed (default: the ideal-gas guess ln(rho_target)).",
           "oneOf": [
             {
               "type": "number"
@@ -215,6 +215,57 @@
             }
           ],
           "description": "NVT only: converted to nearest integer N = round(eta * V / v_particle), then held exactly. SWEEPABLE."
+        },
+        "target_eta": {
+          "oneOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "minItems": 1
+            }
+          ],
+          "description": "muVT target control: drive mu until the running-mean packing fraction reaches this value. Mutually exclusive with mu(sweep) and the other targets. SWEEPABLE: a list runs one job per value (launch with gcmc.launcher). When swept against a matrix FOLDER, each value is paired by index with one realization matrix."
+        },
+        "target_density": {
+          "oneOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "minItems": 1
+            }
+          ],
+          "description": "muVT target control: drive mu until the running-mean reduced density rho*=N/V reaches this value. SWEEPABLE: a list runs one job per value (launch with gcmc.launcher). When swept against a matrix FOLDER, each value is paired by index with one realization matrix."
+        },
+        "target_N": {
+          "oneOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "minItems": 1
+            }
+          ],
+          "description": "muVT target control: drive mu until the running-mean particle count <N> reaches this value. SWEEPABLE: a list runs one job per value (launch with gcmc.launcher). When swept against a matrix FOLDER, each value is paired by index with one realization matrix."
         }
       }
     },
@@ -305,7 +356,23 @@
         },
         "matrix_config": {
           "type": "string",
-          "description": "REQUIRED iff ensemble.type='QA'; forbidden otherwise. Absolute path to the frozen matrix configuration (an NVT checkpoint.npz, .extxyz, or plain 'x y z' file). The fluid cannot overlap these obstacles, which are never inserted/deleted/moved/counted. The matrix content is folded into the run-id hash (distinct realizations -> distinct dirs) and snapshotted into the run directory as matrix.npz, so a resume is self-contained even if the source file moves. QA supports hard_core or LJ+branch, sampler rosenbluth/branch, and run.kind='single' only."
+          "description": "REQUIRED iff ensemble.type='QA'; forbidden otherwise. Absolute path to the frozen matrix configuration (an NVT checkpoint.npz, .extxyz, or plain 'x y z' file). The fluid cannot overlap these obstacles, which are never inserted/deleted/moved/counted. The matrix content is folded into the run-id hash (distinct realizations -> distinct dirs) and snapshotted into the run directory as matrix.npz, so a resume is self-contained even if the source file moves. QA supports hard_core or LJ+branch, sampler rosenbluth/branch, and run.kind='single' only. May also be a FOLDER of realizations (subdirs each with trajectory.extxyz or checkpoint.npz, or a flat folder of *.extxyz/*.npz): then a list target sweep pairs each swept value with one matrix by sorted index (16 targets -> 16 matrices -> 16 runs). The last frame of each trajectory.extxyz is used. A folder is only valid via gcmc.launcher, not a single `gcmc run`."
+        },
+        "control_gain": {
+          "type": "number",
+          "default": 0.5,
+          "description": "Robbins-Monro gain for muVT target control: mu += gain/(1+win/gain_tau) * (ln N_target - ln <N>) per window."
+        },
+        "control_gain_tau": {
+          "type": "number",
+          "default": 20.0,
+          "description": "Decay scale (in windows) of the target-control gain; larger = slower decay, more aggressive late correction."
+        },
+        "control_window": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 20,
+          "description": "Number of windows in the running mean of N that the target controller steers (and reports as avgN)."
         }
       }
     }

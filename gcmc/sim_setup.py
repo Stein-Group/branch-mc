@@ -133,6 +133,13 @@ class Config:
     # path (loaded by the runner); matrix_positions holds the loaded coordinates.
     matrix_config: str | None = None
     matrix_positions: object = None   # np.ndarray (n_matrix, dim) or None
+    # muVT target-mu control: drive mu so the running-mean N hits a target.
+    # target_count is the target <N> (from target_N / target_eta / target_density);
+    # None => ordinary fixed-mu muVT. The controller is Robbins-Monro on log-N.
+    target_count: float | None = None
+    control_gain: float = 0.5
+    control_gain_tau: float = 20.0
+    control_window: int = 20
 
     @property
     def box_dims(self):
@@ -193,8 +200,11 @@ def from_params(p):
     # ---- ensemble ----
     ens = p["ensemble"]
     _check(ens, {"mu", "sweep", "dimension", "box", "type",
-                 "N", "packing_fraction"}, {"dimension"})
+                 "N", "packing_fraction",
+                 "target_eta", "target_density", "target_N"}, {"dimension"})
     dim = int(ens["dimension"])
+    target_count = None   # set below iff a muVT target is requested
+    _target_spec = None   # (kind, value) for a muVT target, finalized post-volume
     if dim not in (2, 3):
         raise ValueError("dimension must be 2 or 3")
     two_dim = dim == 2
@@ -223,22 +233,42 @@ def from_params(p):
                 f"gcmc/launcher.py.")
         mu = 0.0   # unused under NVT; the prefactor cancels in repacking
     else:
-        has_mu, has_sweep = "mu" in ens, "sweep" in ens
+        # muVT: either a fixed `mu` (or a sweep), OR a target the controller
+        # drives mu toward: exactly one of target_eta / target_density / target_N.
         if "N" in ens or "packing_fraction" in ens:
             raise ValueError("'N'/'packing_fraction' are NVT-only; set ensemble.type='NVT'")
-        if has_mu and has_sweep:
-            raise ValueError("ensemble takes either 'mu' or 'sweep', not both")
-        if not has_mu and not has_sweep:
-            raise ValueError("ensemble needs 'mu' (one run) or 'sweep' (a batch)")
-        if isinstance(ens.get("mu"), list):
-            raise ValueError(
-                "ensemble.mu is a list (a sweep) but a single run got it "
-                "unexpanded. Launch sweeps with `python -m gcmc.launcher`; if "
-                "you did, gcmc/launcher.py on this machine is outdated.")
-        if has_sweep:
-            raise ValueError("this config has a 'sweep'; launch it with gcmc.launcher, "
-                             "which expands it into one run per mu")
-        mu = float(ens["mu"])
+        target_keys = [k for k in ("target_eta", "target_density", "target_N") if k in ens]
+        if len(target_keys) > 1:
+            raise ValueError(f"give only one target, got {target_keys}")
+        targeting = len(target_keys) == 1
+        has_mu, has_sweep = "mu" in ens, "sweep" in ens
+
+        if targeting:
+            if has_sweep:
+                raise ValueError("a target and a 'sweep' are mutually exclusive")
+            for k in ("target_eta", "target_density", "target_N"):
+                if isinstance(ens.get(k), list):
+                    raise ValueError(f"ensemble.{k} must be a single value, not a list")
+            # record the raw target; convert to a particle count <N> after the
+            # box volume is known (computed further below). Starting mu is set
+            # there too (explicit `mu` seed, or the ideal-gas guess).
+            _target_spec = target_keys[0], float(ens[target_keys[0]])
+            mu = float(ens["mu"]) if has_mu else None   # finalized after volume
+        else:
+            if has_mu and has_sweep:
+                raise ValueError("ensemble takes either 'mu' or 'sweep', not both")
+            if not has_mu and not has_sweep:
+                raise ValueError("ensemble needs 'mu', a target "
+                                 "(target_eta/target_density/target_N), or 'sweep'")
+            if isinstance(ens.get("mu"), list):
+                raise ValueError(
+                    "ensemble.mu is a list (a sweep) but a single run got it "
+                    "unexpanded. Launch sweeps with `python -m gcmc.launcher`; if "
+                    "you did, gcmc/launcher.py on this machine is outdated.")
+            if has_sweep:
+                raise ValueError("this config has a 'sweep'; launch it with gcmc.launcher, "
+                                 "which expands it into one run per mu")
+            mu = float(ens["mu"])
 
     # ---- auxiliary ----
     aux_block = p.get("auxiliary")
@@ -254,7 +284,8 @@ def from_params(p):
                  "traj_every", "checkpoint_every", "seed", "initial_config",
                  "matrix_config",
                  "radius", "move_factor", "upper_cutoff", "lower_cutoff", "no_neigh",
-                 "cell_length", "buffer", "x_spacing", "y_spacing"})
+                 "cell_length", "buffer", "x_spacing", "y_spacing",
+                 "control_gain", "control_gain_tau", "control_window"})
     if int(run.get("traj_every", 0)) < 0:
         raise ValueError("run.traj_every must be >= 0 (0 = save only the last "
                          "frame; N >= 1 = append every N windows)")
@@ -280,7 +311,7 @@ def from_params(p):
         raise ValueError("branch takes no auxiliary potential")
     if pmf and reweight:
         raise ValueError("reweight uses psi6, not a pmf auxiliary; remove the auxiliary block")
-    if not lj and mu < 0 and not qa:
+    if not lj and mu is not None and mu < 0 and not qa and _target_spec is None:
         # bulk hard-core fluids want mu >= 0; but a quenched-annealed run (frozen
         # matrix) lives at low fluid density where mu is naturally negative -- the
         # entire dilute branch of the adsorption isotherm. Allow it there.
@@ -385,6 +416,22 @@ def from_params(p):
                 raise ValueError("packing_fraction must be in [0, 1)")
             target_n = int(round(pf * total_vol / vol_mol))
 
+    # muVT target control: now that the box volume is known, convert the target
+    # to a particle count <N>, and finalize the starting mu (ideal-gas guess if
+    # the user gave no explicit seed).
+    if _target_spec is not None:
+        kind, val = _target_spec
+        if kind == "target_N":
+            target_count = val
+        elif kind == "target_eta":
+            target_count = val * total_vol / vol_mol
+        else:  # target_density (rho* = N / V)
+            target_count = val * total_vol
+        if target_count <= 0:
+            raise ValueError("the target must correspond to N > 0")
+        if mu is None:
+            mu = math.log(target_count / total_vol)   # ideal-gas cold start
+
     lj_tail_pref = None
     lj_tail_on = bool(pot.get("tail", True))
     if "tail" in pot and not lj:
@@ -445,6 +492,10 @@ def from_params(p):
     return Config(
         potential_type=ptype, sampler=sampler, dimension=dim, chem_pot=mu,
         ensemble_type=ens_type, target_n=target_n, box=box,
+        target_count=target_count,
+        control_gain=float(run.get("control_gain", 0.5)),
+        control_gain_tau=float(run.get("control_gain_tau", 20.0)),
+        control_window=int(run.get("control_window", 20)),
         cavity_radius=cav, trial_box_side=trial_box_side, trial_density=trial_density,
         depth=(0 if metropolis else int(smp.get("depth", 0))),
         branch=branch, metropolis=metropolis,

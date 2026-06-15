@@ -46,9 +46,12 @@ def set_rng_state(generator, state):
 
 
 # ---------------------------------------------------------------- checkpoint
-def save_checkpoint(paths, *, positions, step, rng, counters, params, schema=SCHEMA):
+def save_checkpoint(paths, *, positions, step, rng, counters, params,
+                    mu=None, n_history=None, schema=SCHEMA):
     """Atomic write: positions array plus a JSON metadata blob. Keeps the
-    previous checkpoint as .bak. `rng` is the generator state dict."""
+    previous checkpoint as .bak. `rng` is the generator state dict. `mu` and
+    `n_history` carry the target-mu controller state so a resume continues the
+    search rather than restarting it."""
     meta = json.dumps({
         "schema": int(schema),
         "step": int(step),
@@ -56,6 +59,8 @@ def save_checkpoint(paths, *, positions, step, rng, counters, params, schema=SCH
         "counters": counters,
         "rng": rng,
         "params": params,
+        "mu": mu,
+        "n_history": list(n_history) if n_history is not None else [],
     })
     # the temp name ends in .npz so np.savez never appends a suffix; a stale
     # temp from a killed job (old naming) is deleted, never promoted.
@@ -76,7 +81,8 @@ def _read_npz(path):
         meta = json.loads(str(data["meta"]))
     return {"positions": positions, "step": meta["step"], "n": meta["n"],
             "counters": meta["counters"], "rng": meta["rng"], "params": meta["params"],
-            "schema": meta["schema"]}
+            "schema": meta["schema"],
+            "mu": meta.get("mu"), "n_history": meta.get("n_history", [])}
 
 
 def load_checkpoint(paths):
@@ -269,7 +275,9 @@ def load_matrix(path, dimension):
         return np.ascontiguousarray(pos)
     if ext == ".extxyz":
         from ase.io import read as ase_read
-        atoms = ase_read(path, format="extxyz")
+        # take the LAST frame only (index="-1"): a matrix trajectory may have
+        # many frames but the frozen matrix is the final equilibrated config.
+        atoms = ase_read(path, index="-1", format="extxyz")
         return np.ascontiguousarray(np.asarray(atoms.get_positions(), float)[:, :dimension])
     # plain coordinate file (x y z per line), same as load_config_file
     return load_config_file(path, dimension)

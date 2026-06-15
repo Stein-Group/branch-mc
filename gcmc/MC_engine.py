@@ -112,7 +112,7 @@ def _advance_metropolis(state, cfg, potential):
     nn = cfg.no_neigh
     mf = cfg.move_factor
     beta = cfg.beta
-    mu = cfg.chem_pot
+    mu = state.mu if getattr(state, "mu", None) is not None else cfg.chem_pot
     V = cfg.total_volume
     hs = cfg.potential_type == "hard_sphere"
 
@@ -296,7 +296,7 @@ def advance(state, cfg, potential, weigher):
     gdict = cfg.gamma_dict
     beta = cfg.beta
     temp = cfg.temp
-    mu = cfg.chem_pot
+    mu = state.mu if getattr(state, "mu", None) is not None else cfg.chem_pot
     nvt = cfg.ensemble_type == "NVT"
     # quenched-annealed frozen matrix: obstacles that enter the overlap test but
     # are never inserted/deleted/moved/counted. Empty => ordinary bulk run.
@@ -466,9 +466,13 @@ def advance(state, cfg, potential, weigher):
             keep[chosen_idx] = False
             disk_rest = pos[keep]
 
-        if len(disk_rest) == 0:
-            # nothing left to weigh trials against; degenerate near N=1, never
-            # reached at production density. skip rather than crash.
+        if len(disk_rest) == 0 and not has_matrix:
+            # bulk run with nothing to weigh trials against (N==0, no matrix):
+            # the depth-0 path handles a first insertion, so skip here rather
+            # than divide by an empty reference.
+            continue
+        if len(disk_rest) == 0 and has_matrix and n_add == 0:
+            # pure deletion with no fluid left: nothing to remove.
             continue
         # trial molecules in the cavity
         trial_nums = rng.uniform(-cfg.cavity_radius, cfg.cavity_radius, size=(dim, n_trials))
