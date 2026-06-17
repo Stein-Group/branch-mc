@@ -50,8 +50,14 @@ _AXES = (("mu", "ensemble", "mu"),
          ("target_N", "ensemble", "target_N"),
          ("target_eta", "ensemble", "target_eta"),
          ("target_density", "ensemble", "target_density"),
+         ("depth", "sampler", "depth"),
+         ("seed", "run", "seed"),
          ("trial_density", "sampler", "trial_density"),
          ("trial_box_side", "sampler", "trial_box_side"))
+
+# nested pore axes (ensemble.pore.{H,R}); handled separately since they live one
+# level deeper than the flat _AXES entries.
+_PORE_AXES = (("poreH", "H"), ("poreR", "R"))
 
 
 def _as_list(v):
@@ -91,18 +97,33 @@ def expand_sweep(base):
         if key in sec:
             present.append((label, section, key))
             grids.append(_as_list(sec[key]))
+    pore = base.get("ensemble", {}).get("pore", {})
+    for label, key in _PORE_AXES:
+        if key in pore:
+            present.append((label, "ensemble.pore", key))   # nested marker
+            grids.append(_as_list(pore[key]))
     if not present:                       # nothing sweepable present: one run
         return [copy.deepcopy(base)], ["single"]
 
+    # only axes with more than one distinct value are "swept"; those name the
+    # run dirs. single-valued axes are still applied but kept out of the label.
+    varying = {i for i, g in enumerate(grids) if len({repr(x) for x in g}) > 1}
     combos, labels = [], []
     for values in itertools.product(*grids):
         p = copy.deepcopy(base)
         parts = []
-        for (label, section, key), val in zip(present, values):
-            p.setdefault(section, {})[key] = val
-            parts.append(f"{label}{val}")
+        for i, ((label, section, key), val) in enumerate(zip(present, values)):
+            if section == "ensemble.pore":
+                p.setdefault("ensemble", {}).setdefault("pore", {})[key] = val
+            else:
+                p.setdefault(section, {})[key] = val
+            if i in varying and section != "ensemble.pore":
+                parts.append(f"{label}{val}")   # pore size is in the dir prefix
+        lbl = "_".join(parts)
+        if lbl:
+            p.setdefault("run", {})["sweep_label"] = lbl
         combos.append(p)
-        labels.append("_".join(parts))
+        labels.append(lbl or "single")
 
     # matrix-folder pairing: if run.matrix_config is a FOLDER (not a file), pair
     # each swept run with one realization matrix from that folder, by index --

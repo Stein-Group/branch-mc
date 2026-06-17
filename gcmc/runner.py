@@ -26,6 +26,52 @@ LOG_HEADER = ("#MC_cycle(M)  pckng_frctn  N  add_acc add_att add_stp "
               "rm_acc rm_stp mv_acc mv_stp  wall_s  mu  avgN  density")
 
 
+
+def _inside_pore_seed(pt, cfg):
+    """Is a single point inside the hard pore (centre clearance 0.5)?"""
+    L = cfg.box
+    if cfg.pore_geometry == "slit":
+        z0 = (L - cfg.pore_H) / 2.0
+        return z0 + 0.5 <= pt[2] <= z0 + cfg.pore_H - 0.5
+    cx = cy = L / 2.0
+    import math as _m
+    return _m.hypot(pt[0] - cx, pt[1] - cy) <= cfg.pore_R - 0.5
+
+
+def _save_pore_geometry(cfg, directory):
+    """Write the wall geometry as an extxyz of marker points so the pore can be
+    loaded next to the fluid trajectory in OVITO. Slit: two wall planes tiled
+    with markers; cylinder: the lateral surface tiled in (theta, z). Markers use
+    element 'W' (wall) so they are visually distinct from the fluid."""
+    import numpy as _np, os as _os
+    L = cfg.box
+    pts = []
+    n = 40
+    if cfg.pore_geometry == "slit":
+        z0 = (L - cfg.pore_H) / 2.0
+        xs = _np.linspace(0, L, n); ys = _np.linspace(0, L, n)
+        for zc in (z0, z0 + cfg.pore_H):                 # both wall surfaces
+            for x in xs:
+                for y in ys:
+                    pts.append((x, y, zc))
+    else:
+        R = cfg.pore_R; cx = cy = L / 2.0
+        th = _np.linspace(0, 2 * _np.pi, n, endpoint=False)
+        zs = _np.linspace(0, L, n)
+        for z in zs:
+            for t in th:
+                pts.append((cx + R * _np.cos(t), cy + R * _np.sin(t), z))
+    pts = _np.asarray(pts, float)
+    path = _os.path.join(directory, "pore_geometry.extxyz")
+    with open(path, "w") as f:
+        f.write(f"{len(pts)}\n")
+        f.write(f'Lattice="{L} 0 0 0 {L} 0 0 0 {L}" '
+                f'Properties=species:S:1:pos:R:3 geometry={cfg.pore_geometry}\n')
+        for p in pts:
+            f.write(f"W {p[0]:.4f} {p[1]:.4f} {p[2]:.4f}\n")
+    return path
+
+
 def _init_config(cfg, rng):
     # start from a pre-equilibrated configuration when one is given, else one
     # seed molecule, as the original starts (insertion needs an occupied
@@ -41,6 +87,24 @@ def _init_config(cfg, rng):
     # safe across SLURM / subprocess working directories.
     spec = cfg.initial_config
     if not spec:
+        if getattr(cfg, "pore_geometry", None) is not None:
+            # confined pore: seed a few non-overlapping particles INSIDE the pore
+            # so the depth>=1 proposal has an anchor (it cannot grow from N=0).
+            from scipy.spatial import cKDTree as _KD
+            box = cfg.box; dim = cfg.dimension
+            placed = []
+            for _ in range(20 * 300):
+                if len(placed) >= 20:
+                    break
+                pt = rng.uniform(0, box, dim)
+                if not _inside_pore_seed(pt, cfg):
+                    continue
+                if placed:
+                    tp = _KD(np.array(placed) % box, boxsize=[box] * dim)
+                    if tp.query(pt % box, k=1)[0] < cfg.diameter:
+                        continue
+                placed.append(pt)
+            return np.array(placed) if placed else np.empty((0, dim))
         mpos = getattr(cfg, "matrix_positions", None)
         if mpos is not None and len(mpos) > 0 and getattr(cfg, "target_n", None) is None:
             # quenched-annealed muVT: seed a few valid fluid particles (the
@@ -168,6 +232,14 @@ def run(params, root="runs"):
         import dataclasses, os
         import numpy as _np
         mpath = os.path.abspath(cfg.matrix_config)
+        if os.path.isdir(mpath):
+            raise IsADirectoryError(
+                f"run.matrix_config is a folder ({mpath}). A folder of matrix "
+                f"realizations is only valid as a SWEEP: give a list target "
+                f"(target_N/target_eta/target_density) and launch with "
+                f"`python -m gcmc.launcher`, which pairs each swept value with one "
+                f"matrix from the folder. For a single run, point matrix_config "
+                f"at one trajectory.extxyz / checkpoint.npz file.")
         # On a fresh launch we load the external matrix to compute the
         # content-addressed run dir, then snapshot it inside. On a resume the
         # snapshot in the (params-determined) run dir is authoritative, so the
@@ -201,6 +273,8 @@ def run(params, root="runs"):
     else:
         paths = hash_fingerprint.run_paths(cfg, root)
         io.ensure_run_dir(paths, params)
+        if getattr(cfg, "pore_geometry", None) is not None:
+            _save_pore_geometry(cfg, paths.directory)
     acquire_lock(paths)
 
     try:

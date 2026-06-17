@@ -36,6 +36,36 @@ from .samplers import branch as branch_mod
 from .state import zero_counters
 
 
+
+def _pore_bounds(cfg):
+    """Centre-accessible bounds for a hard pore inside the cubic cell of side
+    cfg.box. Returns (kind, params). The slab/cylinder is centred in the cell."""
+    L = cfg.box
+    if cfg.pore_geometry == "slit":
+        z0 = (L - cfg.pore_H) / 2.0
+        return ("slit", z0 + 0.5, z0 + cfg.pore_H - 0.5)          # zmin, zmax for centres
+    return ("cylinder", L / 2.0, cfg.pore_R - 0.5)                 # axis centre, rmax for centres
+
+
+def _inside_pore(coords, cfg):
+    """Boolean mask: which centres satisfy the hard wall. coords is (M, dim) or
+    a single (dim,) point. Hard spheres (radius 0.5) must keep their centres off
+    the wall by 0.5."""
+    if cfg.pore_geometry is None:
+        return None
+    a = np.atleast_2d(np.asarray(coords, float))
+    kind = cfg.pore_geometry
+    if kind == "slit":
+        L = cfg.box; z0 = (L - cfg.pore_H) / 2.0
+        z = a[:, 2]
+        ok = (z >= z0 + 0.5) & (z <= z0 + cfg.pore_H - 0.5)
+    else:
+        L = cfg.box; cx = cy = L / 2.0
+        r = np.hypot(a[:, 0] - cx, a[:, 1] - cy)
+        ok = r <= (cfg.pore_R - 0.5)
+    return ok if np.ndim(coords) > 1 else bool(ok[0])
+
+
 def make_weigher(cfg, potential):
     if cfg.potential_type == "hard_sphere":
         return UniformWeigher()
@@ -134,6 +164,8 @@ def _advance_metropolis(state, cfg, potential):
             without = np.delete(pos, j, axis=0)
             disp = mf * (rng.uniform(0, 1, dim) - 0.5)
             moved = (old + disp) % side
+            if cfg.pore_geometry is not None and not _inside_pore(moved, cfg):
+                continue                      # move into the wall: rejected
             if len(without) == 0:
                 pos = moved.reshape(1, -1)
                 c["move_accept"] += 1
@@ -162,6 +194,8 @@ def _advance_metropolis(state, cfg, potential):
             c["add_attempt"] += 1
             step += 1
             trial = rng.uniform(0, side, dim)
+            if cfg.pore_geometry is not None and not _inside_pore(trial, cfg):
+                continue                      # trial hit the wall: failed insertion
             if N > 0:
                 tree = cKDTree(pos, boxsize=box)
                 d = neighbour_dists(trial, tree, nn)
@@ -341,6 +375,8 @@ def advance(state, cfg, potential, weigher):
                 ranf3 = (ranf1 + ranf2) % 1
                 mz = (old[2] + mf * (ranf3 - 0.5)) % side
                 moved = np.array([mx, my, mz])
+            if cfg.pore_geometry is not None and not _inside_pore(moved, cfg):
+                continue                      # move into the wall: rejected
             # translation overlap test must also see the frozen matrix, so a
             # fluid particle cannot move onto an obstacle. Matrix appended after
             # `without`; it is never selected as the moved particle.
@@ -415,10 +451,10 @@ def advance(state, cfg, potential, weigher):
                 idx_cav = np.empty(0, dtype=int)
                 n_cav = 0
         else:
-            if choice == "add" or lj:
+            if choice == "add":
                 center = rng.uniform(0, side, size=3)[:dim]
-            else:   # remove or repack (non-lj): centre on an existing particle
-                center = pos[int(rng.choice(N))]
+            else:   # remove or repack: centre on an existing particle so the
+                center = pos[int(rng.choice(N))]   # cavity is never empty
             anchor = -1
             idx_cav = geometry.indices_in_cavity(pos, center,
                                                  cfg.cavity_radius, side, two_d)
@@ -494,7 +530,9 @@ def advance(state, cfg, potential, weigher):
         # is all the downstream weight/selection logic ever indexes into.
         excl = np.append(disk_rest, matrix, axis=0) if has_matrix else disk_rest
         tree = cKDTree(excl, boxsize=box)
-        raw = geometry.find_neighbors(tree, trials, lower, uc, nn, keep_mask=keep_mask)
+        pore_valid = _inside_pore(trials, cfg) if cfg.pore_geometry is not None else None
+        raw = geometry.find_neighbors(tree, trials, lower, uc, nn,
+                                      keep_mask=keep_mask, valid=pore_valid)
         if raw is None:
             if n_add != 0:
                 continue       # nothing to insert from: equivalent to rejecting

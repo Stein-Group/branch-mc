@@ -30,6 +30,7 @@ _IDENTITY_FIELDS = (
     "trial_density", "depth", "branch", "use_depth", "move_factor",
     "temp", "rc", "eta", "gamma_max", "delta_eta", "lower_cutoff",
     "upper_cutoff", "no_neigh", "ensemble_type", "target_n",
+    "pore_geometry", "pore_H", "pore_R",
 )
 
 
@@ -77,15 +78,29 @@ def run_paths(cfg, root="runs"):
     rid = run_id(cfg)
     def _fmt(x):
         return format(x, ".4g").replace("-", "m").replace(".", "p")
-    if getattr(cfg, "ensemble_type", "muVT") == "NVT":
+    # The eyeball tag is the parameter being swept. The launcher injects
+    # cfg.sweep_label naming the varying axis/axes (e.g. "mu4.3", "depth3",
+    # "target_N256", "pore.H7"); use it for ANY mode. Single (non-swept) runs
+    # have no label, so fall back to the ensemble's natural variable.
+    label = getattr(cfg, "sweep_label", None)
+    confined = getattr(cfg, "pore_geometry", None) is not None
+    if label:
+        tag = label.replace("ensemble.", "").replace("sampler.", "").replace("run.", "")
+        tag = tag.replace("-", "m").replace(".", "p")
+    elif getattr(cfg, "ensemble_type", "muVT") == "NVT":
         tag = f"N{cfg.target_n}"
     elif getattr(cfg, "target_count", None) is not None:
-        # target-mu control: name by the target (the swept axis), not mu (which
-        # is measured and identical across a target sweep). This makes the run
-        # dirs eyeball-distinguishable when sweeping target_N/eta/density.
         tag = "tgtN" + _fmt(cfg.target_count)
+    elif confined:
+        tag = ""                       # the pore prefix below is the descriptor
     else:
         tag = "mu" + _fmt(cfg.chem_pot)
+    if confined:
+        # prefix the pore geometry+size so confined runs are self-describing
+        g = cfg.pore_geometry
+        sz = _fmt(cfg.pore_H) if g == "slit" else _fmt(cfg.pore_R)
+        prefix = f"{'slit_H' if g=='slit' else 'cyl_R'}{sz}"
+        tag = f"{prefix}_{tag}" if tag else prefix
     if _matrix_digest(cfg):
         tag = "qa_" + tag      # quenched-annealed (frozen matrix present)
         # fold the matrix realization id into the name so a target sweep (same

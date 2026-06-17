@@ -140,6 +140,12 @@ class Config:
     control_gain: float = 0.5
     control_gain_tau: float = 20.0
     control_window: int = 20
+    sweep_label: str | None = None       # tag from the launcher: the swept axis
+    # confinement (ensemble_type == "confined"): hard slit or cylinder pore
+    pore_geometry: str | None = None     # "slit" | "cylinder" | None
+    pore_H: float | None = None          # slit gap (z), wall surfaces at 0 and H
+    pore_R: float | None = None          # cylinder radius (axis along z, at centre)
+    pore_axis_len: float | None = None   # cylinder axial length (periodic z)
 
     @property
     def box_dims(self):
@@ -201,18 +207,58 @@ def from_params(p):
     ens = p["ensemble"]
     _check(ens, {"mu", "sweep", "dimension", "box", "type",
                  "N", "packing_fraction",
-                 "target_eta", "target_density", "target_N"}, {"dimension"})
+                 "target_eta", "target_density", "target_N", "pore"}, {"dimension"})
     dim = int(ens["dimension"])
     target_count = None   # set below iff a muVT target is requested
     _target_spec = None   # (kind, value) for a muVT target, finalized post-volume
+    _pore_geometry = _pore_H = _pore_R = _pore_axis_len = None
     if dim not in (2, 3):
         raise ValueError("dimension must be 2 or 3")
     two_dim = dim == 2
     ens_type = ens.get("type", "muVT")
-    if ens_type not in ("muVT", "NVT", "QA"):
-        raise ValueError("ensemble.type must be 'muVT', 'NVT', or 'QA'")
+    if ens_type not in ("muVT", "NVT", "QA", "confined"):
+        raise ValueError("ensemble.type must be 'muVT', 'NVT', 'QA', or 'confined'")
     nvt = ens_type == "NVT"
     qa = ens_type == "QA"
+    confined = ens_type == "confined"
+    if confined:
+        # hard slit or cylinder pore. muVT physics (give mu, or a target) plus a
+        # one-body hard-wall constraint. The pore is the only external field;
+        # rejects a matrix (no fluid-in-matrix-in-pore here). 3D only.
+        if "pore" not in ens:
+            raise ValueError("ensemble.type='confined' requires an ensemble.pore block")
+        if two_dim:
+            raise ValueError("confined pores are 3D only")
+        if "matrix_config" in p.get("run", {}):
+            raise ValueError("a pore and a QA matrix cannot be combined")
+        pore = ens["pore"]
+        _pore_geometry = pore.get("geometry")
+        if _pore_geometry == "slit":
+            _pore_H = float(pore["H"])           # gap in z; walls at 0 and H
+            if _pore_H <= 1.0:
+                raise ValueError("slit gap H must exceed the sphere diameter (1)")
+        elif _pore_geometry == "cylinder":
+            _pore_R = float(pore["R"])           # radius; axis along z at centre
+            _pore_axis_len = float(pore.get("L_z", ens["box"]))
+            if 2 * _pore_R <= 1.0:
+                raise ValueError("cylinder diameter 2R must exceed the sphere diameter (1)")
+        else:
+            raise ValueError("ensemble.pore.geometry must be 'slit' or 'cylinder'")
+        # the wall lives inside the cubic periodic cell of side `box`; require a
+        # forbidden margin >= 1 sigma so periodic images never interact across
+        # the wall (then the existing cubic-periodic neighbour tree is exact and
+        # no per-axis box change is needed).
+        L = float(ens["box"])
+        if _pore_geometry == "slit" and _pore_H > L - 1.0:
+            raise ValueError(f"slit gap H={_pore_H} must be <= box-1={L-1} so the "
+                             f"forbidden margin separates periodic z-images")
+        if _pore_geometry == "cylinder" and 2 * _pore_R > L - 1.0:
+            raise ValueError(f"cylinder diameter 2R={2*_pore_R} must be <= box-1={L-1} "
+                             f"so the forbidden margin separates periodic x,y-images")
+        _pore_axis_len = L     # cubic cell: cylinder axial period = box
+    if "pore" in ens and not confined:
+        raise ValueError("ensemble.pore is only valid with ensemble.type='confined'")
+
     if nvt:
         # NVT: fixed particle number, no chemical potential. Target given as an
         # exact integer N, or as a packing fraction converted to the nearest
@@ -285,7 +331,8 @@ def from_params(p):
                  "matrix_config",
                  "radius", "move_factor", "upper_cutoff", "lower_cutoff", "no_neigh",
                  "cell_length", "buffer", "x_spacing", "y_spacing",
-                 "control_gain", "control_gain_tau", "control_window"})
+                 "control_gain", "control_gain_tau", "control_window",
+                 "sweep_label", "matrix_config"})
     if int(run.get("traj_every", 0)) < 0:
         raise ValueError("run.traj_every must be >= 0 (0 = save only the last "
                          "frame; N >= 1 = append every N windows)")
@@ -311,7 +358,7 @@ def from_params(p):
         raise ValueError("branch takes no auxiliary potential")
     if pmf and reweight:
         raise ValueError("reweight uses psi6, not a pmf auxiliary; remove the auxiliary block")
-    if not lj and mu is not None and mu < 0 and not qa and _target_spec is None:
+    if not lj and mu is not None and mu < 0 and not qa and not confined and _target_spec is None:
         # bulk hard-core fluids want mu >= 0; but a quenched-annealed run (frozen
         # matrix) lives at low fluid density where mu is naturally negative -- the
         # entire dilute branch of the adsorption isotherm. Allow it there.
@@ -524,4 +571,7 @@ def from_params(p):
         checkpoint_every=int(run.get("checkpoint_every", 1)),
         initial_config=run.get("initial_config"),
         matrix_config=run.get("matrix_config"),
+        sweep_label=run.get("sweep_label"),
+        pore_geometry=_pore_geometry, pore_H=_pore_H, pore_R=_pore_R,
+        pore_axis_len=_pore_axis_len,
     )
