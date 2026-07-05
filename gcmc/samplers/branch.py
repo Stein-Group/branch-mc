@@ -241,21 +241,20 @@ def count_and_sample_branch(centers, k, overlap_distance, *, box_lengths):
 # ---------------------------------------------------------------------------
 
 def _build_band_adj(centers, lower, upper, box):
-    """Edge iff lower <= dist <= upper (minimum image). Returns bool adjacency."""
+    """Edge iff dist >= lower (minimum image). NO upper cutoff -- the exact same
+    rule as the hard-disk graph (_build_adj); `upper` is kept for signature
+    compatibility but ignored. Two points are connected unless they are closer
+    than `lower` (the LJ repulsive floor, 0.9), mirroring the HS non-overlap
+    graph (floor = diameter)."""
     n = len(centers)
     shifted = np.mod(centers, box)
     tree = KDTree(shifted, boxsize=box)
-    near = tree.query_pairs(r=upper, output_type="ndarray")
-    adj = np.zeros((n, n), dtype=bool)
-    if len(near) > 0:
-        # filter the within-upper pairs down to those also >= lower
-        d = np.linalg.norm(
-            (shifted[near[:, 0]] - shifted[near[:, 1]]
-             - box * np.round((shifted[near[:, 0]] - shifted[near[:, 1]]) / box)),
-            axis=1)
-        keep = near[d >= lower]
-        adj[keep[:, 0], keep[:, 1]] = True
-        adj[keep[:, 1], keep[:, 0]] = True
+    pairs = tree.query_pairs(r=lower - 1e-12, output_type="ndarray")  # too-close pairs
+    adj = np.ones((n, n), dtype=bool)
+    np.fill_diagonal(adj, False)
+    if len(pairs) > 0:
+        adj[pairs[:, 0], pairs[:, 1]] = False
+        adj[pairs[:, 1], pairs[:, 0]] = False
     return adj
 
 

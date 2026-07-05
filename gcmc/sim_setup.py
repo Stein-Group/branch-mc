@@ -504,6 +504,28 @@ def from_params(p):
     else:
         ptype = "hard_sphere"
 
+    # Soft-potential branch with a too-small cavity is biased. The depth>=1
+    # coupled move inserts a (depth+1)-particle cluster into the cavity; a small
+    # cavity forces those particles together so their mutual interaction never
+    # decorrelates and the simultaneous clique weight becomes a correlated
+    # multiple-trial estimate -- invisible to a hard-core count (HS branch is
+    # exact at every depth and cavity size) but it pushes a soft density up.
+    # Validated on the LJ EOS (T*=1.5): +7.7% (depth 1) / +6% (depth 2) at
+    # trial_box_side=1.0, gone once the cluster can spread past rc (depth 1 flat
+    # from ~2.0, depth 2 from ~2.5 = upper_cutoff). Rosenbluth (depth 0) is exact
+    # at any cavity size. Scoped to ljbranch: ljaux is count-based, not affected.
+    if ptype == "ljbranch" and int(smp.get("depth", 0)) >= 1 and trial_box_side < uc:
+        import warnings
+        _d = int(smp.get("depth", 0))
+        warnings.warn(
+            f"ljbranch depth {_d} with trial_box_side={trial_box_side:g} < "
+            f"upper_cutoff={uc:g}: the inserted {_d + 1}-particle cluster is "
+            f"confined below the interaction range, so the clique weight biases "
+            f"the density high (LJ EOS: +6-8% at trial_box_side=1.0, converged "
+            f"from both directions). Set trial_box_side >= {uc:g} so the cluster "
+            f"decorrelates; deeper clusters may need a larger cavity still.",
+            UserWarning)
+
     has_matrix_cfg = run.get("matrix_config") is not None
     if qa and not has_matrix_cfg:
         raise ValueError(
