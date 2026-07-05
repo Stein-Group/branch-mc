@@ -95,7 +95,7 @@ mo = float(oeta[len(oeta) // 3:].mean())
 sys.argv, old = old_argv, None
 os.chdir(old_cwd); sys.path[:] = old_path
 
-from gcmc import config, engine          # noqa: E402
+from gcmc import sim_setup as config, MC_engine as engine          # noqa: E402
 from gcmc.state import ChainState        # noqa: E402
 
 cfg = config.from_params({"potential": {"main": "hard_core"},

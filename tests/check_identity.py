@@ -9,7 +9,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
-from gcmc import config, identity  # noqa: E402
+from gcmc import sim_setup as config, hash_fingerprint as identity  # noqa: E402
 
 BASE = {
     "potential": {"main": "hard_core"},

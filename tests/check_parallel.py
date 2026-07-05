@@ -18,8 +18,8 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
 
-from gcmc.config import from_params           # noqa: E402
-from gcmc import parallel, engine             # noqa: E402
+from gcmc.sim_setup import from_params           # noqa: E402
+from gcmc import parallel, MC_engine as engine             # noqa: E402
 from gcmc.state import ChainState, zero_counters  # noqa: E402
 
 MU, K, CAVR, WIN, NW = 1.0, 20, 2.5, 400, 42

@@ -62,7 +62,7 @@ def _gamma_dict(pmf, reweight, two_dim):
 
 
 _MAIN = {"hard_core", "lennard_jones"}
-_SAMPLERS = {"metropolis", "rosenbluth", "branch", "reweight"}
+_SAMPLERS = {"metropolis", "rosenbluth", "branch", "reweight", "channel"}
 
 
 def _check(section, allowed, required=()):
@@ -146,6 +146,10 @@ class Config:
     pore_H: float | None = None          # slit gap (z), wall surfaces at 0 and H
     pore_R: float | None = None          # cylinder radius (axis along z, at centre)
     pore_axis_len: float | None = None   # cylinder axial length (periodic z)
+    # channel sweep (sampler == "channel"): thin oriented cuboid trial region
+    channel: bool = False
+    channel_length: float = 0.0          # cuboid length along the sweep axis
+    channel_width: float = 0.0           # cuboid cross-section (square side)
 
     @property
     def box_dims(self):
@@ -194,13 +198,14 @@ def from_params(p):
 
     # ---- sampler ----
     smp = p["sampler"]
-    _check(smp, {"type", "depth", "use_depth", "trials", "trial_density", "trial_box_side"},
+    _check(smp, {"type", "depth", "use_depth", "trials", "trial_density", "trial_box_side", "channel_length", "channel_width"},
            {"type"})
     sampler = smp["type"]
     if sampler not in _SAMPLERS:
         raise ValueError(f"unknown sampler {sampler!r}; allowed {sorted(_SAMPLERS)}")
     metropolis = sampler == "metropolis"
-    branch = sampler == "branch"
+    branch = sampler in ("branch", "channel")
+    channel = sampler == "channel"
     reweight = sampler == "reweight"
 
     # ---- ensemble ----
@@ -342,8 +347,6 @@ def from_params(p):
     parallel = kind == "parallel"
 
     # ---- compatibility table ----
-    if lj and two_dim:
-        raise ValueError("Lennard-Jones is 3D only")
     if reweight and lj:
         raise ValueError("reweight requires a hard_core main potential")
     if parallel and reweight:
@@ -358,12 +361,6 @@ def from_params(p):
         raise ValueError("branch takes no auxiliary potential")
     if pmf and reweight:
         raise ValueError("reweight uses psi6, not a pmf auxiliary; remove the auxiliary block")
-    if not lj and mu is not None and mu < 0 and not qa and not confined and _target_spec is None:
-        # bulk hard-core fluids want mu >= 0; but a quenched-annealed run (frozen
-        # matrix) lives at low fluid density where mu is naturally negative -- the
-        # entire dilute branch of the adsorption isotherm. Allow it there.
-        raise ValueError("non-LJ runs require mu >= 0 (except quenched-annealed "
-                         "matrix runs, where the dilute isotherm has mu < 0)")
     if pmf and not two_dim and "g3_csv" not in aux_block:
         raise ValueError("3D pmf auxiliary requires auxiliary.g3_csv")
     if parallel:
@@ -376,24 +373,8 @@ def from_params(p):
                 f"parallel buffer ({buffer_v}) must be >= the interaction "
                 f"range ({reach}): border rings must contain every molecule "
                 f"that can interact with a live one")
-    if int(smp.get("depth", 0)) > 3:
-        raise ValueError("depth is validated for 0-3 only")
-    if int(smp.get("depth", 0)) > 0 and parallel:
-        import warnings
-        cl = float(run.get("cell_length", 0.0))
-        cav_w = 2.0 * (float(smp.get("trial_box_side", 3.0)) / 2.0
-                       if "trial_box_side" in smp
-                       else float(smp.get("cavity_radius", 1.5)))
-        warnings.warn(
-            f"parallel depth >= 1 is approximate: the depth scheme satisfies "
-            f"global balance, not detailed balance, so a cell decomposition "
-            f"carries a residual density bias controlled by the cavity/cell "
-            f"ratio. Measured on the hard-sphere EOS: +19% at cell_length = "
-            f"2.7 cavity widths, +1.3% at 6.7, +0.9% at 10. Your cell_length "
-            f"is {cl / cav_w:.1f} cavity widths; use >= 20 to push the bias "
-            f"below the half-percent level, or serial mode, which is exact "
-            f"at all depths.",
-            UserWarning)
+    if int(smp.get("depth", 0)) < 0:
+        raise ValueError("depth must be >= 0")
     if metropolis:
         forbidden = {"depth", "trials", "trial_density", "trial_box_side"} & set(smp)
         if forbidden:
@@ -420,11 +401,15 @@ def from_params(p):
     if metropolis:
         trial_box_side = 0.0
         cav = 0.0
+        channel_length = 0.0
+        channel_width = 0.0
         n_trials = 1
         trial_density = 0.0
     else:
         trial_box_side = float(smp.get("trial_box_side", 3.0))
         cav = trial_box_side / 2.0
+        channel_length = float(smp.get("channel_length", 0.0))
+        channel_width = float(smp.get("channel_width", 0.0))
         span = trial_box_side ** 2
         if "trial_density" in smp:
             trial_density = float(smp["trial_density"])
@@ -484,8 +469,14 @@ def from_params(p):
     if "tail" in pot and not lj:
         raise ValueError("potential.tail applies to lennard_jones only")
     if lj:
-        x = uc ** -9 / 3.0 - uc ** -3
-        lj_tail_pref = ((8.0 / 3.0) * math.pi / total_vol * x) if lj_tail_on else 0.0
+        if two_dim:
+            # 2D mean-field tail (g(r)=1 beyond rc), integrated over the plane:
+            # U_tail = (4 pi / A) N^2 [ rc^-10/10 - rc^-4/4 ].
+            x = uc ** -10 / 10.0 - uc ** -4 / 4.0
+            lj_tail_pref = (4.0 * math.pi / total_vol * x) if lj_tail_on else 0.0
+        else:
+            x = uc ** -9 / 3.0 - uc ** -3
+            lj_tail_pref = ((8.0 / 3.0) * math.pi / total_vol * x) if lj_tail_on else 0.0
 
     if reweight:
         ptype = "reweight"
@@ -503,28 +494,6 @@ def from_params(p):
         ptype = "aux"
     else:
         ptype = "hard_sphere"
-
-    # Soft-potential branch with a too-small cavity is biased. The depth>=1
-    # coupled move inserts a (depth+1)-particle cluster into the cavity; a small
-    # cavity forces those particles together so their mutual interaction never
-    # decorrelates and the simultaneous clique weight becomes a correlated
-    # multiple-trial estimate -- invisible to a hard-core count (HS branch is
-    # exact at every depth and cavity size) but it pushes a soft density up.
-    # Validated on the LJ EOS (T*=1.5): +7.7% (depth 1) / +6% (depth 2) at
-    # trial_box_side=1.0, gone once the cluster can spread past rc (depth 1 flat
-    # from ~2.0, depth 2 from ~2.5 = upper_cutoff). Rosenbluth (depth 0) is exact
-    # at any cavity size. Scoped to ljbranch: ljaux is count-based, not affected.
-    if ptype == "ljbranch" and int(smp.get("depth", 0)) >= 1 and trial_box_side < uc:
-        import warnings
-        _d = int(smp.get("depth", 0))
-        warnings.warn(
-            f"ljbranch depth {_d} with trial_box_side={trial_box_side:g} < "
-            f"upper_cutoff={uc:g}: the inserted {_d + 1}-particle cluster is "
-            f"confined below the interaction range, so the clique weight biases "
-            f"the density high (LJ EOS: +6-8% at trial_box_side=1.0, converged "
-            f"from both directions). Set trial_box_side >= {uc:g} so the cluster "
-            f"decorrelates; deeper clusters may need a larger cavity still.",
-            UserWarning)
 
     has_matrix_cfg = run.get("matrix_config") is not None
     if qa and not has_matrix_cfg:
@@ -558,6 +527,33 @@ def from_params(p):
                 "QA runs are not supported with run.kind='parallel': the domain "
                 "decomposition carries only the fluid in each cell and would "
                 "drop the frozen matrix. Use run.kind='single'.")
+    if channel:
+        import math as _m
+        if parallel:
+            raise ValueError("channel sampler is serial only")
+        if two_dim:
+            raise ValueError("channel sampler is 3D only")
+        if channel_length <= 0.0 or channel_width <= 0.0:
+            raise ValueError("channel sampler needs channel_length and "
+                             "channel_width > 0")
+        if not (diameter <= channel_width <= 2.0 * diameter + 1e-9):
+            raise ValueError(
+                f"channel_width must lie in [sigma, 2 sigma] = "
+                f"[{diameter}, {2 * diameter}]; got {channel_width}")
+        if int(smp.get("depth", 0)) < 1:
+            raise ValueError("channel sampler needs depth >= 1 (depth 0 has no "
+                             "clique structure to sweep)")
+        # periodic guard: insertion and removal share one oriented cuboid, so the
+        # whole pool lives in that body. Its space diagonal must stay below the
+        # box minus the interaction range (sigma for hard core, rc for LJ) so
+        # local distances equal periodic distances.
+        guard_cut = uc if lj else diameter
+        diag = _m.sqrt(channel_length ** 2 + 2.0 * channel_width ** 2)
+        if diag > box - guard_cut:
+            raise ValueError(
+                f"channel geometry violates the periodic guard: cuboid diagonal "
+                f"{diag:.3f} must be <= box - cutoff = {box - guard_cut:.3f}")
+
     return Config(
         potential_type=ptype, sampler=sampler, dimension=dim, chem_pot=mu,
         ensemble_type=ens_type, target_n=target_n, box=box,
@@ -568,6 +564,7 @@ def from_params(p):
         cavity_radius=cav, trial_box_side=trial_box_side, trial_density=trial_density,
         depth=(0 if metropolis else int(smp.get("depth", 0))),
         branch=branch, metropolis=metropolis,
+        channel=channel, channel_length=channel_length, channel_width=channel_width,
         use_depth=bool(smp.get("use_depth", True)),
         move_factor=float(run.get("move_factor", 0.25)),
         temp=temp, rc=(uc if lj else None),

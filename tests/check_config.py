@@ -48,7 +48,7 @@ if MODE == "aux3d":
 import cav_n_d_3d_g3_LJ as orig  # noqa: E402
 
 sys.path.insert(0, os.path.join(HERE, ".."))
-from gcmc import config  # noqa: E402
+from gcmc import sim_setup as config  # noqa: E402
 
 cfg = config.from_params(PARAMS[MODE])
 

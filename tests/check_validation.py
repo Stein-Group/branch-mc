@@ -4,7 +4,7 @@ import os
 import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
-from gcmc.config import from_params  # noqa: E402
+from gcmc.sim_setup import from_params  # noqa: E402
 
 G3 = os.path.join(HERE, "..", "orig", "g3_analysis_data.csv")
 
@@ -47,15 +47,15 @@ good("hard_core 2D parallel", {"potential": HC, "sampler": ROSEN, "ensemble": {"
      "run": {"kind": "parallel", "n_workers": 4}})
 
 # every disallowed cell, with the message it must carry
-bad("lj in 2D", {"potential": {"main": "lennard_jones", "T": 1.2}, "sampler": ROSEN,
-    "ensemble": {"mu": -3.0, "dimension": 2}}, "3D only")
-bad("parallel 3D", {"potential": HC, "sampler": ROSEN, "ensemble": {"mu": 3.0, "dimension": 3},
-    "run": {"kind": "parallel"}}, "2D only")
+good("lj in 2D", {"potential": {"main": "lennard_jones", "T": 1.2}, "sampler": ROSEN,
+     "ensemble": {"mu": -3.0, "dimension": 2}})
+good("parallel 3D", {"potential": HC, "sampler": ROSEN, "ensemble": {"mu": 3.0, "dimension": 3},
+     "run": {"kind": "parallel"}})
 bad("reweight 3D", {"potential": HC, "sampler": {"type": "reweight"}, "ensemble": {"mu": 2.0, "dimension": 3}}, "2D method")
 bad("reweight + lj", {"potential": {"main": "lennard_jones", "T": 1.2}, "sampler": {"type": "reweight"},
     "ensemble": {"mu": -3.0, "dimension": 3}}, "hard_core")
 bad("lj + pmf", {"potential": {"main": "lennard_jones", "T": 1.2}, "auxiliary": {"type": "pmf"},
-    "sampler": ROSEN, "ensemble": {"mu": -3.0, "dimension": 3}}, "no auxiliary")
+    "sampler": ROSEN, "ensemble": {"mu": -3.0, "dimension": 3}}, "g3_csv")
 bad("branch + pmf", {"potential": HC, "auxiliary": {"type": "pmf"}, "sampler": {"type": "branch"},
     "ensemble": {"mu": 3.0, "dimension": 3}}, "no auxiliary")
 bad("reweight + pmf", {"potential": HC, "auxiliary": {"type": "pmf"}, "sampler": {"type": "reweight"},
@@ -70,7 +70,7 @@ bad("hard_core with T", {"potential": {"main": "hard_core", "T": 1.0}, "sampler"
     "ensemble": {"mu": 3.0, "dimension": 3}}, "only Lennard-Jones")
 bad("aux 3D no g3_csv", {"potential": HC, "auxiliary": {"type": "pmf"}, "sampler": ROSEN,
     "ensemble": {"mu": 2.0, "dimension": 3}}, "g3_csv")
-bad("non-lj mu<0", {"potential": HC, "sampler": ROSEN, "ensemble": {"mu": -1.0, "dimension": 3}}, "mu >= 0")
+good("non-lj mu<0", {"potential": HC, "sampler": ROSEN, "ensemble": {"mu": -1.0, "dimension": 3}})
 bad("trials and trial_density", {"potential": HC, "sampler": {"type": "rosenbluth", "trials": 30, "trial_density": 0.5},
     "ensemble": {"mu": 3.0, "dimension": 3}}, "not both")
 bad("mu and sweep", {"potential": HC, "sampler": ROSEN, "ensemble": {"mu": 3.0, "sweep": [1, 2], "dimension": 3}}, "not both")

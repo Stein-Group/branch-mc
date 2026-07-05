@@ -31,6 +31,7 @@ _IDENTITY_FIELDS = (
     "temp", "rc", "eta", "gamma_max", "delta_eta", "lower_cutoff",
     "upper_cutoff", "no_neigh", "ensemble_type", "target_n",
     "pore_geometry", "pore_H", "pore_R",
+    "channel", "channel_length", "channel_width",
 )
 
 
@@ -41,7 +42,12 @@ def _canon(value):
 
 
 def identity_dict(cfg):
-    return {k: _canon(getattr(cfg, k)) for k in _IDENTITY_FIELDS}
+    # channel geometry only identifies a run when the channel sampler is active;
+    # for every other mode these keys are omitted so the fingerprint is unchanged
+    # from before the channel sampler existed.
+    active_channel = getattr(cfg, "channel", False)
+    skip = () if active_channel else ("channel", "channel_length", "channel_width")
+    return {k: _canon(getattr(cfg, k)) for k in _IDENTITY_FIELDS if k not in skip}
 
 
 def _matrix_digest(cfg):
