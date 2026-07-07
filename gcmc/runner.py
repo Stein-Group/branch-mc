@@ -149,17 +149,13 @@ def _init_config(cfg, rng):
                 if len(pts) >= n:
                     return pts[:n]
                 per += 1
-        if cfg.depth > 0:
-            # depth >= 1 insertions need an occupied cavity and a removal at
-            # N=1 can downgrade to a pure deletion, so N=0 is absorbing: a
-            # near-empty start can die and never grow. Seed a hard-core-valid
-            # grid at moderate density instead (the original relied on dense
-            # restart files for the same reason).
-            g = np.arange(0.65, cfg.box, (4.0 / 3.0) * cfg.diameter)
-            g = g[g < cfg.box - 0.5 * cfg.diameter]
-            pts = np.array(list(itertools.product(g, repeat=cfg.dimension)))
-            return pts
-        return rng.uniform(0, cfg.box, size=(1, cfg.dimension))
+        # Bulk muVT with no initial_config: start EMPTY. Insertion centres on a
+        # uniform random point and needs nothing present, so N=0 -> 1 grows on
+        # its own; removal and displacement only ever act on existing particles.
+        # No lattice: this method places trials at uniform random points, so a
+        # gridded start would be foreign to it. Provide initial_config only to
+        # start from a pre-equilibrated structure (e.g. the metastable liquid).
+        return np.empty((0, cfg.dimension))
 
     if os.path.splitext(spec)[1]:                      # has an extension -> file
         path = spec

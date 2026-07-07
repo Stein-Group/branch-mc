@@ -52,6 +52,20 @@ def find_neighbors(kdtree, trial_mols, lower_cutoff, upper_cutoff, no_neigh,
     `dists` and `idxs` are (N, no_neigh) with the kd-tree's inf / N padding kept,
     exactly as the weighting code downstream expects.
     """
+    if kdtree is None:
+        # empty system: nothing to overlap and no neighbours. Every trial is
+        # admissible with padded (infinite-distance) neighbour rows, so the
+        # downstream member-vs-system weight is 1.
+        n = len(trial_mols)
+        good = np.ones(n, dtype=bool)
+        if valid is not None:
+            good = good & np.asarray(valid, bool)
+        if not np.any(good):
+            return None
+        dists = np.full((int(good.sum()), no_neigh), np.inf)
+        idxs = np.zeros((int(good.sum()), no_neigh), dtype=int)
+        km = keep_mask[good] if keep_mask is not None else None
+        return trial_mols[good], dists, idxs, km
     distances, indices = kdtree.query(trial_mols, k=no_neigh,
                                       distance_upper_bound=upper_cutoff)
     good = np.all(distances >= lower_cutoff, axis=1)

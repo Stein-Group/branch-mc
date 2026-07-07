@@ -54,8 +54,8 @@ _AXES = (("mu", "ensemble", "mu"),
          ("seed", "run", "seed"),
          ("trial_density", "sampler", "trial_density"),
          ("trial_box_side", "sampler", "trial_box_side"),
-         ("channel_width", "sampler", "channel_width")
-        )
+         ("channel_length", "sampler", "channel_length"),
+         ("channel_width", "sampler", "channel_width"))
 
 # nested pore axes (ensemble.pore.{H,R}); handled separately since they live one
 # level deeper than the flat _AXES entries.

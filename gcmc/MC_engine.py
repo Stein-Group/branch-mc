@@ -396,6 +396,12 @@ def advance(state, cfg, potential, weigher):
                 moved = np.array([mx, my, mz])
             if cfg.pore_geometry is not None and not _inside_pore(moved, cfg):
                 continue                      # move into the wall: rejected
+            if len(without) == 0 and not has_matrix:
+                # lone sphere in an empty box: no neighbours, no energy change,
+                # so the standard Metropolis move is always accepted.
+                pos = moved.reshape(1, -1)
+                c["move_accept"] += 1
+                continue
             # translation overlap test must also see the frozen matrix, so a
             # fluid particle cannot move onto an obstacle. Matrix appended after
             # `without`; it is never selected as the moved particle.
@@ -529,11 +535,6 @@ def advance(state, cfg, potential, weigher):
             keep[chosen_idx] = False
             disk_rest = pos[keep]
 
-        if len(disk_rest) == 0 and not has_matrix:
-            # bulk run with nothing to weigh trials against (N==0, no matrix):
-            # the depth-0 path handles a first insertion, so skip here rather
-            # than divide by an empty reference.
-            continue
         if len(disk_rest) == 0 and has_matrix and n_add == 0:
             # pure deletion with no fluid left: nothing to remove.
             continue
@@ -563,11 +564,15 @@ def advance(state, cfg, potential, weigher):
             keep_mask[rng.choice(n_trials, size=n_remove, replace=False)] = False
 
         # exclusion tree: fluid-rest PLUS frozen matrix. Trials/shadows that
-        # overlap either are rejected. The matrix is appended after disk_rest so
-        # the first len(disk_rest) tree indices are still the mobile fluid, which
-        # is all the downstream weight/selection logic ever indexes into.
-        excl = np.append(disk_rest, matrix, axis=0) if has_matrix else disk_rest
-        tree = cKDTree(excl, boxsize=box)
+        # overlap either are rejected. On an empty box there is nothing to build
+        # a tree from, so tree is None and find_neighbors returns all trials
+        # admissible (member weight 1); the first insertion / last removal then
+        # go through the ordinary weight and acceptance path.
+        if len(disk_rest) == 0 and not has_matrix:
+            tree = None
+        else:
+            excl = np.append(disk_rest, matrix, axis=0) if has_matrix else disk_rest
+            tree = cKDTree(excl, boxsize=box)
         pore_valid = _inside_pore(trials, cfg) if cfg.pore_geometry is not None else None
         raw = geometry.find_neighbors(tree, trials, lower, uc, nn,
                                       keep_mask=keep_mask, valid=pore_valid)
