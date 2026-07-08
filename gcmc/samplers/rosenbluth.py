@@ -34,6 +34,13 @@ def select_forward(pool, n_atoms, weigher, *, rand, side, r_squared,
         sum_weight, probability = weigher.selection(pool)
         sum_arr[i] = sum_weight
 
+        # an all-zero (or non-finite) weight pool has no valid pick: dividing by
+        # its sum would make probability nan and searchsorted would return a
+        # garbage index. Treat it as an exhausted pool, i.e. a rejected move,
+        # rather than propagating nan into the acceptance.
+        if not (sum_weight > 0.0) or probability is None:
+            return None, None
+
         cumulative = np.cumsum(probability)
         # rand() can land above cumulative[-1] by rounding; clip to the pool
         chosen_index = min(int(np.searchsorted(cumulative, rand())), len(pool) - 1)

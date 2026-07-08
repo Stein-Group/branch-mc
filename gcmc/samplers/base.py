@@ -25,6 +25,8 @@ class EnergyWeigher:
     def selection(self, pool):
         w = pool.energy_weight
         s = np.sum(w)
+        if not (s > 0.0):
+            return s, None       # exhausted pool; caller rejects the move
         return s, w / s
 
     def recompute(self, pool, chosen_coord, sq_filtered, gamma):
@@ -106,6 +108,8 @@ class ReweightWeigher:
     def selection(self, pool):
         w = self._psi6(pool)
         s = np.sum(w)
+        if not (s > 0.0):
+            return s, None
         return s, w / s
 
     def recompute(self, pool, chosen_coord, sq_filtered, gamma):

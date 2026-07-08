@@ -53,7 +53,7 @@ def _parse_name(path):
 
 
 def legacy_to_params(extxyz_path, *, temp, potential=None, depth=0, branch=False,
-                     use_depth=True, move_factor=0.25, g3_csv=None):
+                     full_repacking=False, move_factor=0.25, g3_csv=None):
     """Read a legacy trajectory and return (params_dict, positions, step)."""
     from ase.io import read
     frame = read(extxyz_path, index=-1)
@@ -91,7 +91,7 @@ def legacy_to_params(extxyz_path, *, temp, potential=None, depth=0, branch=False
         "ensemble": {"mu": mu, "dimension": dim, "box": side},
         "sampler": {"type": ("branch" if branch else "rosenbluth"),
                     "trials": k, "trial_box_side": 2.0 * cav,
-                    "depth": depth, "use_depth": use_depth},
+                    "depth": depth, "full_repacking": full_repacking},
         "run": {"move_factor": move_factor},
     }
     if is_aux:

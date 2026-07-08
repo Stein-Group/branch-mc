@@ -1,0 +1,17 @@
+{
+  "potential": {
+    "main": "hard_core"
+  },
+  "sampler": {
+    "type": "reweight"
+  },
+  "ensemble": {
+    "mu": 6.0,
+    "dimension": 2,
+    "box": 30.0
+  },
+  "run": {
+    "seed": 1,
+    "sampling_window": 1000
+  }
+}

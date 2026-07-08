@@ -1,6 +1,0 @@
-{ "potential":  {"main": "hard_core"},
-  "auxiliary":  {"type": "pmf"},
-  "sampler":    {"type": "rosenbluth"},
-  "ensemble":   {"mu": 2.0, "dimension": 2},
-  "run":        {"kind": "parallel", "n_workers": 30}
-}

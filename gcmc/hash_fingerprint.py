@@ -27,7 +27,7 @@ import os
 # resumed anyway.
 _IDENTITY_FIELDS = (
     "potential_type", "sampler", "dimension", "chem_pot", "box", "cavity_radius",
-    "trial_density", "depth", "branch", "use_depth", "move_factor",
+    "trial_density", "depth", "branch", "full_repacking", "move_factor",
     "temp", "rc", "eta", "gamma_max", "delta_eta", "lower_cutoff",
     "upper_cutoff", "no_neigh", "ensemble_type", "target_n",
     "pore_geometry", "pore_H", "pore_R",

@@ -32,6 +32,9 @@ class ChainState:
     # the search rather than restarting it.
     mu: float | None = None
     n_history: list = field(default_factory=list)
+    # rolling window of per-window mean cavity occupancy, used only for the
+    # avg_n_cav diagnostic column (local density check n_cav/v_cav vs N/V).
+    ncav_history: list = field(default_factory=list)
 
     @classmethod
     def fresh(cls, dimension, seed=None):

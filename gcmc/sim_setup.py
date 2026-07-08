@@ -16,25 +16,73 @@ Schema
                  "g3_csv": str,                      # required iff present and 3D
                  "eta": float, "gamma_max": float, "delta_eta": float},
 
-  "sampler":    {"type": "metropolis" | "rosenbluth" | "branch" | "reweight",
-                 "depth": int, "use_depth": bool,    # forbidden for metropolis
+  "sampler":    {"type": "metropolis" | "rosenbluth" | "branch" | "channel" | "reweight",
+                 "depth": int, "use_depth": bool,    # forbidden for metropolis; channel needs depth >= 1
                  "trials": int | "trial_density": float,   # forbidden for metropolis
-                 "trial_box_side": float},                 # forbidden for metropolis
+                 "trial_box_side": float,                  # rosenbluth/branch only (cube trial box); rejected for channel
+                 "channel_length": float, "channel_width": float},  # channel only: oriented cuboid extents
 
   "ensemble":   {"mu": float | "sweep": [float],     # exactly one; sweep is launcher-only
-                 "dimension": 2 | 3, "box": float},
+                 "dimension": 2 | 3, "box": float,
+                 "type": "muVT" | "NVT" | "QA" | "confined",   # default muVT
+                 "N": int | "packing_fraction": float,         # NVT target
+                 "pore": {"geometry": "slit" | "cylinder", ...}},  # confined only
 
   "run":        {"kind": "single" | "parallel", "n_workers": int,
                  "sampling_window": int, "target_cycles": float, "burn_in": int,
                  "traj_every": int, "checkpoint_every": int, "seed": int,
-                 "initial_config": str,
+                 "initial_config": str, "matrix_config": str,   # matrix_config: QA only
                  "radius": float, "move_factor": float,
                  "upper_cutoff": float, "lower_cutoff": float, "no_neigh": int,
                  "cell_length": float, "buffer": float, "x_spacing": float, "y_spacing": float}
 }
 
-trial_box_side is the full side of the trial box (twice the legacy cavity radius);
-the trial-count relation uses trial_box_side^2 as the span.
+For rosenbluth/branch, trial_box_side is the full side of the square trial box
+(twice the legacy cavity radius) and the trial-count relation uses trial_box_side^2
+as the span. The channel sampler does not use trial_box_side: its trial region is
+an oriented cuboid of volume channel_length * channel_width^2, and trial_density is
+spheres per unit volume, so the count is trial_density times that volume.
+
+Sampled model
+-------------
+Hard-core runs sample hard spheres of diameter 2*radius (the exclusion floor is
+that diameter). Every Lennard-Jones run, in every sampler (metropolis, rosenbluth,
+branch, channel), samples truncated-and-shifted-free LJ with a hard core at
+run.lower_cutoff, which defaults to 0.9 sigma. It is not pure LJ: pairs closer
+than lower_cutoff are forbidden outright rather than merely improbable. One floor
+for all samplers means a metropolis isotherm and a channel isotherm are comparing
+the same distribution. The bulk tail correction (potential.tail, on by default in
+bulk) is disabled automatically in a pore or a quenched-annealed matrix, where the
+uniform space-filling assumption behind it does not hold.
+
+Support matrix
+--------------
+Not every axis combines with every other. from_params enforces these rules and
+raises a specific ValueError on any disallowed mix; they are collected here so the
+boundaries are readable in one place.
+
+Samplers x potential:
+  metropolis, rosenbluth, branch   hard_core or lennard_jones
+  channel                          hard_core or lennard_jones, depth >= 1
+  reweight (psi6)                  hard_core only
+
+An optional pmf auxiliary layers onto hard_core (-> aux) or lennard_jones
+(-> ljaux, 3D only, needs auxiliary.g3_csv); reweight takes no auxiliary.
+
+Samplers x ensemble:
+  muVT        every sampler
+  NVT         every sampler except reweight paths that assume muVT targeting
+  confined    grand-canonical samplers (give mu); 3D only; no matrix
+  QA          hard_core or LJ+branch only; not metropolis; needs run.matrix_config
+
+Dimension:
+  reweight    2D only
+  channel     3D only
+  confined    3D only
+  LJ + pmf    3D only
+
+Parallelism (run.kind='parallel'):
+  not available for reweight or QA; channel is serial only.
 """
 
 from __future__ import annotations
@@ -65,6 +113,43 @@ _MAIN = {"hard_core", "lennard_jones"}
 _SAMPLERS = {"metropolis", "rosenbluth", "branch", "reweight", "channel"}
 
 
+def _derive_potential_type(potential, bias, sampler):
+    """The engine's dispatch key, derived from three orthogonal axes: the base
+    potential ("hard_sphere" | "lennard_jones"), any bias ("pmf" | "psi6" | None),
+    and the sampler. This is the one place the combination is collapsed into the
+    flat tag the rest of the code (and the run identity) uses, so the axes can be
+    reasoned about independently while old fingerprints stay byte-for-byte stable.
+    """
+    if sampler == "reweight":
+        return "reweight"
+    if potential == "lennard_jones":
+        if bias == "pmf":
+            return "ljaux"
+        if sampler in ("branch", "channel"):
+            return "ljbranch"
+        return "lj"
+    if bias == "pmf":
+        return "aux"
+    return "hard_sphere"
+
+
+def _as_bool(value, name):
+    """Coerce a JSON value to a real bool. JSON true/false pass through, but a
+    quoted "True"/"False" (easy to write by hand) must not both read as truthy,
+    so strings are parsed explicitly and anything ambiguous raises."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ("true", "1", "yes", "on"):
+            return True
+        if s in ("false", "0", "no", "off", ""):
+            return False
+    raise ValueError(f"{name} must be a boolean (true/false), got {value!r}")
+
+
 def _check(section, allowed, required=()):
     extra = set(section) - set(allowed)
     if extra:
@@ -77,7 +162,8 @@ def _check(section, allowed, required=()):
 @dataclass(frozen=True)
 class Config:
     # identity-bearing
-    potential_type: str
+    potential: str          # "hard_sphere" | "lennard_jones"
+    bias: str | None        # None | "pmf" | "psi6"
     sampler: str
     dimension: int
     chem_pot: float
@@ -90,7 +176,7 @@ class Config:
     depth: int
     branch: bool
     metropolis: bool
-    use_depth: bool
+    full_repacking: bool
     move_factor: float
     temp: float
     rc: float | None
@@ -155,6 +241,13 @@ class Config:
     def box_dims(self):
         return [self.box] * self.dimension
 
+    @property
+    def potential_type(self):
+        """Flat engine dispatch key derived from potential, bias and sampler.
+        Kept as a property so existing fingerprints (which read potential_type)
+        stay byte-identical after the underlying fields were split apart."""
+        return _derive_potential_type(self.potential, self.bias, self.sampler)
+
     def build_potential(self):
         from .potentials import make_potential
         t, uc, d = self.potential_type, self.upper_cutoff, self.diameter
@@ -198,7 +291,7 @@ def from_params(p):
 
     # ---- sampler ----
     smp = p["sampler"]
-    _check(smp, {"type", "depth", "use_depth", "trials", "trial_density", "trial_box_side", "channel_length", "channel_width"},
+    _check(smp, {"type", "depth", "full_repacking", "trials", "trial_density", "trial_box_side", "channel_length", "channel_width"},
            {"type"})
     sampler = smp["type"]
     if sampler not in _SAMPLERS:
@@ -207,6 +300,19 @@ def from_params(p):
     branch = sampler in ("branch", "channel")
     channel = sampler == "channel"
     reweight = sampler == "reweight"
+    # full_repacking (default False) is the XOR opposite of the old use_depth:
+    # instead of a fixed depth, an exchange repacks the whole cavity, removing
+    # every sphere it finds and inserting one more (add), one fewer (remove), or
+    # the same count (repack). depth is then meaningless and must not be given.
+    full_repacking = _as_bool(smp.get("full_repacking", False), "sampler.full_repacking")
+    if full_repacking:
+        if metropolis:
+            raise ValueError("full_repacking applies to the cavity samplers "
+                             "(rosenbluth/branch/channel), not metropolis")
+        if "depth" in smp:
+            raise ValueError("depth and full_repacking are mutually exclusive: "
+                             "full_repacking repacks the whole cavity and ignores "
+                             "depth, so give one or the other, not both")
 
     # ---- ensemble ----
     ens = p["ensemble"]
@@ -237,16 +343,23 @@ def from_params(p):
         if "matrix_config" in p.get("run", {}):
             raise ValueError("a pore and a QA matrix cannot be combined")
         pore = ens["pore"]
+        # the accessible pore must admit a whole sphere, so every gap is checked
+        # against the actual diameter 2*radius, not a hardcoded 1. radius is parsed
+        # again below for the derived constants; here we only need it for the wall
+        # geometry checks, which run before that block.
+        _pore_diam = 2.0 * float(p.get("run", {}).get("radius", 0.5))
         _pore_geometry = pore.get("geometry")
         if _pore_geometry == "slit":
             _pore_H = float(pore["H"])           # gap in z; walls at 0 and H
-            if _pore_H <= 1.0:
-                raise ValueError("slit gap H must exceed the sphere diameter (1)")
+            if _pore_H <= _pore_diam:
+                raise ValueError(f"slit gap H must exceed the sphere diameter "
+                                 f"({_pore_diam})")
         elif _pore_geometry == "cylinder":
             _pore_R = float(pore["R"])           # radius; axis along z at centre
             _pore_axis_len = float(pore.get("L_z", ens["box"]))
-            if 2 * _pore_R <= 1.0:
-                raise ValueError("cylinder diameter 2R must exceed the sphere diameter (1)")
+            if 2 * _pore_R <= _pore_diam:
+                raise ValueError(f"cylinder diameter 2R must exceed the sphere "
+                                 f"diameter ({_pore_diam})")
         else:
             raise ValueError("ensemble.pore.geometry must be 'slit' or 'cylinder'")
         # the wall lives inside the cubic periodic cell of side `box`; require a
@@ -254,12 +367,14 @@ def from_params(p):
         # the wall (then the existing cubic-periodic neighbour tree is exact and
         # no per-axis box change is needed).
         L = float(ens["box"])
-        if _pore_geometry == "slit" and _pore_H > L - 1.0:
-            raise ValueError(f"slit gap H={_pore_H} must be <= box-1={L-1} so the "
-                             f"forbidden margin separates periodic z-images")
-        if _pore_geometry == "cylinder" and 2 * _pore_R > L - 1.0:
-            raise ValueError(f"cylinder diameter 2R={2*_pore_R} must be <= box-1={L-1} "
-                             f"so the forbidden margin separates periodic x,y-images")
+        if _pore_geometry == "slit" and _pore_H > L - _pore_diam:
+            raise ValueError(f"slit gap H={_pore_H} must be <= box-{_pore_diam}="
+                             f"{L-_pore_diam} so the forbidden margin separates "
+                             f"periodic z-images")
+        if _pore_geometry == "cylinder" and 2 * _pore_R > L - _pore_diam:
+            raise ValueError(f"cylinder diameter 2R={2*_pore_R} must be <= box-"
+                             f"{_pore_diam}={L-_pore_diam} so the forbidden margin "
+                             f"separates periodic x,y-images")
         _pore_axis_len = L     # cubic cell: cylinder axial period = box
     if "pore" in ens and not confined:
         raise ValueError("ensemble.pore is only valid with ensemble.type='confined'")
@@ -380,6 +495,11 @@ def from_params(p):
         if forbidden:
             raise ValueError("metropolis is standard GCMC: it takes no "
                              "depth, trials, trial_density, or trial_box_side")
+    if channel and "trial_box_side" in smp:
+        raise ValueError("the channel sampler has no trial_box_side: the trial "
+                         "region is an oriented cuboid, not a cube. Give "
+                         "trial_density (spheres per unit volume) with "
+                         "channel_length and channel_width instead.")
     if "trials" in smp and "trial_density" in smp:
         raise ValueError("give either sampler.trials or sampler.trial_density, not both")
 
@@ -391,10 +511,15 @@ def from_params(p):
     radius = float(run.get("radius", 0.5))
     diameter = 2.0 * radius                       # physical particle size / LJ sigma
     disk = math.pi * radius * radius
-    # the single exclusion floor: hard cores exclude at the diameter, LJ at 0.85
-    # (below which the Boltzmann weight is negligible but the clique graph needs a
-    # hard edge). r_squared is just its square, used by the Rosenbluth mask.
-    _lower_default = 0.9 if (lj and branch) else (0.85 if lj else diameter)
+    # One exclusion floor for the whole run. Hard cores exclude at the diameter.
+    # Every LJ mode (metropolis, rosenbluth, branch, channel) shares a single hard
+    # floor of 0.9 sigma unless the user overrides run.lower_cutoff, so the sampled
+    # model is identical across samplers and cross-mode checks compare like with
+    # like. The model each LJ run samples is therefore "truncated LJ plus a hard
+    # core at lower_cutoff", not pure LJ; see the module docstring. Previously the
+    # value depended on the sampler (0.85 for plain LJ, 0.9 for branch/channel),
+    # so metropolis and the biased samplers converged to different densities.
+    _lower_default = 0.9 if lj else diameter
     lower_cutoff = float(run.get("lower_cutoff", _lower_default))
     r_squared = lower_cutoff * lower_cutoff
 
@@ -405,6 +530,32 @@ def from_params(p):
         channel_width = 0.0
         n_trials = 1
         trial_density = 0.0
+    elif channel:
+        # The channel trial region is an oriented cuboid: one long axis of length
+        # channel_length and a square cross-section channel_width x channel_width.
+        # That is the exact body the trial spheres are dropped into (see the
+        # channel branch of MC_engine.advance), so its volume is the natural
+        # normaliser. trial_density is spheres per unit volume, hence the count is
+        # simply density * volume. trial_box_side has no meaning here and was
+        # rejected above.
+        trial_box_side = 0.0
+        cav = 0.0
+        channel_length = float(smp.get("channel_length", 0.0))
+        channel_width = float(smp.get("channel_width", 0.0))
+        if channel_length <= 0.0 or channel_width <= 0.0:
+            raise ValueError("channel sampler needs channel_length and "
+                             "channel_width > 0")
+        if not (diameter <= channel_width <= 2.0 * diameter + 1e-9):
+            raise ValueError(
+                f"channel_width must lie in [sigma, 2 sigma] = "
+                f"[{diameter}, {2 * diameter}]; got {channel_width}")
+        chan_vol = channel_length * channel_width * channel_width
+        if "trials" in smp:
+            n_trials = int(smp["trials"])
+            trial_density = round(n_trials / chan_vol, 6)
+        else:
+            trial_density = float(smp.get("trial_density", 0.0))
+            n_trials = int(round(trial_density * chan_vol))
     else:
         trial_box_side = float(smp.get("trial_box_side", 3.0))
         cav = trial_box_side / 2.0
@@ -468,6 +619,25 @@ def from_params(p):
     lj_tail_on = bool(pot.get("tail", True))
     if "tail" in pot and not lj:
         raise ValueError("potential.tail applies to lennard_jones only")
+    # The bulk tail correction assumes a uniform fluid with g(r)=1 beyond rc
+    # filling all space. In a pore or a quenched-annealed matrix the accessible
+    # volume is neither uniform nor space-filling, so that integral is simply
+    # wrong: it adds an N^2 energy the confined system never has. Disable it there
+    # by default and say so; only raise if the user explicitly asked for the tail,
+    # rather than silently dropping a setting they set on purpose.
+    _confined_or_qa = (_pore_geometry is not None) or (run.get("matrix_config") is not None)
+    if lj and _confined_or_qa:
+        _where = "a hard pore" if _pore_geometry is not None else "a quenched-annealed matrix"
+        if "tail" in pot and bool(pot["tail"]):
+            raise ValueError(
+                f"potential.tail=true is invalid with {_where}: the bulk LJ tail "
+                f"correction assumes a uniform space-filling fluid, which a confined "
+                f"or matrix geometry is not. Remove potential.tail (it defaults off "
+                f"here) or run in bulk.")
+        if lj_tail_on:
+            print(f"[sim_setup] LJ tail correction disabled: {_where} is not a "
+                  f"uniform bulk fluid, so the bulk tail integral does not apply.")
+        lj_tail_on = False
     if lj:
         if two_dim:
             # 2D mean-field tail (g(r)=1 beyond rc), integrated over the plane:
@@ -478,22 +648,11 @@ def from_params(p):
             x = uc ** -9 / 3.0 - uc ** -3
             lj_tail_pref = ((8.0 / 3.0) * math.pi / total_vol * x) if lj_tail_on else 0.0
 
-    if reweight:
-        ptype = "reweight"
-    elif pmf and lj:
-        ptype = "ljaux"
-    elif lj and branch:
-        # true LJ + branch: k-clique enumeration with full Rosenbluth weighting
-        # under the real LJ energy (no hard-core auxiliary). Distinct algorithm
-        # and acceptance from the rosenbluth/metropolis lj path, so it gets its
-        # own potential_type and a tighter default exclusion floor.
-        ptype = "ljbranch"
-    elif lj:
-        ptype = "lj"
-    elif pmf:
-        ptype = "aux"
-    else:
-        ptype = "hard_sphere"
+    # three orthogonal axes; the flat engine tag is derived from them so nothing
+    # downstream has to special-case the combinations by hand.
+    potential = "lennard_jones" if lj else "hard_sphere"
+    bias = "pmf" if pmf else ("psi6" if reweight else None)
+    ptype = _derive_potential_type(potential, bias, sampler)
 
     has_matrix_cfg = run.get("matrix_config") is not None
     if qa and not has_matrix_cfg:
@@ -533,16 +692,9 @@ def from_params(p):
             raise ValueError("channel sampler is serial only")
         if two_dim:
             raise ValueError("channel sampler is 3D only")
-        if channel_length <= 0.0 or channel_width <= 0.0:
-            raise ValueError("channel sampler needs channel_length and "
-                             "channel_width > 0")
-        if not (diameter <= channel_width <= 2.0 * diameter + 1e-9):
-            raise ValueError(
-                f"channel_width must lie in [sigma, 2 sigma] = "
-                f"[{diameter}, {2 * diameter}]; got {channel_width}")
-        if int(smp.get("depth", 0)) < 1:
+        if not full_repacking and int(smp.get("depth", 0)) < 1:
             raise ValueError("channel sampler needs depth >= 1 (depth 0 has no "
-                             "clique structure to sweep)")
+                             "clique structure to sweep), or set full_repacking")
         # periodic guard: insertion and removal share one oriented cuboid, so the
         # whole pool lives in that body. Its space diagonal must stay below the
         # box minus the interaction range (sigma for hard core, rc for LJ) so
@@ -554,19 +706,47 @@ def from_params(p):
                 f"channel geometry violates the periodic guard: cuboid diagonal "
                 f"{diag:.3f} must be <= box - cutoff = {box - guard_cut:.3f}")
 
+    # ---- fail fast on physically invalid runs, one specific message each ----
+    _r_int = uc if lj else diameter
+    if box < 2.0 * _r_int - 1e-12:
+        _which = "upper_cutoff" if lj else "diameter"
+        raise ValueError(
+            f"box={box} is below twice the interaction range 2*{_r_int}="
+            f"{2.0 * _r_int}: the minimum-image convention requires box >= 2*"
+            f"{_which} so a particle never interacts with its own image")
+    move_factor = float(run.get("move_factor", 0.25))
+    if move_factor <= 0.0:
+        raise ValueError("run.move_factor must be > 0 (it scales the trial "
+                         "displacement; zero freezes every translation)")
+    sampling_window = int(run.get("sampling_window", 1000))
+    if sampling_window < 1:
+        raise ValueError("run.sampling_window must be >= 1 exchange step")
+    if not metropolis:
+        _depth = int(smp.get("depth", 0))
+        if n_trials < 1:
+            raise ValueError(
+                f"the trial pool is empty: the requested trial_density/trials "
+                f"gives {n_trials} trial spheres. Raise trial_density (or trials) "
+                f"so at least one sphere is placed")
+        if branch and n_trials < _depth + 1:
+            raise ValueError(
+                f"branch/channel needs at least depth+1={_depth + 1} trial "
+                f"spheres to place a depth-{_depth} move, but only {n_trials} "
+                f"were requested; raise trials or trial_density")
+
     return Config(
-        potential_type=ptype, sampler=sampler, dimension=dim, chem_pot=mu,
+        potential=potential, bias=bias, sampler=sampler, dimension=dim, chem_pot=mu,
         ensemble_type=ens_type, target_n=target_n, box=box,
         target_count=target_count,
         control_gain=float(run.get("control_gain", 0.5)),
         control_gain_tau=float(run.get("control_gain_tau", 20.0)),
         control_window=int(run.get("control_window", 20)),
         cavity_radius=cav, trial_box_side=trial_box_side, trial_density=trial_density,
-        depth=(0 if metropolis else int(smp.get("depth", 0))),
+        depth=(0 if (metropolis or full_repacking) else int(smp.get("depth", 0))),
         branch=branch, metropolis=metropolis,
         channel=channel, channel_length=channel_length, channel_width=channel_width,
-        use_depth=bool(smp.get("use_depth", True)),
-        move_factor=float(run.get("move_factor", 0.25)),
+        full_repacking=full_repacking,
+        move_factor=move_factor,
         temp=temp, rc=(uc if lj else None),
         eta=(float(aux_block.get("eta", 0.69)) if pmf and two_dim else None),
         gamma_max=(float(aux_block["gamma_max"]) if pmf and "gamma_max" in aux_block else None),
@@ -583,7 +763,7 @@ def from_params(p):
         buffer=float(run.get("buffer", 2.0)),
         x_spacing=(float(run["x_spacing"]) if "x_spacing" in run else None),
         y_spacing=(float(run["y_spacing"]) if "y_spacing" in run else None),
-        sampling_window=int(run.get("sampling_window", 1000)),
+        sampling_window=sampling_window,
         target_cycles=float(run.get("target_cycles", 1.0025e9)),
         burn_in=int(run.get("burn_in", 0)),
         traj_every=int(run.get("traj_every", 0)),

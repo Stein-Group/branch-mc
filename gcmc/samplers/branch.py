@@ -21,12 +21,15 @@ from __future__ import annotations
 import numpy as np
 from scipy.spatial import KDTree
 
+from ..geometry import overlap_radius
+from ..potentials.lennard_jones import lj_pair_energy
+
 
 def _build_adj(centers, overlap_distance, box):
     n = len(centers)
     shifted = np.mod(centers, box)
     tree = KDTree(shifted, boxsize=box)
-    pairs = tree.query_pairs(r=overlap_distance - 1e-12, output_type="ndarray")
+    pairs = tree.query_pairs(r=overlap_radius(overlap_distance), output_type="ndarray")
     adj = np.ones((n, n), dtype=bool)
     np.fill_diagonal(adj, False)
     if len(pairs) > 0:
@@ -288,8 +291,7 @@ def _intra_lj_factor(members, box, rc, beta):
     r = r[(r < rc) & (r > 0)]
     if r.size == 0:
         return 1.0
-    ir6 = (1.0 / r) ** 6
-    u = float(np.sum(4.0 * ir6 * (ir6 - 1.0)))
+    u = float(np.sum(lj_pair_energy(r)))
     return float(np.exp(-beta * u))
 
 

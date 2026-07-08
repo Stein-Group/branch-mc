@@ -6,8 +6,7 @@
   "required": [
     "potential",
     "sampler",
-    "ensemble",
-    "run"
+    "ensemble"
   ],
   "additionalProperties": false,
   "properties": {
@@ -78,18 +77,31 @@
             "metropolis",
             "rosenbluth",
             "branch",
+            "channel",
             "reweight"
           ],
-          "description": "metropolis: single-particle. rosenbluth/branch: cavity-biased insertion (depth 0-3). reweight: 2D hexatic."
+          "description": "metropolis: single-particle. rosenbluth/branch: cavity-biased insertion (depth 0-3). channel: oriented-cuboid transfer-matrix sweep (3D, serial, depth >= 1 unless full_repacking). reweight: 2D hexatic."
         },
         "depth": {
           "type": "integer",
           "minimum": 0,
           "maximum": 3,
-          "description": "Cavity recursion depth; forbidden for metropolis. Validated 0-3."
+          "description": "Cavity recursion depth; forbidden for metropolis. Validated 0-3. Mutually exclusive with full_repacking."
         },
-        "use_depth": {
-          "type": "boolean"
+        "full_repacking": {
+          "type": "boolean",
+          "default": false,
+          "description": "XOR alternative to depth: repack the whole cavity each exchange, removing every sphere found and inserting one more (add), one fewer (remove), or the same count (repack). Ignores depth; do not give both. Cavity samplers only (not metropolis)."
+        },
+        "channel_length": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "channel only: length of the long axis of the oriented trial cuboid."
+        },
+        "channel_width": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "channel only: side of the square cross-section, required in [sigma, 2 sigma]. The trial cuboid volume is channel_length * channel_width^2."
         },
         "trials": {
           "type": "integer",
@@ -114,7 +126,7 @@
           ]
         },
         "trial_box_side": {
-          "description": "Full side of the trial box (twice the legacy cavity radius). Forbidden for metropolis. SWEEPABLE: a list builds one run per value (pair with trial_density for a heatmap).",
+          "description": "rosenbluth/branch only: full side of the square trial box (twice the legacy cavity radius). Forbidden for metropolis and rejected for channel (which uses channel_length/channel_width with trial_density). SWEEPABLE: a list builds one run per value (pair with trial_density for a heatmap).",
           "oneOf": [
             {
               "type": "number",
@@ -135,8 +147,7 @@
     "ensemble": {
       "type": "object",
       "required": [
-        "dimension",
-        "box"
+        "dimension"
       ],
       "additionalProperties": false,
       "properties": {
@@ -177,10 +188,42 @@
           "enum": [
             "muVT",
             "NVT",
-            "QA"
+            "QA",
+            "confined"
           ],
           "default": "muVT",
-          "description": "muVT: grand canonical (give mu). NVT: canonical (give exactly one of N or packing_fraction, no mu). QA: quenched-annealed = muVT in a frozen matrix (give mu AND run.matrix_config; mu may be < 0 for the dilute isotherm)."
+          "description": "muVT: grand canonical (give mu). NVT: canonical (give exactly one of N or packing_fraction, no mu). QA: quenched-annealed = muVT in a frozen matrix (give mu AND run.matrix_config; mu may be < 0 for the dilute isotherm). confined: grand canonical in a hard slit or cylinder pore (give mu and ensemble.pore; 3D only; no matrix)."
+        },
+        "pore": {
+          "type": "object",
+          "description": "confined only: a hard wall inside the periodic box. slit walls sit at z=0 and z=H; a cylinder of radius R runs along z through the centre. Every gap must admit a whole sphere (2*radius).",
+          "required": [
+            "geometry"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "geometry": {
+              "enum": [
+                "slit",
+                "cylinder"
+              ]
+            },
+            "H": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "slit gap in z; must exceed the diameter and stay below box - diameter."
+            },
+            "R": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "cylinder radius; 2R must exceed the diameter and stay below box - diameter."
+            },
+            "L_z": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "cylinder axial length (defaults to box)."
+            }
+          }
         },
         "N": {
           "oneOf": [
@@ -271,10 +314,6 @@
     },
     "run": {
       "type": "object",
-      "required": [
-        "kind",
-        "n_cores"
-      ],
       "additionalProperties": false,
       "properties": {
         "kind": {
@@ -330,7 +369,7 @@
         },
         "initial_config": {
           "type": "string",
-          "description": "Path to a starting configuration; omit to start fresh."
+          "description": "Starting configuration; omit to start fresh (bulk muVT starts empty, NVT/QA/confined seed a valid start). Two forms. (1) A path to a single file: extended-XYZ (atom-count line, a Lattice/Properties comment, then `species x y z` rows) or a bare `x y z` float table; the first line decides which. (2) A path to the equilibrated library directory, nested by system, temperature (LJ only) and box, e.g. lj/T_0.85/box_20/mu_0.0_lj_3d_box20.xyz or hard_disk_2d/box_200/mu_1.00_hard_2d_box_200.xyz. The per-run file is found by matching chemical potential, box, dimension and (for LJ) temperature, tolerant of the differing decimal and box_<L> vs box<L> filename styles. A run raises if nothing matches (it lists what is present) or if several match (it lists the candidates)."
         },
         "radius": {
           "type": "number",
@@ -356,7 +395,7 @@
         },
         "matrix_config": {
           "type": "string",
-          "description": "REQUIRED iff ensemble.type='QA'; forbidden otherwise. Absolute path to the frozen matrix configuration (an NVT checkpoint.npz, .extxyz, or plain 'x y z' file). The fluid cannot overlap these obstacles, which are never inserted/deleted/moved/counted. The matrix content is folded into the run-id hash (distinct realizations -> distinct dirs) and snapshotted into the run directory as matrix.npz, so a resume is self-contained even if the source file moves. QA supports hard_core or LJ+branch, sampler rosenbluth/branch, and run.kind='single' only. May also be a FOLDER of realizations (subdirs each with trajectory.extxyz or checkpoint.npz, or a flat folder of *.extxyz/*.npz): then a list target sweep pairs each swept value with one matrix by sorted index (16 targets -> 16 matrices -> 16 runs). The last frame of each trajectory.extxyz is used. A folder is only valid via gcmc.launcher, not a single `gcmc run`."
+          "description": "REQUIRED iff ensemble.type='QA'; forbidden otherwise. Absolute path to the frozen matrix configuration (an NVT checkpoint.npz, an extended-XYZ .xyz/.extxyz, or a plain 'x y z' file). The fluid cannot overlap these obstacles, which are never inserted/deleted/moved/counted. The matrix content is folded into the run-id hash (distinct realizations -> distinct dirs) and snapshotted into the run directory as matrix.npz, so a resume is self-contained even if the source file moves. QA supports hard_core or LJ+branch, sampler rosenbluth/branch, and run.kind='single' only. May also be a FOLDER of realizations (subdirs each with trajectory.extxyz or checkpoint.npz, or a flat folder of *.xyz/*.extxyz/*.npz): then a list target sweep pairs each swept value with one matrix by sorted index (16 targets -> 16 matrices -> 16 runs). The last frame of each trajectory is used. A folder is only valid via gcmc.launcher, not a single `gcmc run`."
         },
         "control_gain": {
           "type": "number",
