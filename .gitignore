@@ -2,3 +2,8 @@ mnt/
 gcmc/__pycache__/
 gcmc/samplers/__pycache__
 gcmc/potentials/__pycache__/
+equilibrated/hard_disk_2d/box_200/cleanup.sh
+equilibrated/hard_disk_2d/box_75/cleanup.sh
+equilibrated/hard_disk_3d/box_20/cleanup.sh
+equilibrated/hard_disk_3d/box_40/cleanup.sh
+
