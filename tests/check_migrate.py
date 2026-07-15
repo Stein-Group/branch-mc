@@ -9,7 +9,7 @@ import tempfile
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from gcmc import migrate, identity, config, io, runner  # noqa: E402
+from gcmc import migrate, hash_fingerprint as identity, sim_setup as config, io, runner  # noqa: E402
 
 
 def make_legacy(path, positions3d, side, *, mu, cav, k, mc_cycle, two_dim, aux):

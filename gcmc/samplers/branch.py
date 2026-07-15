@@ -226,37 +226,22 @@ def count_and_sample_branch(centers, k, overlap_distance, *, box_lengths):
 
 
 # ---------------------------------------------------------------------------
-# True LJ + branch (no auxiliary): full Rosenbluth weighting over k-cliques.
+# True LJ + branch (no auxiliary): Boltzmann-weighted sum over k-cliques.
 #
-# Graph for THIS mode differs from the legacy non-overlap graph: an edge means
-# the pair separation lies in the band [lower, upper] -- both non-overlapping
-# (>= lower) AND within interaction range (<= upper). A k-clique is then k
-# trial centres that are mutually in-band: a compatible group to insert at once.
+# Adjacency is the SAME non-overlap graph the hard-core path uses (built by
+# _build_adj at the exclusion floor `lower` = 0.9, where LJ repulsion already
+# makes the weight negligible): an edge means a pair is at least `lower` apart,
+# so a k-clique is k mutually non-overlapping trial centres, a group that can be
+# inserted at once. There is no upper bound -- two members far apart simply do
+# not interact and contribute a pair factor of 1, so cliques may span the box.
 #
-# We enumerate every k-clique and, at each one, evaluate the inserted group's
-# LJ energy to form its Rosenbluth weight exp(-beta U_clique). The full sum W is
-# accumulated and one clique is drawn proportional to its weight, all in a
-# single streaming pass (reservoir sampling) so memory stays O(1) in the clique
-# count -- we never materialise the clique list.
+# Each clique's weight is exp(-beta * U_group) = (member-vs-system) *
+# (intra-group). The member-vs-system factor was already computed once per trial
+# in the neighbour build and is carried in `member_weights`; only the cheap
+# intra-group pairs (within rc) are evaluated here. The weighted sum is taken in
+# log space (LJ weights span many orders of magnitude) and one clique is
+# reservoir-sampled proportional to its weight in a single streaming pass.
 # ---------------------------------------------------------------------------
-
-def _build_band_adj(centers, lower, upper, box):
-    """Edge iff lower <= dist <= upper (minimum image). Returns bool adjacency."""
-    n = len(centers)
-    shifted = np.mod(centers, box)
-    tree = KDTree(shifted, boxsize=box)
-    near = tree.query_pairs(r=upper, output_type="ndarray")
-    adj = np.zeros((n, n), dtype=bool)
-    if len(near) > 0:
-        # filter the within-upper pairs down to those also >= lower
-        d = np.linalg.norm(
-            (shifted[near[:, 0]] - shifted[near[:, 1]]
-             - box * np.round((shifted[near[:, 0]] - shifted[near[:, 1]]) / box)),
-            axis=1)
-        keep = near[d >= lower]
-        adj[keep[:, 0], keep[:, 1]] = True
-        adj[keep[:, 1], keep[:, 0]] = True
-    return adj
 
 
 def _enumerate_cliques(adj, k):
@@ -289,38 +274,66 @@ def _enumerate_cliques(adj, k):
             yield from recurse(fwd, k - 1, [v])
 
 
-def ljbranch_weight_sum(centers, k, lower, upper, rest, box, rc, beta,
-                        lj_energy_fn, *, rng=None, removed=None, rest_tree=None):
-    """Stream all k-cliques of the band graph; accumulate the Rosenbluth weight
-    W = sum_cliques exp(-beta U_clique). U_clique = (clique members vs `rest`
-    within rc) + (intra-clique member pairs).
+def _intra_lj_factor(members, box, rc, beta):
+    """exp(-beta * LJ energy among `members`): pairs within rc, minimum image.
+    Returns 1.0 for fewer than two members (no pairs), so depth-0 weights are
+    exactly the carried single-particle weight with nothing added."""
+    m = len(members)
+    if m < 2:
+        return 1.0
+    ii, jj = np.triu_indices(m, k=1)
+    dvec = members[ii] - members[jj]
+    dvec -= np.round(dvec / box) * box
+    r = np.sqrt((dvec ** 2).sum(axis=1))
+    r = r[(r < rc) & (r > 0)]
+    if r.size == 0:
+        return 1.0
+    ir6 = (1.0 / r) ** 6
+    u = float(np.sum(4.0 * ir6 * (ir6 - 1.0)))
+    return float(np.exp(-beta * u))
 
-    If `rng` is given, also reservoir-sample one clique proportional to its
-    weight and return its member centres; this is the forward (insertion) use.
-    If `removed` (a sorted index tuple) is given instead, the reverse use only
-    needs the sum (the removed group is one member of the population), so no
-    sampling is done.
 
-    `rest_tree`, if given, is a prebuilt cKDTree(rest, boxsize=box) reused for
-    every clique's energy (the rest set is constant across cliques in one move),
-    avoiding a tree rebuild per clique. `lj_energy_fn` must accept it as a
-    trailing `rest_tree=` keyword.
+def ljbranch_weight_sum(centers, member_weights, k, lower, box, rc, beta,
+                        *, rng=None):
+    """Sum the Boltzmann weights of every non-overlapping k-clique.
 
-    Returns (W, count, chosen_coords_or_None). W is the plain (non-log) sum.
+    Adjacency is non-overlap at `lower` (the same graph the hard-core counter
+    builds, via _build_adj); there is no upper cutoff. A clique's weight is the
+    product of its members' carried single-particle weights (member-vs-system,
+    already computed in the neighbour build) times the intra-group LJ factor
+    (member pairs within rc). The sum is accumulated in log space.
+
+    If `rng` is given, one clique is reservoir-sampled proportional to its
+    weight and its member centres are returned (the forward / insertion use);
+    otherwise `chosen` is None (the reverse use needs only the sum).
+
+    Returns (logW, count, chosen_coords_or_None); (-inf, 0, None) if no clique
+    exists.
     """
     centers = np.asarray(centers, float)
-    adj = _build_band_adj(centers, lower, upper, box)
-    W = 0.0
+    member_weights = np.asarray(member_weights, float)
+    box = _parse_box(box, centers.shape[1] if len(centers) else 1)
+    adj, _ = _build_adj(centers, lower, box)
+    logW = -np.inf
     count = 0
     chosen = None
     for clique in _enumerate_cliques(adj, k):
-        members = centers[list(clique)]
-        u = lj_energy_fn(members, rest, box, rc, rest_tree=rest_tree)
-        w = np.exp(-beta * u)
-        W += w
+        idx = list(clique)
+        wprod = float(np.prod(member_weights[idx]))
+        if wprod <= 0.0:
+            continue
+        members = centers[idx]
+        w = wprod * _intra_lj_factor(members, box, rc, beta)
+        if w <= 0.0:
+            continue
         count += 1
-        if rng is not None and w > 0.0:
-            # reservoir sampling weighted by w: keep current with prob w/W
-            if rng.uniform(0.0, W) <= w:
-                chosen = members
-    return W, count, chosen
+        logw = np.log(w)
+        new_logW = np.logaddexp(logW, logw)
+        # weighted reservoir draw in log space: keep this clique with
+        # probability w / W_running = exp(logw - new_logW)
+        if rng is not None and (logw - new_logW) >= np.log(rng.uniform(0.0, 1.0)):
+            chosen = members
+        logW = new_logW
+    if count == 0:
+        return -np.inf, 0, None
+    return float(logW), count, chosen

@@ -32,8 +32,40 @@ from .samplers.base import EnergyWeigher, UniformWeigher, ReweightWeigher
 from .samplers import reweighting
 from .samplers.rosenbluth import select_forward, select_reverse
 from .samplers.branch import count_and_sample
+from .samplers.channel import (ChannelSweep, ChannelSweepLJ, local_from_box,
+                               cuboid_members, random_rotation_matrix)
 from .samplers import branch as branch_mod
 from .state import zero_counters
+
+
+
+def _pore_bounds(cfg):
+    """Centre-accessible bounds for a hard pore inside the cubic cell of side
+    cfg.box. Returns (kind, params). The slab/cylinder is centred in the cell."""
+    L = cfg.box
+    if cfg.pore_geometry == "slit":
+        z0 = (L - cfg.pore_H) / 2.0
+        return ("slit", z0 + 0.5, z0 + cfg.pore_H - 0.5)          # zmin, zmax for centres
+    return ("cylinder", L / 2.0, cfg.pore_R - 0.5)                 # axis centre, rmax for centres
+
+
+def _inside_pore(coords, cfg):
+    """Boolean mask: which centres satisfy the hard wall. coords is (M, dim) or
+    a single (dim,) point. Hard spheres (radius 0.5) must keep their centres off
+    the wall by 0.5."""
+    if cfg.pore_geometry is None:
+        return None
+    a = np.atleast_2d(np.asarray(coords, float))
+    kind = cfg.pore_geometry
+    if kind == "slit":
+        L = cfg.box; z0 = (L - cfg.pore_H) / 2.0
+        z = a[:, 2]
+        ok = (z >= z0 + 0.5) & (z <= z0 + cfg.pore_H - 0.5)
+    else:
+        L = cfg.box; cx = cy = L / 2.0
+        r = np.hypot(a[:, 0] - cx, a[:, 1] - cy)
+        ok = r <= (cfg.pore_R - 0.5)
+    return ok if np.ndim(coords) > 1 else bool(ok[0])
 
 
 def make_weigher(cfg, potential):
@@ -48,16 +80,33 @@ def make_weigher(cfg, potential):
     raise NotImplementedError(f"engine does not yet wire potential {cfg.potential_type!r}")
 
 
-def _weighted_trials(raw, kdtree, cfg, potential, choice, n_full):
+def _lj_singleparticle_weight(dists, idxs, potential, n_fluid=None):
+    """Per-trial Boltzmann factor exp(-beta * sum_j u(r_ij)) over neighbours
+    within rc. With `n_fluid` given (QA), neighbours whose kd-tree index is
+    >= n_fluid are the frozen matrix and are dropped from the LJ sum (they
+    interact by overlap exclusion only); without it every neighbour counts.
+    For a bulk run this equals potential.weight_bulk(dists)."""
+    d = np.asarray(dists, float)
+    if n_fluid is not None:
+        d = np.where(np.asarray(idxs) < n_fluid, d, np.inf)
+    return potential.weight_pair(d)
+
+
+def _weighted_trials(raw, kdtree, cfg, potential, choice, n_full, n_fluid=None):
     """Turn the raw neighbour result into a weighted TrialSet, matching the
     original find_neighbors_fast weighting for the active mode."""
     coords, dists, idxs, km = raw
     g1 = cfg.gamma_dict[1]
     t = cfg.potential_type
-    if t in ("hard_sphere", "ljbranch"):
-        # ljbranch weights cliques (not single trials) downstream by the real LJ
-        # energy; the pool itself is unweighted, exactly like the hard-core pool
+    if t == "hard_sphere":
         return TrialSet(coords, np.ones(len(coords))), km
+    if t == "ljbranch":
+        # Reuse: each trial's single-particle LJ weight against the fluid rest
+        # (any frozen matrix excludes by overlap only) is the member-vs-system
+        # factor every clique needs downstream. Computed once here from the
+        # neighbour distances already in hand, never recomputed per clique.
+        w = _lj_singleparticle_weight(dists, idxs, potential, n_fluid)
+        return TrialSet(coords, w), km
     if t == "ljaux":
         w, ref = potential.weight_bulk(dists, coords=coords, idxs=idxs,
                                        kdtree=kdtree, gamma=g1)
@@ -112,7 +161,7 @@ def _advance_metropolis(state, cfg, potential):
     nn = cfg.no_neigh
     mf = cfg.move_factor
     beta = cfg.beta
-    mu = cfg.chem_pot
+    mu = state.mu if getattr(state, "mu", None) is not None else cfg.chem_pot
     V = cfg.total_volume
     hs = cfg.potential_type == "hard_sphere"
 
@@ -134,6 +183,8 @@ def _advance_metropolis(state, cfg, potential):
             without = np.delete(pos, j, axis=0)
             disp = mf * (rng.uniform(0, 1, dim) - 0.5)
             moved = (old + disp) % side
+            if cfg.pore_geometry is not None and not _inside_pore(moved, cfg):
+                continue                      # move into the wall: rejected
             if len(without) == 0:
                 pos = moved.reshape(1, -1)
                 c["move_accept"] += 1
@@ -162,6 +213,8 @@ def _advance_metropolis(state, cfg, potential):
             c["add_attempt"] += 1
             step += 1
             trial = rng.uniform(0, side, dim)
+            if cfg.pore_geometry is not None and not _inside_pore(trial, cfg):
+                continue                      # trial hit the wall: failed insertion
             if N > 0:
                 tree = cKDTree(pos, boxsize=box)
                 d = neighbour_dists(trial, tree, nn)
@@ -213,30 +266,29 @@ def _lj_energy(dists, rc):
     return float(np.sum(4.0 * ir6 * (ir6 - 1.0)))
 
 
-def _ljbranch_forward(pool_coords, k, lower, rest, box, rc, beta, rng, upper):
-    """Forward (insertion) Rosenbluth weight over all k-cliques of the band
-    graph, with one clique drawn proportional to exp(-beta U_clique).
+def _ljbranch_forward(pool, k, lower, box, rc, beta, rng):
+    """Forward (insertion) weight over all non-overlapping k-cliques of the
+    pool, one drawn proportional to its Boltzmann weight. The member-vs-system
+    factor of each clique is reused from pool.energy_weight (computed in the
+    neighbour build); only the intra-clique pairs are added inside the sum.
     Returns (chosen_coords, log W_new) or (None, None) if no clique exists."""
-    rest_tree = cKDTree(rest, boxsize=box) if len(rest) > 0 else None
-    W, count, chosen = branch_mod.ljbranch_weight_sum(
-        pool_coords, k, lower, upper, rest, box, rc, beta,
-        _lj_set_energy, rng=rng, rest_tree=rest_tree)
-    if count == 0 or chosen is None or W <= 0.0:
+    logW, count, chosen = branch_mod.ljbranch_weight_sum(
+        pool.coords, pool.energy_weight, k, lower, box, rc, beta, rng=rng)
+    if count == 0 or chosen is None or not np.isfinite(logW):
         return None, None
-    return chosen, np.log(W)
+    return chosen, logW
 
 
-def _ljbranch_reverse(pool_coords, k, lower, removed, rest, box, rc, beta, upper):
-    """Reverse (deletion) Rosenbluth weight: the SAME all-clique sum on the
-    current pool. The removed group is one member of the population, so only the
-    sum is needed. Returns log W_curr, or -inf if the population is empty."""
-    rest_tree = cKDTree(rest, boxsize=box) if len(rest) > 0 else None
-    W, count, _ = branch_mod.ljbranch_weight_sum(
-        pool_coords, k, lower, upper, rest, box, rc, beta,
-        _lj_set_energy, rng=None, rest_tree=rest_tree)
-    if count == 0 or W <= 0.0:
+def _ljbranch_reverse(pool, k, lower, box, rc, beta):
+    """Reverse (deletion) weight: the same non-overlapping k-clique sum on the
+    current pool, where the removed group is guaranteed to be one member. Same
+    enumerator and same weight definition as the forward, so detailed balance
+    holds by construction. Returns log W_curr, or -inf if no k-clique exists."""
+    logW, count, _ = branch_mod.ljbranch_weight_sum(
+        pool.coords, pool.energy_weight, k, lower, box, rc, beta, rng=None)
+    if count == 0 or not np.isfinite(logW):
         return -np.inf
-    return np.log(W)
+    return logW
 
 
 def _lj_set_energy(coords, rest, box, rc, rest_tree=None):
@@ -296,14 +348,19 @@ def advance(state, cfg, potential, weigher):
     gdict = cfg.gamma_dict
     beta = cfg.beta
     temp = cfg.temp
-    mu = cfg.chem_pot
+    mu = state.mu if getattr(state, "mu", None) is not None else cfg.chem_pot
     nvt = cfg.ensemble_type == "NVT"
+    # quenched-annealed frozen matrix: obstacles that enter the overlap test but
+    # are never inserted/deleted/moved/counted. Empty => ordinary bulk run.
+    matrix = getattr(cfg, "matrix_positions", None)
+    has_matrix = matrix is not None and len(matrix) > 0
     total_vol = cfg.total_volume
     ljaux = cfg.potential_type == "ljaux"
     ljbranch = cfg.potential_type == "ljbranch"   # true LJ+branch, no auxiliary
     lj = cfg.potential_type in ("lj", "ljbranch") or ljaux  # LJ physics: floor, translation, tail
     aux = cfg.potential_type == "aux"
     branch = cfg.branch
+    channel = getattr(cfg, "channel", False)   # branch variant: cuboid + sweep
     reweight = cfg.potential_type == "reweight"
     if branch and reweight:
         raise NotImplementedError("branch and reweight are alternative biasing "
@@ -337,7 +394,13 @@ def advance(state, cfg, potential, weigher):
                 ranf3 = (ranf1 + ranf2) % 1
                 mz = (old[2] + mf * (ranf3 - 0.5)) % side
                 moved = np.array([mx, my, mz])
-            tree = cKDTree(without, boxsize=box)
+            if cfg.pore_geometry is not None and not _inside_pore(moved, cfg):
+                continue                      # move into the wall: rejected
+            # translation overlap test must also see the frozen matrix, so a
+            # fluid particle cannot move onto an obstacle. Matrix appended after
+            # `without`; it is never selected as the moved particle.
+            tree = cKDTree(np.append(without, matrix, axis=0) if has_matrix else without,
+                           boxsize=box)
             if lj:
                 d_new, _ = tree.query([moved], k=nn, distance_upper_bound=uc)
                 d_new = d_new[0][np.isfinite(d_new[0])]
@@ -367,7 +430,7 @@ def advance(state, cfg, potential, weigher):
             continue
 
         if choice == "repack":
-            c["repack_step"] = c.get("repack_step", 0) + 1
+            c["repack_step"] += 1
             n_add = n_remove = depth + 1     # remove k, insert k; N conserved
         elif choice == "add":
             c["add_step"] += 1
@@ -407,18 +470,38 @@ def advance(state, cfg, potential, weigher):
                 idx_cav = np.empty(0, dtype=int)
                 n_cav = 0
         else:
-            if choice == "add" or lj:
+            if choice == "add":
                 center = rng.uniform(0, side, size=3)[:dim]
-            else:   # remove or repack (non-lj): centre on an existing particle
-                center = pos[int(rng.choice(N))]
+            else:   # remove or repack: centre on an existing particle so the
+                center = pos[int(rng.choice(N))]   # cavity is never empty
             anchor = -1
-            idx_cav = geometry.indices_in_cavity(pos, center,
-                                                 cfg.cavity_radius, side, two_d)
+            # channel: draw the orientation now so removal membership and the
+            # trial cloud share the same oriented body (required for reversibility).
+            chan_R = random_rotation_matrix(rng) if channel else None
+            if channel:
+                idx_cav = cuboid_members(pos, center, chan_R,
+                                         0.5 * cfg.channel_length,
+                                         0.5 * cfg.channel_width, side)
+            else:
+                idx_cav = geometry.indices_in_cavity(pos, center,
+                                                     cfg.cavity_radius, side, two_d)
             n_cav = len(idx_cav)
             if n_cav == 0:
-                continue
-            if n_cav < n_remove:
+                # empty cavity. An ADD needs nothing to remove, so it kicks down
+                # to a pure depth-0 insertion (n_add=1, n_remove=0) rather than
+                # being abandoned -- abandoning it is what drained the fluid at
+                # low density, where most global add-centres land in empty space.
+                # REMOVE/REPACK genuinely have nothing in the cavity to act on.
                 if choice == "add":
+                    n_add, n_remove = 1, 0
+                else:
+                    continue
+            elif n_cav < n_remove:
+                if choice == "repack":
+                    # repack must stay balanced: remove and add the same count,
+                    # capped at what the cavity actually holds, so N is conserved
+                    n_add = n_remove = n_cav
+                elif choice == "add":
                     n_add, n_remove = n_cav, n_cav - 1
                 else:
                     n_add, n_remove = n_cav - 1, n_cav
@@ -446,26 +529,48 @@ def advance(state, cfg, potential, weigher):
             keep[chosen_idx] = False
             disk_rest = pos[keep]
 
-        if len(disk_rest) == 0:
-            # nothing left to weigh trials against; degenerate near N=1, never
-            # reached at production density. skip rather than crash.
+        if len(disk_rest) == 0 and not has_matrix:
+            # bulk run with nothing to weigh trials against (N==0, no matrix):
+            # the depth-0 path handles a first insertion, so skip here rather
+            # than divide by an empty reference.
+            continue
+        if len(disk_rest) == 0 and has_matrix and n_add == 0:
+            # pure deletion with no fluid left: nothing to remove.
             continue
         # trial molecules in the cavity
-        trial_nums = rng.uniform(-cfg.cavity_radius, cfg.cavity_radius, size=(dim, n_trials))
-        tx = (trial_nums[0] + center[0]) % side
-        ty = (trial_nums[1] + center[1]) % side
-        if two_d:
-            trials = np.column_stack((tx, ty))
+        if channel:
+            # oriented thin cuboid around the same centre, using the SAME R drawn
+            # for the removal-membership test, so insertion and removal act on one
+            # body. R is kept so the sweep can recover local coordinates.
+            a_loc, b_loc = 0.5 * cfg.channel_length, 0.5 * cfg.channel_width
+            U_loc = np.column_stack((
+                rng.uniform(-a_loc, a_loc, n_trials),
+                rng.uniform(-b_loc, b_loc, n_trials),
+                rng.uniform(-b_loc, b_loc, n_trials)))
+            trials = np.mod(center + U_loc @ chan_R.T, side)
         else:
-            tz = (trial_nums[2] + center[2]) % side
-            trials = np.column_stack((tx, ty, tz))
+            trial_nums = rng.uniform(-cfg.cavity_radius, cfg.cavity_radius, size=(dim, n_trials))
+            tx = (trial_nums[0] + center[0]) % side
+            ty = (trial_nums[1] + center[1]) % side
+            if two_d:
+                trials = np.column_stack((tx, ty))
+            else:
+                tz = (trial_nums[2] + center[2]) % side
+                trials = np.column_stack((tx, ty, tz))
 
         keep_mask = np.ones(n_trials, dtype=bool)
         if n_remove != 0:
             keep_mask[rng.choice(n_trials, size=n_remove, replace=False)] = False
 
-        tree = cKDTree(disk_rest, boxsize=box)
-        raw = geometry.find_neighbors(tree, trials, lower, uc, nn, keep_mask=keep_mask)
+        # exclusion tree: fluid-rest PLUS frozen matrix. Trials/shadows that
+        # overlap either are rejected. The matrix is appended after disk_rest so
+        # the first len(disk_rest) tree indices are still the mobile fluid, which
+        # is all the downstream weight/selection logic ever indexes into.
+        excl = np.append(disk_rest, matrix, axis=0) if has_matrix else disk_rest
+        tree = cKDTree(excl, boxsize=box)
+        pore_valid = _inside_pore(trials, cfg) if cfg.pore_geometry is not None else None
+        raw = geometry.find_neighbors(tree, trials, lower, uc, nn,
+                                      keep_mask=keep_mask, valid=pore_valid)
         if raw is None:
             if n_add != 0:
                 continue       # nothing to insert from: equivalent to rejecting
@@ -478,13 +583,13 @@ def advance(state, cfg, potential, weigher):
                                  ref_neighbor_coord=np.empty((0, dim)))
             km = np.empty(0, dtype=bool)
         else:
-            trial_set, km = _weighted_trials(raw, tree, cfg, potential, choice, N)
+            trial_set, km = _weighted_trials(raw, tree, cfg, potential, choice, N, len(disk_rest))
 
         if n_remove != 0:
             raw_in = geometry.find_neighbors(tree, disk_in, lower, uc, nn)
             if raw_in is None:
                 continue
-            mol_in_cav, _ = _weighted_trials(raw_in, tree, cfg, potential, choice, N)
+            mol_in_cav, _ = _weighted_trials(raw_in, tree, cfg, potential, choice, N, len(disk_rest))
             if len(mol_in_cav) != n_remove:
                 continue
         else:
@@ -497,27 +602,53 @@ def advance(state, cfg, potential, weigher):
         else:
             pool = trial_set.copy()
 
+        # channel mode: one sweep over the pool serves both the forward count
+        # (Z_{n_add}) and the reverse count (Z_{n_remove}); kmax covers both.
+        chan_sweep = None
+        if channel and len(pool):
+            U_pool = local_from_box(pool.coords, center, chan_R, side)
+            kmx = max(n_add, n_remove)
+            if ljbranch:
+                chan_sweep = ChannelSweepLJ(U_pool, pool.energy_weight,
+                                            lower, uc, beta, kmx)
+            else:
+                chan_sweep = ChannelSweep(U_pool, lower, kmx)
+
         # forward (new configuration)
         if n_add != 0:
             if len(trial_set) < n_add:
                 continue
             if branch:
                 if ljbranch:
-                    # true LJ+branch: full Rosenbluth sum over all k-cliques,
-                    # selection proportional to exp(-beta U_clique). Returns the
-                    # chosen clique's coords and W_new = sum over cliques.
-                    _band_upper = 2.0 * cfg.cavity_radius
-                    chosen_coords, sum_new = _ljbranch_forward(
-                        pool.coords, n_add, lower, disk_rest, box, uc, beta,
-                        rng, _band_upper)
-                    if chosen_coords is None:
-                        continue
+                    if channel:
+                        sum_new = chan_sweep.log_weight(n_add) if chan_sweep else -np.inf
+                        if not np.isfinite(sum_new):
+                            continue
+                        idx = chan_sweep.sample(n_add, rng)
+                        if idx is None:
+                            continue
+                        chosen_coords = pool.coords[list(idx)]
+                    else:
+                        # true LJ+branch: Boltzmann-weighted sum over all
+                        # non-overlapping k-cliques, one drawn proportional to its
+                        # weight. Returns the chosen clique's coords and
+                        # log W_new = log sum over cliques.
+                        chosen_coords, sum_new = _ljbranch_forward(
+                            pool, n_add, lower, box, uc, beta, rng)
+                        if chosen_coords is None:
+                            continue
                     e_u_r_new = 0.0
                 else:
-                    num_new, idx = count_and_sample(pool.coords, n_add,
-                                                    lower, box_lengths=box)
-                    if num_new == 0:
-                        continue
+                    if channel:
+                        num_new = chan_sweep.count(n_add) if chan_sweep else 0
+                        if num_new == 0:
+                            continue
+                        idx = chan_sweep.sample(n_add, rng)
+                    else:
+                        num_new, idx = count_and_sample(pool.coords, n_add,
+                                                        lower, box_lengths=box)
+                        if num_new == 0:
+                            continue
                     chosen_coords = pool.coords[list(idx)]
                     sum_new = np.log(num_new)
                     e_u_r_new = 0.0
@@ -542,17 +673,23 @@ def advance(state, cfg, potential, weigher):
         if n_remove != 0:
             if branch:
                 if ljbranch:
-                    # reverse Rosenbluth weight W_curr: the same all-clique sum
-                    # on the CURRENT configuration's pool, with the removed set
-                    # guaranteed to be one member. Identical enumerator+weight
-                    # as the forward, so detailed balance holds by construction.
-                    sum_current = _ljbranch_reverse(
-                        pool.coords, n_remove, lower, disk_in, disk_rest,
-                        box, uc, beta, 2.0 * cfg.cavity_radius)
+                    if channel:
+                        sum_current = (chan_sweep.log_weight(n_remove)
+                                       if chan_sweep else -np.inf)
+                    else:
+                        # reverse weight log W_curr: the same non-overlapping
+                        # clique sum on the CURRENT pool, with the removed group
+                        # guaranteed to be one member. Same enumerator and weight
+                        # as the forward, so detailed balance holds.
+                        sum_current = _ljbranch_reverse(
+                            pool, n_remove, lower, box, uc, beta)
                     e_u_r_current = 0.0
                 else:
-                    num_cur, _ = count_and_sample(pool.coords, n_remove,
-                                                  lower, box_lengths=box)
+                    if channel:
+                        num_cur = chan_sweep.count(n_remove) if chan_sweep else 0
+                    else:
+                        num_cur, _ = count_and_sample(pool.coords, n_remove,
+                                                      lower, box_lengths=box)
                     if num_cur <= 0:
                         sum_current = -np.inf
                     else:
@@ -590,7 +727,7 @@ def advance(state, cfg, potential, weigher):
 
         # acceptance
         if choice == "repack":
-            c["repack_attempt"] = c.get("repack_attempt", 0) + 1
+            c["repack_attempt"] += 1
             # Number-conserving move: remove k, insert k in one step. The
             # chemical-potential prefactor cancels identically (the e^{beta mu}
             # of the k insertions against the e^{-beta mu} of the k deletions,
@@ -610,7 +747,7 @@ def advance(state, cfg, potential, weigher):
             log_alpha = max(0.0, log_alpha)
             if log_alpha <= -np.log(rng.uniform(0, 1)):
                 pos = np.append(disk_rest, chosen_coords, axis=0) if len(chosen_coords) else disk_rest
-                c["repack_accept"] = c.get("repack_accept", 0) + 1
+                c["repack_accept"] += 1
         elif choice == "add":
             c["add_attempt"] += 1
             mu_ideal = -np.log(total_vol / (N + 1))

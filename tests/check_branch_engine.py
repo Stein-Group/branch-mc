@@ -13,8 +13,8 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from gcmc.config import from_params       # noqa: E402
-from gcmc import engine                    # noqa: E402
+from gcmc.sim_setup import from_params       # noqa: E402
+from gcmc import MC_engine as engine                    # noqa: E402
 from gcmc.state import ChainState          # noqa: E402
 
 NW = 36

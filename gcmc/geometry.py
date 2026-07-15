@@ -43,7 +43,7 @@ def indices_in_cavity(coords, center, radius, side, two_dim):
 
 
 def find_neighbors(kdtree, trial_mols, lower_cutoff, upper_cutoff, no_neigh,
-                   keep_mask=None):
+                   keep_mask=None, valid=None):
     """Query each trial's neighbours within `upper_cutoff`, drop any trial that
     overlaps the system (a neighbour closer than `lower_cutoff`), and return the
     surviving raw arrays. Weighting is the caller's job.
@@ -55,6 +55,8 @@ def find_neighbors(kdtree, trial_mols, lower_cutoff, upper_cutoff, no_neigh,
     distances, indices = kdtree.query(trial_mols, k=no_neigh,
                                       distance_upper_bound=upper_cutoff)
     good = np.all(distances >= lower_cutoff, axis=1)
+    if valid is not None:                 # one-body pore wall: out-of-pore
+        good = good & np.asarray(valid, bool)   # trials are rejected like overlaps
     if not np.any(good):
         return None
 

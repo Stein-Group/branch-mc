@@ -62,7 +62,7 @@ def _gamma_dict(pmf, reweight, two_dim):
 
 
 _MAIN = {"hard_core", "lennard_jones"}
-_SAMPLERS = {"metropolis", "rosenbluth", "branch", "reweight"}
+_SAMPLERS = {"metropolis", "rosenbluth", "branch", "reweight", "channel"}
 
 
 def _check(section, allowed, required=()):
@@ -126,8 +126,30 @@ class Config:
     burn_in: int
     traj_every: int
     checkpoint_every: int
-    full_trajectory: bool
     initial_config: str | None
+    # quenched-annealed matrix: frozen obstacle positions the fluid cannot
+    # overlap but which are never inserted/deleted/moved/counted. Default empty
+    # => ordinary bulk run, bit-identical to before. matrix_config is the file
+    # path (loaded by the runner); matrix_positions holds the loaded coordinates.
+    matrix_config: str | None = None
+    matrix_positions: object = None   # np.ndarray (n_matrix, dim) or None
+    # muVT target-mu control: drive mu so the running-mean N hits a target.
+    # target_count is the target <N> (from target_N / target_eta / target_density);
+    # None => ordinary fixed-mu muVT. The controller is Robbins-Monro on log-N.
+    target_count: float | None = None
+    control_gain: float = 0.5
+    control_gain_tau: float = 20.0
+    control_window: int = 20
+    sweep_label: str | None = None       # tag from the launcher: the swept axis
+    # confinement (ensemble_type == "confined"): hard slit or cylinder pore
+    pore_geometry: str | None = None     # "slit" | "cylinder" | None
+    pore_H: float | None = None          # slit gap (z), wall surfaces at 0 and H
+    pore_R: float | None = None          # cylinder radius (axis along z, at centre)
+    pore_axis_len: float | None = None   # cylinder axial length (periodic z)
+    # channel sweep (sampler == "channel"): thin oriented cuboid trial region
+    channel: bool = False
+    channel_length: float = 0.0          # cuboid length along the sweep axis
+    channel_width: float = 0.0           # cuboid cross-section (square side)
 
     @property
     def box_dims(self):
@@ -176,27 +198,72 @@ def from_params(p):
 
     # ---- sampler ----
     smp = p["sampler"]
-    _check(smp, {"type", "depth", "use_depth", "trials", "trial_density", "trial_box_side"},
+    _check(smp, {"type", "depth", "use_depth", "trials", "trial_density", "trial_box_side", "channel_length", "channel_width"},
            {"type"})
     sampler = smp["type"]
     if sampler not in _SAMPLERS:
         raise ValueError(f"unknown sampler {sampler!r}; allowed {sorted(_SAMPLERS)}")
     metropolis = sampler == "metropolis"
-    branch = sampler == "branch"
+    branch = sampler in ("branch", "channel")
+    channel = sampler == "channel"
     reweight = sampler == "reweight"
 
     # ---- ensemble ----
     ens = p["ensemble"]
     _check(ens, {"mu", "sweep", "dimension", "box", "type",
-                 "N", "packing_fraction"}, {"dimension"})
+                 "N", "packing_fraction",
+                 "target_eta", "target_density", "target_N", "pore"}, {"dimension"})
     dim = int(ens["dimension"])
+    target_count = None   # set below iff a muVT target is requested
+    _target_spec = None   # (kind, value) for a muVT target, finalized post-volume
+    _pore_geometry = _pore_H = _pore_R = _pore_axis_len = None
     if dim not in (2, 3):
         raise ValueError("dimension must be 2 or 3")
     two_dim = dim == 2
     ens_type = ens.get("type", "muVT")
-    if ens_type not in ("muVT", "NVT"):
-        raise ValueError("ensemble.type must be 'muVT' or 'NVT'")
+    if ens_type not in ("muVT", "NVT", "QA", "confined"):
+        raise ValueError("ensemble.type must be 'muVT', 'NVT', 'QA', or 'confined'")
     nvt = ens_type == "NVT"
+    qa = ens_type == "QA"
+    confined = ens_type == "confined"
+    if confined:
+        # hard slit or cylinder pore. muVT physics (give mu, or a target) plus a
+        # one-body hard-wall constraint. The pore is the only external field;
+        # rejects a matrix (no fluid-in-matrix-in-pore here). 3D only.
+        if "pore" not in ens:
+            raise ValueError("ensemble.type='confined' requires an ensemble.pore block")
+        if two_dim:
+            raise ValueError("confined pores are 3D only")
+        if "matrix_config" in p.get("run", {}):
+            raise ValueError("a pore and a QA matrix cannot be combined")
+        pore = ens["pore"]
+        _pore_geometry = pore.get("geometry")
+        if _pore_geometry == "slit":
+            _pore_H = float(pore["H"])           # gap in z; walls at 0 and H
+            if _pore_H <= 1.0:
+                raise ValueError("slit gap H must exceed the sphere diameter (1)")
+        elif _pore_geometry == "cylinder":
+            _pore_R = float(pore["R"])           # radius; axis along z at centre
+            _pore_axis_len = float(pore.get("L_z", ens["box"]))
+            if 2 * _pore_R <= 1.0:
+                raise ValueError("cylinder diameter 2R must exceed the sphere diameter (1)")
+        else:
+            raise ValueError("ensemble.pore.geometry must be 'slit' or 'cylinder'")
+        # the wall lives inside the cubic periodic cell of side `box`; require a
+        # forbidden margin >= 1 sigma so periodic images never interact across
+        # the wall (then the existing cubic-periodic neighbour tree is exact and
+        # no per-axis box change is needed).
+        L = float(ens["box"])
+        if _pore_geometry == "slit" and _pore_H > L - 1.0:
+            raise ValueError(f"slit gap H={_pore_H} must be <= box-1={L-1} so the "
+                             f"forbidden margin separates periodic z-images")
+        if _pore_geometry == "cylinder" and 2 * _pore_R > L - 1.0:
+            raise ValueError(f"cylinder diameter 2R={2*_pore_R} must be <= box-1={L-1} "
+                             f"so the forbidden margin separates periodic x,y-images")
+        _pore_axis_len = L     # cubic cell: cylinder axial period = box
+    if "pore" in ens and not confined:
+        raise ValueError("ensemble.pore is only valid with ensemble.type='confined'")
+
     if nvt:
         # NVT: fixed particle number, no chemical potential. Target given as an
         # exact integer N, or as a packing fraction converted to the nearest
@@ -217,22 +284,42 @@ def from_params(p):
                 f"gcmc/launcher.py.")
         mu = 0.0   # unused under NVT; the prefactor cancels in repacking
     else:
-        has_mu, has_sweep = "mu" in ens, "sweep" in ens
+        # muVT: either a fixed `mu` (or a sweep), OR a target the controller
+        # drives mu toward: exactly one of target_eta / target_density / target_N.
         if "N" in ens or "packing_fraction" in ens:
             raise ValueError("'N'/'packing_fraction' are NVT-only; set ensemble.type='NVT'")
-        if has_mu and has_sweep:
-            raise ValueError("ensemble takes either 'mu' or 'sweep', not both")
-        if not has_mu and not has_sweep:
-            raise ValueError("ensemble needs 'mu' (one run) or 'sweep' (a batch)")
-        if isinstance(ens.get("mu"), list):
-            raise ValueError(
-                "ensemble.mu is a list (a sweep) but a single run got it "
-                "unexpanded. Launch sweeps with `python -m gcmc.launcher`; if "
-                "you did, gcmc/launcher.py on this machine is outdated.")
-        if has_sweep:
-            raise ValueError("this config has a 'sweep'; launch it with gcmc.launcher, "
-                             "which expands it into one run per mu")
-        mu = float(ens["mu"])
+        target_keys = [k for k in ("target_eta", "target_density", "target_N") if k in ens]
+        if len(target_keys) > 1:
+            raise ValueError(f"give only one target, got {target_keys}")
+        targeting = len(target_keys) == 1
+        has_mu, has_sweep = "mu" in ens, "sweep" in ens
+
+        if targeting:
+            if has_sweep:
+                raise ValueError("a target and a 'sweep' are mutually exclusive")
+            for k in ("target_eta", "target_density", "target_N"):
+                if isinstance(ens.get(k), list):
+                    raise ValueError(f"ensemble.{k} must be a single value, not a list")
+            # record the raw target; convert to a particle count <N> after the
+            # box volume is known (computed further below). Starting mu is set
+            # there too (explicit `mu` seed, or the ideal-gas guess).
+            _target_spec = target_keys[0], float(ens[target_keys[0]])
+            mu = float(ens["mu"]) if has_mu else None   # finalized after volume
+        else:
+            if has_mu and has_sweep:
+                raise ValueError("ensemble takes either 'mu' or 'sweep', not both")
+            if not has_mu and not has_sweep:
+                raise ValueError("ensemble needs 'mu', a target "
+                                 "(target_eta/target_density/target_N), or 'sweep'")
+            if isinstance(ens.get("mu"), list):
+                raise ValueError(
+                    "ensemble.mu is a list (a sweep) but a single run got it "
+                    "unexpanded. Launch sweeps with `python -m gcmc.launcher`; if "
+                    "you did, gcmc/launcher.py on this machine is outdated.")
+            if has_sweep:
+                raise ValueError("this config has a 'sweep'; launch it with gcmc.launcher, "
+                                 "which expands it into one run per mu")
+            mu = float(ens["mu"])
 
     # ---- auxiliary ----
     aux_block = p.get("auxiliary")
@@ -246,16 +333,20 @@ def from_params(p):
     run = p.get("run", {})
     _check(run, {"kind", "n_workers", "n_cores", "sampling_window", "target_cycles", "burn_in",
                  "traj_every", "checkpoint_every", "seed", "initial_config",
+                 "matrix_config",
                  "radius", "move_factor", "upper_cutoff", "lower_cutoff", "no_neigh",
-                 "cell_length", "buffer", "x_spacing", "y_spacing", "full_trajectory"})
+                 "cell_length", "buffer", "x_spacing", "y_spacing",
+                 "control_gain", "control_gain_tau", "control_window",
+                 "sweep_label", "matrix_config"})
+    if int(run.get("traj_every", 0)) < 0:
+        raise ValueError("run.traj_every must be >= 0 (0 = save only the last "
+                         "frame; N >= 1 = append every N windows)")
     kind = run.get("kind", "single")
     if kind not in ("single", "parallel"):
         raise ValueError("run.kind must be 'single' or 'parallel'")
     parallel = kind == "parallel"
 
     # ---- compatibility table ----
-    if lj and two_dim:
-        raise ValueError("Lennard-Jones is 3D only")
     if reweight and lj:
         raise ValueError("reweight requires a hard_core main potential")
     if parallel and reweight:
@@ -270,8 +361,6 @@ def from_params(p):
         raise ValueError("branch takes no auxiliary potential")
     if pmf and reweight:
         raise ValueError("reweight uses psi6, not a pmf auxiliary; remove the auxiliary block")
-    if not lj and mu < 0:
-        raise ValueError("non-LJ runs require mu >= 0")
     if pmf and not two_dim and "g3_csv" not in aux_block:
         raise ValueError("3D pmf auxiliary requires auxiliary.g3_csv")
     if parallel:
@@ -284,24 +373,8 @@ def from_params(p):
                 f"parallel buffer ({buffer_v}) must be >= the interaction "
                 f"range ({reach}): border rings must contain every molecule "
                 f"that can interact with a live one")
-    if int(smp.get("depth", 0)) > 3:
-        raise ValueError("depth is validated for 0-3 only")
-    if int(smp.get("depth", 0)) > 0 and parallel:
-        import warnings
-        cl = float(run.get("cell_length", 0.0))
-        cav_w = 2.0 * (float(smp.get("trial_box_side", 3.0)) / 2.0
-                       if "trial_box_side" in smp
-                       else float(smp.get("cavity_radius", 1.5)))
-        warnings.warn(
-            f"parallel depth >= 1 is approximate: the depth scheme satisfies "
-            f"global balance, not detailed balance, so a cell decomposition "
-            f"carries a residual density bias controlled by the cavity/cell "
-            f"ratio. Measured on the hard-sphere EOS: +19% at cell_length = "
-            f"2.7 cavity widths, +1.3% at 6.7, +0.9% at 10. Your cell_length "
-            f"is {cl / cav_w:.1f} cavity widths; use >= 20 to push the bias "
-            f"below the half-percent level, or serial mode, which is exact "
-            f"at all depths.",
-            UserWarning)
+    if int(smp.get("depth", 0)) < 0:
+        raise ValueError("depth must be >= 0")
     if metropolis:
         forbidden = {"depth", "trials", "trial_density", "trial_box_side"} & set(smp)
         if forbidden:
@@ -328,11 +401,15 @@ def from_params(p):
     if metropolis:
         trial_box_side = 0.0
         cav = 0.0
+        channel_length = 0.0
+        channel_width = 0.0
         n_trials = 1
         trial_density = 0.0
     else:
         trial_box_side = float(smp.get("trial_box_side", 3.0))
         cav = trial_box_side / 2.0
+        channel_length = float(smp.get("channel_length", 0.0))
+        channel_width = float(smp.get("channel_width", 0.0))
         span = trial_box_side ** 2
         if "trial_density" in smp:
             trial_density = float(smp["trial_density"])
@@ -371,13 +448,35 @@ def from_params(p):
                 raise ValueError("packing_fraction must be in [0, 1)")
             target_n = int(round(pf * total_vol / vol_mol))
 
+    # muVT target control: now that the box volume is known, convert the target
+    # to a particle count <N>, and finalize the starting mu (ideal-gas guess if
+    # the user gave no explicit seed).
+    if _target_spec is not None:
+        kind, val = _target_spec
+        if kind == "target_N":
+            target_count = val
+        elif kind == "target_eta":
+            target_count = val * total_vol / vol_mol
+        else:  # target_density (rho* = N / V)
+            target_count = val * total_vol
+        if target_count <= 0:
+            raise ValueError("the target must correspond to N > 0")
+        if mu is None:
+            mu = math.log(target_count / total_vol)   # ideal-gas cold start
+
     lj_tail_pref = None
     lj_tail_on = bool(pot.get("tail", True))
     if "tail" in pot and not lj:
         raise ValueError("potential.tail applies to lennard_jones only")
     if lj:
-        x = uc ** -9 / 3.0 - uc ** -3
-        lj_tail_pref = ((8.0 / 3.0) * math.pi / total_vol * x) if lj_tail_on else 0.0
+        if two_dim:
+            # 2D mean-field tail (g(r)=1 beyond rc), integrated over the plane:
+            # U_tail = (4 pi / A) N^2 [ rc^-10/10 - rc^-4/4 ].
+            x = uc ** -10 / 10.0 - uc ** -4 / 4.0
+            lj_tail_pref = (4.0 * math.pi / total_vol * x) if lj_tail_on else 0.0
+        else:
+            x = uc ** -9 / 3.0 - uc ** -3
+            lj_tail_pref = ((8.0 / 3.0) * math.pi / total_vol * x) if lj_tail_on else 0.0
 
     if reweight:
         ptype = "reweight"
@@ -396,12 +495,76 @@ def from_params(p):
     else:
         ptype = "hard_sphere"
 
+    has_matrix_cfg = run.get("matrix_config") is not None
+    if qa and not has_matrix_cfg:
+        raise ValueError(
+            "ensemble.type='QA' (quenched-annealed) requires run.matrix_config: "
+            "an absolute path to the frozen matrix configuration (an NVT "
+            "checkpoint.npz, .extxyz, or plain x y z file).")
+    if has_matrix_cfg and not qa:
+        raise ValueError(
+            "run.matrix_config is only valid with ensemble.type='QA'. A frozen "
+            "matrix defines a quenched-annealed run; set ensemble.type='QA' "
+            "(it is grand-canonical, so give a chemical potential mu, not N).")
+    if qa:
+        # QA support is implemented only on the deep serial rosenbluth/branch
+        # path. Reject every combination that would silently ignore the matrix
+        # and produce fluid overlapping the frozen obstacles with no error.
+        if ptype not in ("hard_sphere", "ljbranch"):
+            raise ValueError(
+                f"QA runs support hard-core and LJ+branch potentials only, not "
+                f"{ptype!r}; the other modes pass kd-tree neighbour indices "
+                f"downstream where frozen-matrix indices would be misread as "
+                f"fluid particles")
+        if metropolis:
+            raise ValueError(
+                "QA runs are not supported with the 'metropolis' sampler: its "
+                "insertion/translation overlap test is built on the fluid only "
+                "and would let fluid overlap the frozen matrix. Use 'rosenbluth' "
+                "or 'branch'.")
+        if kind == "parallel":
+            raise ValueError(
+                "QA runs are not supported with run.kind='parallel': the domain "
+                "decomposition carries only the fluid in each cell and would "
+                "drop the frozen matrix. Use run.kind='single'.")
+    if channel:
+        import math as _m
+        if parallel:
+            raise ValueError("channel sampler is serial only")
+        if two_dim:
+            raise ValueError("channel sampler is 3D only")
+        if channel_length <= 0.0 or channel_width <= 0.0:
+            raise ValueError("channel sampler needs channel_length and "
+                             "channel_width > 0")
+        if not (diameter <= channel_width <= 2.0 * diameter + 1e-9):
+            raise ValueError(
+                f"channel_width must lie in [sigma, 2 sigma] = "
+                f"[{diameter}, {2 * diameter}]; got {channel_width}")
+        if int(smp.get("depth", 0)) < 1:
+            raise ValueError("channel sampler needs depth >= 1 (depth 0 has no "
+                             "clique structure to sweep)")
+        # periodic guard: insertion and removal share one oriented cuboid, so the
+        # whole pool lives in that body. Its space diagonal must stay below the
+        # box minus the interaction range (sigma for hard core, rc for LJ) so
+        # local distances equal periodic distances.
+        guard_cut = uc if lj else diameter
+        diag = _m.sqrt(channel_length ** 2 + 2.0 * channel_width ** 2)
+        if diag > box - guard_cut:
+            raise ValueError(
+                f"channel geometry violates the periodic guard: cuboid diagonal "
+                f"{diag:.3f} must be <= box - cutoff = {box - guard_cut:.3f}")
+
     return Config(
         potential_type=ptype, sampler=sampler, dimension=dim, chem_pot=mu,
         ensemble_type=ens_type, target_n=target_n, box=box,
+        target_count=target_count,
+        control_gain=float(run.get("control_gain", 0.5)),
+        control_gain_tau=float(run.get("control_gain_tau", 20.0)),
+        control_window=int(run.get("control_window", 20)),
         cavity_radius=cav, trial_box_side=trial_box_side, trial_density=trial_density,
         depth=(0 if metropolis else int(smp.get("depth", 0))),
         branch=branch, metropolis=metropolis,
+        channel=channel, channel_length=channel_length, channel_width=channel_width,
         use_depth=bool(smp.get("use_depth", True)),
         move_factor=float(run.get("move_factor", 0.25)),
         temp=temp, rc=(uc if lj else None),
@@ -423,8 +586,11 @@ def from_params(p):
         sampling_window=int(run.get("sampling_window", 1000)),
         target_cycles=float(run.get("target_cycles", 1.0025e9)),
         burn_in=int(run.get("burn_in", 0)),
-        traj_every=int(run.get("traj_every", 1)),
+        traj_every=int(run.get("traj_every", 0)),
         checkpoint_every=int(run.get("checkpoint_every", 1)),
-        full_trajectory=bool(run.get("full_trajectory", False)),
         initial_config=run.get("initial_config"),
+        matrix_config=run.get("matrix_config"),
+        sweep_label=run.get("sweep_label"),
+        pore_geometry=_pore_geometry, pore_H=_pore_H, pore_R=_pore_R,
+        pore_axis_len=_pore_axis_len,
     )

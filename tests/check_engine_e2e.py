@@ -90,7 +90,7 @@ orig_eta = data[:, 1]
 
 # ---- engine ----
 sys.path.insert(0, os.path.join(HERE, ".."))
-from gcmc import config, engine          # noqa: E402
+from gcmc import sim_setup as config, MC_engine as engine          # noqa: E402
 from gcmc.state import ChainState        # noqa: E402
 
 cfg = config.from_params(PARAMS[MODE])

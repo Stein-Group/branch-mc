@@ -11,7 +11,7 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
-from gcmc import runner, identity, config  # noqa: E402
+from gcmc import runner, hash_fingerprint as identity, sim_setup as config  # noqa: E402
 
 
 def base(target):

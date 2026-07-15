@@ -13,6 +13,7 @@ same id; a stale lock past the timeout is taken over.
 from __future__ import annotations
 import json
 import itertools
+import math
 import os
 import socket
 import time
@@ -22,7 +23,53 @@ from . import sim_setup, hash_fingerprint, io, MC_engine
 from .state import ChainState, zero_counters
 
 LOG_HEADER = ("#MC_cycle(M)  pckng_frctn  N  add_acc add_att add_stp "
-              "rm_acc rm_stp mv_acc mv_stp  wall_s")
+              "rm_acc rm_stp mv_acc mv_stp  wall_s  mu  avgN  density")
+
+
+
+def _inside_pore_seed(pt, cfg):
+    """Is a single point inside the hard pore (centre clearance 0.5)?"""
+    L = cfg.box
+    if cfg.pore_geometry == "slit":
+        z0 = (L - cfg.pore_H) / 2.0
+        return z0 + 0.5 <= pt[2] <= z0 + cfg.pore_H - 0.5
+    cx = cy = L / 2.0
+    import math as _m
+    return _m.hypot(pt[0] - cx, pt[1] - cy) <= cfg.pore_R - 0.5
+
+
+def _save_pore_geometry(cfg, directory):
+    """Write the wall geometry as an extxyz of marker points so the pore can be
+    loaded next to the fluid trajectory in OVITO. Slit: two wall planes tiled
+    with markers; cylinder: the lateral surface tiled in (theta, z). Markers use
+    element 'W' (wall) so they are visually distinct from the fluid."""
+    import numpy as _np, os as _os
+    L = cfg.box
+    pts = []
+    n = 40
+    if cfg.pore_geometry == "slit":
+        z0 = (L - cfg.pore_H) / 2.0
+        xs = _np.linspace(0, L, n); ys = _np.linspace(0, L, n)
+        for zc in (z0, z0 + cfg.pore_H):                 # both wall surfaces
+            for x in xs:
+                for y in ys:
+                    pts.append((x, y, zc))
+    else:
+        R = cfg.pore_R; cx = cy = L / 2.0
+        th = _np.linspace(0, 2 * _np.pi, n, endpoint=False)
+        zs = _np.linspace(0, L, n)
+        for z in zs:
+            for t in th:
+                pts.append((cx + R * _np.cos(t), cy + R * _np.sin(t), z))
+    pts = _np.asarray(pts, float)
+    path = _os.path.join(directory, "pore_geometry.extxyz")
+    with open(path, "w") as f:
+        f.write(f"{len(pts)}\n")
+        f.write(f'Lattice="{L} 0 0 0 {L} 0 0 0 {L}" '
+                f'Properties=species:S:1:pos:R:3 geometry={cfg.pore_geometry}\n')
+        for p in pts:
+            f.write(f"W {p[0]:.4f} {p[1]:.4f} {p[2]:.4f}\n")
+    return path
 
 
 def _init_config(cfg, rng):
@@ -40,6 +87,46 @@ def _init_config(cfg, rng):
     # safe across SLURM / subprocess working directories.
     spec = cfg.initial_config
     if not spec:
+        if getattr(cfg, "pore_geometry", None) is not None:
+            # confined pore: seed a few non-overlapping particles INSIDE the pore
+            # so the depth>=1 proposal has an anchor (it cannot grow from N=0).
+            from scipy.spatial import cKDTree as _KD
+            box = cfg.box; dim = cfg.dimension
+            placed = []
+            for _ in range(20 * 300):
+                if len(placed) >= 20:
+                    break
+                pt = rng.uniform(0, box, dim)
+                if not _inside_pore_seed(pt, cfg):
+                    continue
+                if placed:
+                    tp = _KD(np.array(placed) % box, boxsize=[box] * dim)
+                    if tp.query(pt % box, k=1)[0] < cfg.diameter:
+                        continue
+                placed.append(pt)
+            return np.array(placed) if placed else np.empty((0, dim))
+        mpos = getattr(cfg, "matrix_positions", None)
+        if mpos is not None and len(mpos) > 0 and getattr(cfg, "target_n", None) is None:
+            # quenched-annealed muVT: seed a few valid fluid particles (the
+            # depth>=1 proposal needs an anchor and cannot grow from N=0), each
+            # clearing the matrix and the others. GCMC then fills the pores.
+            from scipy.spatial import cKDTree as _KD
+            box = cfg.box
+            tree_m = _KD(np.asarray(mpos, float) % box, boxsize=[box] * cfg.dimension)
+            placed = []
+            target_seed = 20            # small; enough to bootstrap insertion
+            for _ in range(target_seed * 200):
+                if len(placed) >= target_seed:
+                    break
+                pt = rng.uniform(0, box, cfg.dimension)
+                if tree_m.query(pt % box, k=1)[0] < cfg.diameter:
+                    continue            # overlaps matrix
+                if placed:
+                    tp = _KD(np.array(placed) % box, boxsize=[box] * cfg.dimension)
+                    if tp.query(pt % box, k=1)[0] < cfg.diameter:
+                        continue        # overlaps an already-placed fluid sphere
+                placed.append(pt)
+            return (np.array(placed) if placed else np.empty((0, cfg.dimension)))
         if getattr(cfg, "target_n", None) is not None:
             # NVT: seed EXACTLY target_n non-overlapping particles on a grid.
             # Repacking conserves N, so the starting count must be the target;
@@ -116,7 +203,23 @@ def release_lock(paths):
 def _save(paths, cfg, state, params):
     io.save_checkpoint(paths, positions=state.positions, step=state.step,
                        rng=io.rng_state(state.rng), counters=state.counters,
-                       params=params)
+                       params=params, mu=state.mu, n_history=state.n_history)
+
+
+def _find_matrix_snapshot(params, root, dimension):
+    """On resume with the external matrix gone, locate the run directory whose
+    params match and return its matrix.npz snapshot path (or None)."""
+    import os, json, glob
+    target = json.dumps(params, sort_keys=True)
+    for snap in glob.glob(os.path.join(root, "*", "matrix.npz")):
+        pj = os.path.join(os.path.dirname(snap), "params.json")
+        if os.path.exists(pj):
+            try:
+                if json.dumps(json.load(open(pj)), sort_keys=True) == target:
+                    return snap
+            except Exception:
+                continue
+    return None
 
 
 def run(params, root="runs"):
@@ -125,8 +228,53 @@ def run(params, root="runs"):
             params = json.load(f)
 
     cfg = sim_setup.from_params(params)
-    paths = hash_fingerprint.run_paths(cfg, root)
-    io.ensure_run_dir(paths, params)
+    if cfg.matrix_config is not None:
+        import dataclasses, os
+        import numpy as _np
+        mpath = os.path.abspath(cfg.matrix_config)
+        if os.path.isdir(mpath):
+            raise IsADirectoryError(
+                f"run.matrix_config is a folder ({mpath}). A folder of matrix "
+                f"realizations is only valid as a SWEEP: give a list target "
+                f"(target_N/target_eta/target_density) and launch with "
+                f"`python -m gcmc.launcher`, which pairs each swept value with one "
+                f"matrix from the folder. For a single run, point matrix_config "
+                f"at one trajectory.extxyz / checkpoint.npz file.")
+        # On a fresh launch we load the external matrix to compute the
+        # content-addressed run dir, then snapshot it inside. On a resume the
+        # snapshot in the (params-determined) run dir is authoritative, so the
+        # external file may be gone -- find the run dir by probing the snapshot.
+        if os.path.exists(mpath):
+            mpos = io.load_matrix(mpath, cfg.dimension)
+            cfg = dataclasses.replace(cfg, matrix_positions=mpos)
+            paths = hash_fingerprint.run_paths(cfg, root)
+            io.ensure_run_dir(paths, params)
+            snap = os.path.join(paths.directory, "matrix.npz")
+            if os.path.exists(snap):
+                cfg = dataclasses.replace(
+                    cfg, matrix_positions=io.load_matrix(snap, cfg.dimension))
+            else:
+                _np.savez(snap, positions=_np.asarray(mpos, float))
+            print(f"loaded frozen matrix: {len(mpos)} obstacles from {mpath}")
+        else:
+            # external matrix gone: this must be a resume. Find the existing run
+            # dir whose params.json matches and load its matrix snapshot.
+            snap = _find_matrix_snapshot(params, root, cfg.dimension)
+            if snap is None:
+                raise FileNotFoundError(
+                    f"matrix_config not found: {mpath}, and no existing run "
+                    f"snapshot under {root!r} to resume from. Restore the matrix "
+                    f"file or the run directory.")
+            mpos = io.load_matrix(snap, cfg.dimension)
+            cfg = dataclasses.replace(cfg, matrix_positions=mpos)
+            paths = hash_fingerprint.run_paths(cfg, root)
+            io.ensure_run_dir(paths, params)
+            print(f"resumed frozen matrix: {len(mpos)} obstacles from {snap}")
+    else:
+        paths = hash_fingerprint.run_paths(cfg, root)
+        io.ensure_run_dir(paths, params)
+        if getattr(cfg, "pore_geometry", None) is not None:
+            _save_pore_geometry(cfg, paths.directory)
     acquire_lock(paths)
 
     try:
@@ -138,8 +286,12 @@ def run(params, root="runs"):
         else:
             gen = io.set_rng_state(np.random.default_rng(), ckpt["rng"])
             state = ChainState(positions=ckpt["positions"], step=int(ckpt["step"]),
-                               rng=gen, counters=dict(ckpt["counters"]))
+                               rng=gen, counters=dict(ckpt["counters"]),
+                               mu=ckpt.get("mu"),
+                               n_history=list(ckpt.get("n_history", [])))
             io.trim_log(paths.log, state.step / 1e6)
+            if cfg.traj_every >= 1:
+                io.trim_trajectory(paths.trajectory, state.step)
 
         potential = cfg.build_potential()
         weigher = MC_engine.make_weigher(cfg, potential)
@@ -152,6 +304,15 @@ def run(params, root="runs"):
         info = {"step": state.step, "mu": cfg.chem_pot,
                 "potential": cfg.potential_type, "box": cfg.box}
 
+        # target-mu control (muVT only): drive mu so the running-mean N hits
+        # cfg.target_count. state.mu carries the live mu (init from cfg on a
+        # fresh run; preserved across resume). state.n_history is the rolling
+        # window of N feeding the running mean the controller steers.
+        targeting = cfg.target_count is not None
+        if targeting and state.mu is None:
+            state.mu = cfg.chem_pot
+        V = cfg.total_volume
+
         win = 0
         while state.step < cfg.target_cycles:
             _t = time.perf_counter()
@@ -160,26 +321,50 @@ def run(params, root="runs"):
             for k, v in stats["counters"].items():
                 state.counters[k] += v
 
+            # running mean of N over the control window
+            state.n_history.append(stats["N"])
+            if len(state.n_history) > cfg.control_window:
+                state.n_history = state.n_history[-cfg.control_window:]
+            avg_n = sum(state.n_history) / len(state.n_history)
+
+            if targeting:
+                # Robbins-Monro update on log-N: mu += gamma * (lnN_target - lnN).
+                # Gain decays as gamma0/(1+win/tau) so mu converges and settles.
+                gamma = cfg.control_gain / (1.0 + win / cfg.control_gain_tau)
+                avg_safe = max(avg_n, 0.5)         # guard log at near-empty
+                state.mu += gamma * (math.log(cfg.target_count) - math.log(avg_safe))
+
+            cur_mu = state.mu if state.mu is not None else cfg.chem_pot
+
             if state.step >= cfg.burn_in:
                 cc = stats["counters"]
                 log.write(f"{state.step/1e6:.6f}  {stats['packing_fraction']:.8f}  "
                           f"{stats['N']}  {cc['add_accept']} {cc['add_attempt']} "
                           f"{cc['add_step']} {cc['remove_accept']} {cc['remove_step']} "
-                          f"{cc['move_accept']} {cc['move_step']}  {win_wall:.4f}")
+                          f"{cc['move_accept']} {cc['move_step']}  {win_wall:.4f}  "
+                          f"{cur_mu:.6f}  {avg_n:.4f}  {avg_n / V:.8f}")
 
             win += 1
             if win % cfg.checkpoint_every == 0:
                 _save(paths, cfg, state, params)
-            if win % cfg.traj_every == 0:
+            if cfg.traj_every >= 1 and win % cfg.traj_every == 0:
                 info["step"] = state.step
+                info["mu"] = cur_mu
                 io.write_frame(paths, state.positions, two_dim=cfg.two_dim,
-                               box=cfg.box, info=info, append=cfg.full_trajectory)
+                               box=cfg.box, info=info, append=True)
 
         log.close()
         _save(paths, cfg, state, params)
         info["step"] = state.step
-        io.write_frame(paths, state.positions, two_dim=cfg.two_dim, box=cfg.box,
-                       info=info, append=cfg.full_trajectory)
+        if cfg.traj_every == 0:
+            # save-last-frame mode: one overwritten snapshot
+            io.write_frame(paths, state.positions, two_dim=cfg.two_dim,
+                           box=cfg.box, info=info, append=False)
+        elif win % cfg.traj_every != 0:
+            # append mode: the last window was not on the cadence, so its frame
+            # has not been written yet -- append it so the final state is saved
+            io.write_frame(paths, state.positions, two_dim=cfg.two_dim,
+                           box=cfg.box, info=info, append=True)
         return state, paths
     finally:
         release_lock(paths)

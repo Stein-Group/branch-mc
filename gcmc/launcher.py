@@ -2,7 +2,9 @@
 knobs, with a hard core budget.
 
 Sweepable axes and where they live in the base params:
-    ensemble.mu                 (single value or a list)
+    ensemble.mu                 (single value or a list; muVT)
+    ensemble.packing_fraction   (single value or a list; NVT)
+    ensemble.N                  (single value or a list; NVT)
     sampler.trial_density
     sampler.trial_box_side
 
@@ -43,12 +45,47 @@ _THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
 
 # (axis label, params section, key). Order fixes the product / id ordering.
 _AXES = (("mu", "ensemble", "mu"),
+         ("packing_fraction", "ensemble", "packing_fraction"),
+         ("N", "ensemble", "N"),
+         ("target_N", "ensemble", "target_N"),
+         ("target_eta", "ensemble", "target_eta"),
+         ("target_density", "ensemble", "target_density"),
+         ("depth", "sampler", "depth"),
+         ("seed", "run", "seed"),
          ("trial_density", "sampler", "trial_density"),
          ("trial_box_side", "sampler", "trial_box_side"),
-         ("packing_fraction", "ensemble", "packing_fraction"))
+         ("channel_width", "sampler", "channel_width")
+        )
+
+# nested pore axes (ensemble.pore.{H,R}); handled separately since they live one
+# level deeper than the flat _AXES entries.
+_PORE_AXES = (("poreH", "H"), ("poreR", "R"))
+
 
 def _as_list(v):
     return list(v) if isinstance(v, (list, tuple)) else [v]
+
+
+def _matrix_files_in(folder):
+    """A matrix folder (e.g. an NVT runs root) holds one subdirectory per
+    realization, each with a trajectory.extxyz (the frozen matrix; its last
+    frame is used). Return the per-realization trajectory paths, sorted for a
+    deterministic pairing with the swept target list. Also accepts a folder of
+    bare .extxyz/.npz files."""
+    import glob
+    folder = os.path.abspath(folder)
+    # case A: subdirectories each containing trajectory.extxyz
+    subs = sorted(glob.glob(os.path.join(folder, "*", "trajectory.extxyz")))
+    if subs:
+        return subs
+    # case B: subdirectories each containing checkpoint.npz
+    subs = sorted(glob.glob(os.path.join(folder, "*", "checkpoint.npz")))
+    if subs:
+        return subs
+    # case C: a flat folder of matrix files
+    flat = sorted(glob.glob(os.path.join(folder, "*.extxyz")) +
+                  glob.glob(os.path.join(folder, "*.npz")))
+    return flat
 
 
 def expand_sweep(base):
@@ -62,18 +99,57 @@ def expand_sweep(base):
         if key in sec:
             present.append((label, section, key))
             grids.append(_as_list(sec[key]))
+    pore = base.get("ensemble", {}).get("pore", {})
+    for label, key in _PORE_AXES:
+        if key in pore:
+            present.append((label, "ensemble.pore", key))   # nested marker
+            grids.append(_as_list(pore[key]))
     if not present:                       # nothing sweepable present: one run
         return [copy.deepcopy(base)], ["single"]
 
+    # only axes with more than one distinct value are "swept"; those name the
+    # run dirs. single-valued axes are still applied but kept out of the label.
+    varying = {i for i, g in enumerate(grids) if len({repr(x) for x in g}) > 1}
     combos, labels = [], []
     for values in itertools.product(*grids):
         p = copy.deepcopy(base)
         parts = []
-        for (label, section, key), val in zip(present, values):
-            p.setdefault(section, {})[key] = val
-            parts.append(f"{label}{val}")
+        for i, ((label, section, key), val) in enumerate(zip(present, values)):
+            if section == "ensemble.pore":
+                p.setdefault("ensemble", {}).setdefault("pore", {})[key] = val
+            else:
+                p.setdefault(section, {})[key] = val
+            if i in varying and section != "ensemble.pore":
+                parts.append(f"{label}{val}")   # pore size is in the dir prefix
+        lbl = "_".join(parts)
+        if lbl:
+            p.setdefault("run", {})["sweep_label"] = lbl
         combos.append(p)
-        labels.append("_".join(parts))
+        labels.append(lbl or "single")
+
+    # matrix-folder pairing: if run.matrix_config is a FOLDER (not a file), pair
+    # each swept run with one realization matrix from that folder, by index --
+    # combo[i] uses matrix[i] (target[i] <-> matrix[i]). This makes a 16-target
+    # sweep pick up 16 matrices and run them one-to-one.
+    mcfg = base.get("run", {}).get("matrix_config")
+    if mcfg is not None and os.path.isdir(mcfg):
+        files = _matrix_files_in(mcfg)
+        if not files:
+            raise ValueError(
+                f"run.matrix_config is a folder ({mcfg}) but no matrix files "
+                f"were found in it (expected */trajectory.extxyz, */checkpoint.npz, "
+                f"or *.extxyz/*.npz).")
+        if len(files) < len(combos):
+            raise ValueError(
+                f"sweep needs {len(combos)} matrices (one per swept value) but "
+                f"the folder {mcfg} has only {len(files)}. Provide at least as "
+                f"many realizations as swept values, or shorten the sweep.")
+        for i, p in enumerate(combos):
+            p.setdefault("run", {})["matrix_config"] = files[i]
+            # tag the realization in the label so each run dir is identifiable
+            real_id = os.path.basename(os.path.dirname(files[i])) or os.path.basename(files[i])
+            labels[i] = f"{labels[i]}_m{i:02d}" if labels[i] != "single" else f"m{i:02d}"
+
     return combos, labels
 
 
