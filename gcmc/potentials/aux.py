@@ -164,3 +164,56 @@ class Aux3D(Potential):
                  chosen_coord=None, **_ignored):
         return self.weight_pair(sq, gamma, trial_coords=trial_coords,
                                 ref_coords=ref_coords, chosen_coord=chosen_coord)
+
+
+@register("ljaux3d")
+class LJAux3D(Potential):
+    """Lennard-Jones main potential with the 3D PMF auxiliary as a selection
+    bias: the per-trial weight is exp(-beta * u_LJ) * g3(r, cos)^gamma.
+
+    The acceptance must divide out only the *bias* of the chosen/removed
+    molecule, never its Boltzmann factor (CBMC cancels that against the
+    selection probability). With combined weights the engine achieves this by
+    using delta_E = (log combined chosen) - (log combined removed) plus an
+    explicit +beta*(U_inserted - U_removed) pair-energy term: the Boltzmann
+    parts cancel exactly, leaving log(bias_new) - log(bias_old). At one trial
+    (metropolis) the bias cancels identically and the mode reduces to plain
+    LJ. The long-range LJ tail stays a move-level term, as for pure LJ.
+    """
+    needs_geometry = True
+
+    def __init__(self, lj, aux):
+        self.lj = lj
+        self.aux = aux
+        self.diameter = lj.diameter
+        self.upper_cutoff = lj.upper_cutoff
+
+    @classmethod
+    def build(cls, beta, upper_cutoff, diameter, side, n_trials, g3_csv,
+              **_ignored):
+        from .lennard_jones import LennardJones
+        lj = LennardJones(beta=beta, upper_cutoff=upper_cutoff,
+                          diameter=diameter, volume=None)
+        aux = Aux3D.build(diameter=diameter, upper_cutoff=upper_cutoff,
+                          side=side, n_trials=n_trials, g3_csv=g3_csv)
+        return cls(lj, aux)
+
+    def weight_bulk(self, dists, *, coords=None, idxs=None, kdtree=None,
+                    n_particles=None, choice=None, gamma=1.0):
+        lj_w = self.lj.weight_pair(dists)
+        aux_w, ref = self.aux.weight_bulk(dists, coords=coords, idxs=idxs,
+                                          kdtree=kdtree, gamma=gamma)
+        return lj_w * aux_w, ref
+
+    def weight_pair(self, r, gamma=1.0, *, trial_coords=None, ref_coords=None,
+                    chosen_coord=None, box=None, **_ignored):
+        # r is squared distances (depth > 0 chain refresh); product of the LJ
+        # Boltzmann factor and the g3 bias of the new pair
+        lj_w = self.lj.weight_pair(np.sqrt(np.asarray(r, dtype=float)))
+        g3 = self.aux.weight_pair(r, gamma, trial_coords=trial_coords,
+                                  ref_coords=ref_coords,
+                                  chosen_coord=chosen_coord)
+        return lj_w * g3
+
+    def pairwise(self, sq, gamma=1.0, **kw):
+        return self.weight_pair(sq, gamma, **kw)

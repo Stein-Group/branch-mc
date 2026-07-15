@@ -927,3 +927,53 @@ def apply_PBC_single(moved_disk_x, moved_disk_y, cell_dims, box_dims):
 
     return moved_disk_x, moved_disk_y
 
+
+
+# --------------------------------------------------------------------------
+# dimension-generic gridding (2D and 3D), seedable. The legacy 2D helpers
+# above are kept for reference; the parallel engine no longer uses them.
+# --------------------------------------------------------------------------
+
+import itertools as _itertools
+
+
+def grid_up_nd(positions, side, cell_length, buffer, rng, dim):
+    """Random-origin cubic decomposition.
+
+    The box is tiled with n_ax = floor(side / (cell_length + buffer)) cells
+    per axis at pitch = side / n_ax, so the gap between neighbouring cells is
+    always >= buffer. Each cell owns the molecules inside its cube (main) and
+    sees a frozen read-only ring of width `buffer` around it (border). Because
+    gap >= buffer, no cell's border overlaps another cell's main, so cells can
+    run concurrently without touching each other's live molecules.
+
+    Returns (cells, rest): cells is a list of (main_coords, border_coords,
+    origin) with origin the global lower corner of the cell cube; rest is the
+    coordinates owned by no cell (gap regions, a superset of all borders).
+    """
+    positions = np.asarray(positions, float).reshape(-1, dim)
+    n_ax = int(side // (cell_length + buffer))
+    if n_ax < 1:
+        raise ValueError(
+            f"cell_length + buffer = {cell_length + buffer} does not fit in "
+            f"box side {side}; shrink the cell or the buffer")
+    pitch = side / n_ax
+    origin0 = rng.uniform(0.0, side, size=dim)
+
+    u = (positions - origin0) % side
+    slot = np.clip(np.floor(u / pitch).astype(int), 0, n_ax - 1)
+    in_main = np.all(u - slot * pitch < cell_length, axis=1)
+
+    cells = []
+    for idx in _itertools.product(range(n_ax), repeat=dim):
+        lo = np.asarray(idx, float) * pitch
+        d = (u - lo) % side
+        main_mask = np.all(d < cell_length, axis=1)
+        ext_mask = np.all((d < cell_length + buffer) | (d > side - buffer),
+                          axis=1)
+        border_mask = ext_mask & ~main_mask
+        origin = (origin0 + lo) % side
+        cells.append((positions[main_mask].copy(),
+                      positions[border_mask].copy(), origin))
+    rest = positions[~in_main].copy()
+    return cells, rest

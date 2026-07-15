@@ -17,7 +17,8 @@ import numpy as np
 def zero_counters():
     return {"add_step": 0, "add_attempt": 0, "add_accept": 0,
             "remove_step": 0, "remove_accept": 0,
-            "move_step": 0, "move_accept": 0}
+            "move_step": 0, "move_accept": 0,
+            "repack_step": 0, "repack_attempt": 0, "repack_accept": 0}
 @dataclass
 class ChainState:
     positions: np.ndarray

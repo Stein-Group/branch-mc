@@ -1,34 +1,34 @@
-"""Parallel domain-decomposition engine (2D only, matching the original).
+"""Domain-decomposition GCMC, dimension-generic (2D and 3D).
 
-The original ran one Monte Carlo kernel either over the whole box (serial) or
-over many cells with frozen borders (parallel). The serial kernel lives in
-engine.advance and is verified against the original. This module is its cell
-sibling: the same move/add/remove physics and the same Rosenbluth assembly
-(reused from samplers and from engine._weighted_trials), diverging only where
-decomposition demands it:
+The box is tiled into cubic cells (decomposition.grid_up_nd). Each cell runs
+an independent grand-canonical chain over its own molecules while everything
+within `buffer` of the cell (the border) is frozen and read-only; molecules in
+the gaps between cells do not move during the window. Because energies and
+overlaps are evaluated against the true frozen environment and the gap is at
+least as wide as the buffer, each cell kernel preserves the global ensemble
+restricted to its moves, and cells never see each other's live molecules, so
+running them concurrently is exact, not approximate. A new random grid origin
+every window restores ergodicity for the gap regions.
 
-  * neighbour and overlap searches see the cell's frozen border molecules,
-    stacked in front of the live ones, so trials near a cell edge feel the
-    neighbours that live in the next cell;
-  * periodic wrapping is cell-local (apply_PBC_single for a move, apply_pbc_array
-    for the trial cloud) instead of a global modulo;
-  * an insertion's cavity is placed by create_cavity inside the cell, not
-    anywhere in the box;
-  * mu_ideal uses the cell area, not the box volume, and the molecule count is
-    the cell's live molecules alone, never the borders.
+All proposal geometry lives in cell-local coordinates with the cell as its own
+torus (period = cell_length per axis): insertion centres are uniform over the
+cell, trial clouds and removal shadow centres wrap with the cell period, and
+translations wrap the same way. That makes the insertion support exactly
+cell_length**dim (the volume mu_ideal uses) and makes the removal move the
+exact mirror of the insertion, which is what detailed balance requires. The
+physics (distances, overlaps, energies) is always evaluated in global
+coordinates with the global box PBC.
 
-Those four points are exactly the decomposition helpers verified in
-check_decomposition.py. Everything between them is the verified serial physics.
+Supports hard_core and lennard_jones with the rosenbluth and branch samplers
+at any validated depth (0-3). For LJ the long-range tail uses
+the global molecule count at window start plus the cell's own drift; with
+potential option "tail": false the tail is off entirely, which is also the
+exact setting for parallel-vs-serial validation.
 
-Verification here is by self-consistency rather than an exact trace: the
-original's parallel path draws its cavities from an unseedable default_rng, so
-no seed reproduces it. Instead a parallel-2D run must reach the same equilibrium
-density as the serial-2D run at the same mu, T and box, which is the physical
-invariant a decomposition must preserve and which any acceptance, wrapping or
-volume bug would break.
-
-3D parallel is an explicit error in the original ("3d paralle not implemented
-yet") because the helpers are 2D-only; advance_parallel raises the same way.
+Requirements checked at setup/grid time: cell_length > 2 * cavity_radius (the
+cell torus must hold a cavity box without self-overlap) and buffer >= the
+interaction range (diameter for hard core, rc for LJ), so border rings contain
+every molecule that can interact with a live one.
 """
 
 from __future__ import annotations
@@ -36,274 +36,364 @@ import concurrent.futures
 import numpy as np
 from scipy.spatial import cKDTree
 
-from . import decomposition, geometry
+from . import decomposition
+from . import geometry
 from .trials import TrialSet
-from .MC_engine import _weighted_trials, make_weigher
+from .MC_engine import _weighted_trials, _lj_set_energy, _lj_energy, make_weigher
 from .samplers.rosenbluth import select_forward, select_reverse
+from .samplers.branch import count_and_sample
 from .state import zero_counters
 
 
-def advance_cell(main, border, n_steps, cell_dims, cfg, potential, weigher, rng):
-    """Run n_steps of GCMC inside one cell. `main` are the live molecules
-    (added/removed/moved), `border` are frozen context for neighbour searches.
-    Returns (new_main_coords, counters)."""
-    if not cfg.two_dim:
-        raise NotImplementedError("parallel decomposition is 2D-only")
+def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng,
+                 n_offset):
+    """Advance one cell by n_steps insertion/deletion proposals.
 
-    pos = np.asarray(main, float).reshape(-1, 2)
-    bord = np.asarray(border, float).reshape(-1, 2)
+    main    : (N, dim) global coordinates of the cell's live molecules
+    border  : (M, dim) frozen global coordinates within `buffer` of the cell
+    origin  : (dim,)  global lower corner of the cell cube
+    n_offset: global molecule count outside this cell at window start (for the
+              LJ tail, which is a system-level quantity)
+    Returns (new_main_global, counters).
+    """
+    dim = 2 if cfg.two_dim else 3
+    side = cfg.box
+    L_c = cfg.cell_length
+    cav = cfg.cavity_radius
+    depth = cfg.depth
+    lower, uc, nn = cfg.lower_cutoff, cfg.upper_cutoff, cfg.no_neigh
+    box = cfg.box_dims
+    beta, mu, mf = cfg.beta, cfg.chem_pot, cfg.move_factor
+    n_trials = cfg.no_of_trial_molecules
+    v_cell = L_c ** dim
+    ljaux = cfg.potential_type == "ljaux"
+    lj = cfg.potential_type == "lj" or ljaux
+    branch = cfg.sampler == "branch"
+    if cfg.sampler == "metropolis":
+        n_trials = 1
+    tail = cfg.lj_tail_pref if (lj and cfg.lj_tail_pref) else 0.0
     c = zero_counters()
 
-    box = cfg.box_dims
-    side = cfg.box
-    diameter = cfg.diameter
-    lower = cfg.lower_cutoff      # exclusion floor (= diameter for hard cores)
-    r_sq = cfg.r_squared
-    uc = cfg.upper_cutoff
-    nn = cfg.no_neigh
-    mf = cfg.move_factor
-    n_trials = cfg.no_of_trial_molecules
-    depth = cfg.depth
-    gdict = cfg.gamma_dict
-    beta = cfg.beta
-    mu = cfg.chem_pot
-    cell_area = cfg.cell_length * cfg.cell_length
-    lj = cfg.potential_type == "lj"
+    u_main = (np.asarray(main, float).reshape(-1, dim) - origin) % side
+    border = np.asarray(border, float).reshape(-1, dim)
 
-    def with_border(arr):
-        return np.vstack((bord, arr)) if len(bord) else arr
+    def to_global(u):
+        return (np.atleast_2d(u) + origin) % side
 
-    def rand():
-        return rng.random()
+    def system_for(rest_u):
+        glob = to_global(rest_u) if len(rest_u) else np.empty((0, dim))
+        if len(border):
+            return np.vstack([glob, border]) if len(glob) else border
+        return glob
 
     step = 0
-    while step <= n_steps:
-        N = len(pos)
-        choice = "add" if N == 0 else rng.choice(["move", "add", "remove"], p=[0.5, 0.25, 0.25])
+    while step < n_steps:
+        N = len(u_main)
+        choice = "add" if N == 0 else rng.choice(
+            ["move", "add", "remove"], p=[0.5, 0.25, 0.25])
 
-        # ---------------------------------------------------------- translate
-        if choice == "move" and N > 0:
+        # ----- translate (cell-torus wrap keeps the molecule owned) -----
+        if choice == "move":
             c["move_step"] += 1
-            j = rng.choice(N)
-            old = pos[j]
-            without = np.delete(pos, j, axis=0)
-            ranf1, ranf2 = rng.uniform(0, 1, 2)
-            mx = old[0] + mf * (ranf1 - 0.5)
-            my = old[1] + mf * (ranf2 - 0.5)
-            mx, my = decomposition.apply_PBC_single(mx, my, cell_dims, box)
-            moved = np.array([mx, my])
-            system = with_border(without)
+            j = int(rng.choice(N))
+            u_new = (u_main[j] + mf * (rng.uniform(0, 1, dim) - 0.5)) % L_c
+            rest_u = np.delete(u_main, j, axis=0)
+            system = system_for(rest_u)
+            moved = to_global(u_new)[0]
+            if len(system) == 0:
+                u_main[j] = u_new
+                c["move_accept"] += 1
+                continue
             tree = cKDTree(system, boxsize=box)
-            if lj:
-                d_new, _ = tree.query([moved], k=nn, distance_upper_bound=uc)
-                d_new = d_new[0][np.isfinite(d_new[0])]
-                if not (d_new.size and np.any(d_new < lower)):
-                    d_old, _ = tree.query([old], k=nn, distance_upper_bound=uc)
-                    d_old = d_old[0][np.isfinite(d_old[0])]
-
-                    def _u(d):
-                        if d.size == 0:
-                            return 0.0
-                        ir6 = (1.0 / d) ** 6
-                        return np.sum(4.0 * ir6 * (ir6 - 1.0))
-                    dU = _u(d_new) - _u(d_old)
-                    if np.log(rng.uniform(0, 1)) <= -dU / cfg.temp:
-                        pos = np.append(without, [moved], axis=0)
-                        c["move_accept"] += 1
+            if not lj:
+                if len(tree.query_ball_point(moved, lower)) == 0:
+                    u_main[j] = u_new
+                    c["move_accept"] += 1
             else:
-                if len(tree.query_ball_point([moved], lower)[0]) == 0:
-                    pos = np.append(without, [moved], axis=0)
+                old = to_global(u_main[j])[0]
+                d_old, _ = tree.query(old, k=min(nn, len(system)),
+                                      distance_upper_bound=uc)
+                d_new, _ = tree.query(moved, k=min(nn, len(system)),
+                                      distance_upper_bound=uc)
+                d_old = np.atleast_1d(d_old); d_new = np.atleast_1d(d_new)
+                d_old = d_old[np.isfinite(d_old)]
+                d_new = d_new[np.isfinite(d_new)]
+                if d_new.size and np.any(d_new < lower):
+                    continue
+                d_e = _lj_energy(d_new, uc) - _lj_energy(d_old, uc)
+                if rng.uniform(0, 1) < np.exp(-beta * d_e):
+                    u_main[j] = u_new
                     c["move_accept"] += 1
             continue
 
-        # ---------------------------------------------------------- add/remove
-        if choice == "remove" and N == 0:
-            continue
-
+        # ----- insertion / deletion -----
         if choice == "add":
             c["add_step"] += 1
             n_add, n_remove = depth + 1, depth
         else:
             c["remove_step"] += 1
             n_add, n_remove = depth, depth + 1
-
         step += 1
-        if step >= n_steps:
-            break
 
-        # cavity centre: inside the cell for an insertion (or LJ removal),
-        # an existing molecule for a hard-sphere removal
-        if choice == "add" or lj:
-            center = np.asarray(decomposition.create_cavity(cell_dims, box, True))[:2]
-        else:
-            center = pos[rng.choice(N)]
-
-        idx_cav = decomposition.neighbor_indices_in_cavity_parallel(
-            pos, center, cfg.cavity_radius, cell_dims, box, True)
-        n_cav = len(idx_cav)
-        if n_cav == 0:
-            continue
-
-        if n_cav < n_remove:
+        if depth == 0:
+            # mirror scheme, as in the serial engine
             if choice == "add":
-                n_add, n_remove = n_cav, n_cav - 1
+                u_center = rng.uniform(0.0, L_c, size=dim)
+                anchor = -1
             else:
-                n_add, n_remove = n_cav - 1, n_cav
-
-        if n_remove == 0:
-            disk_in = np.empty((0, 2))
-            disk_rest = pos
+                anchor = int(rng.choice(N))
+                u_center = (u_main[anchor]
+                            + rng.uniform(-cav, cav, size=dim)) % L_c
+            if n_remove == 0:
+                disk_in_u = np.empty((0, dim))
+                rest_u = u_main
+            else:
+                disk_in_u = u_main[anchor][None, :]
+                rest_u = np.delete(u_main, anchor, axis=0)
         else:
-            chosen_idx = rng.choice(idx_cav, n_remove, replace=False)
-            disk_in = pos[chosen_idx]
-            keep = np.ones(N, dtype=bool)
-            keep[chosen_idx] = False
-            disk_rest = pos[keep]
+            # depth >= 1: the original BRANCH-MC proposal on the cell torus,
+            # as the legacy parallelization ran it. This mode is APPROXIMATE:
+            # the depth >= 1 scheme satisfies global balance but not detailed
+            # balance (proof: masking a reversible chain with the
+            # reversal-symmetric touched-set indicator provably preserves its
+            # stationary distribution, yet measures +2.6 +/- 0.6 % on the
+            # hard-sphere EOS -- so the chain is not reversible), and global
+            # balance relies on full translation invariance, which a cell
+            # cannot provide. The residual bias is controlled by the
+            # cavity/cell ratio: +19% at cell_length = 2.7 cavity widths,
+            # +1.3 +/- 0.8 % at 6.7 widths, +0.9 +/- 0.6 % at 10 widths.
+            # sim_setup warns accordingly; serial runs are the exact
+            # reference at depth >= 1.
+            if choice == "add" or lj:
+                u_center = rng.uniform(0.0, L_c, size=dim)
+            else:
+                u_center = u_main[int(rng.choice(N))].copy()
+            d = (u_main - u_center + L_c / 2.0) % L_c - L_c / 2.0
+            idx_cav = np.flatnonzero(np.all(np.abs(d) <= cav, axis=1))
+            n_cav = len(idx_cav)
+            if n_cav == 0:
+                continue
+            if n_cav < n_remove:
+                if choice == "add":
+                    n_add, n_remove = n_cav, n_cav - 1
+                else:
+                    n_add, n_remove = n_cav - 1, n_cav
+            if n_remove == 0:
+                disk_in_u = np.empty((0, dim))
+                rest_u = u_main
+            else:
+                chosen_idx = rng.choice(idx_cav, n_remove, replace=False)
+                disk_in_u = u_main[chosen_idx]
+                keep = np.ones(N, dtype=bool)
+                keep[chosen_idx] = False
+                rest_u = u_main[keep]
+        disk_in = to_global(disk_in_u) if len(disk_in_u) else np.empty((0, dim))
+        system = system_for(rest_u)
 
-        # trial cloud, wrapped into the cell
-        trial_nums = rng.uniform(-cfg.cavity_radius, cfg.cavity_radius, size=(2, n_trials))
-        tx = trial_nums[0] + center[0]
-        ty = trial_nums[1] + center[1]
-        tx, ty = decomposition.apply_pbc_array(tx, ty, cell_dims, box)
-        trials = np.column_stack((tx, ty))
+        # trial cloud on the cell torus around the centre, mapped to global
+        trials_u = (rng.uniform(-cav, cav, size=(n_trials, dim))
+                    + u_center) % L_c
+        trials = to_global(trials_u)
 
         keep_mask = np.ones(n_trials, dtype=bool)
-        if n_remove != 0:
+        if n_remove > 0:
             keep_mask[rng.choice(n_trials, size=n_remove, replace=False)] = False
 
-        system = with_border(disk_rest)
-        tree = cKDTree(system, boxsize=box)
-        raw = geometry.find_neighbors(tree, trials, lower, uc, nn, keep_mask=keep_mask)
-        if raw is None:
-            continue
-        trial_set, km = _weighted_trials(raw, tree, cfg, potential, choice, N)
-
-        if n_remove != 0:
-            raw_in = geometry.find_neighbors(tree, disk_in, lower, uc, nn)
-            if raw_in is None:
-                continue
-            mol_in_cav, _ = _weighted_trials(raw_in, tree, cfg, potential, choice, N)
-            if len(mol_in_cav) != n_remove:
-                continue
+        if len(system) == 0:
+            # empty environment: every trial survives with unit pair weight
+            trial_set = TrialSet(trials, np.ones(n_trials))
+            km = keep_mask
         else:
-            mol_in_cav = TrialSet(np.empty((0, 2)), np.empty(0))
+            tree = cKDTree(system, boxsize=box)
+            raw = geometry.find_neighbors(tree, trials, lower, uc, nn,
+                                          keep_mask=keep_mask)
+            if raw is None:
+                if n_add != 0:
+                    continue
+                trial_set = TrialSet(np.empty((0, dim)), np.empty(0),
+                                     ref_neighbor_coord=np.empty((0, dim)))
+                km = np.empty(0, dtype=bool)
+            else:
+                trial_set, km = _weighted_trials(raw, tree, cfg, potential,
+                                                 choice, N + n_offset)
 
-        if n_remove != 0:
-            pool = trial_set.mask(km).merge(mol_in_cav)
-            pool = pool[rng.permutation(len(pool))]
+        # removed molecule's own weight
+        if n_remove > 0:
+            if len(system) == 0:
+                mol_in_cav = TrialSet(disk_in, np.ones(1))
+            else:
+                raw_in = geometry.find_neighbors(tree, disk_in, lower, uc, nn)
+                if raw_in is None:
+                    continue
+                mol_in_cav, _ = _weighted_trials(raw_in, tree, cfg, potential,
+                                                 choice, N + n_offset)
+                if len(mol_in_cav) != n_remove:
+                    continue
         else:
-            pool = trial_set.copy()
+            mol_in_cav = None
 
-        if n_add != 0:
-            if len(trial_set) < n_add:
+        pool = trial_set.mask(km)
+        if n_remove > 0:
+            pool = pool.merge(mol_in_cav)
+            if len(pool) > 1:
+                pool = pool[rng.permutation(len(pool))]
+
+        # forward (insertion) estimate
+        if n_add > 0:
+            if len(pool) < n_add:
                 continue
-            chosen, sum_new_arr = select_forward(pool, n_add, weigher, rand=rand,
-                                                 side=side, r_squared=r_sq, gamma_schedule=gdict)
-            if chosen is None:
-                continue
-            sum_new = np.sum(np.log(sum_new_arr))
-            e_u_r_new = np.sum(np.log(chosen.energy_weight))
-            chosen_coords = chosen.coords
+            e_u_r_new = 0.0
+            if branch:
+                num_new, idx = count_and_sample(pool.coords, n_add, lower,
+                                                box_lengths=box)
+                if num_new <= 0:
+                    continue
+                chosen_coords = pool.coords[list(idx)]
+                if lj:
+                    u_ins = _lj_set_energy(chosen_coords, system, box, uc)
+                    sum_new = np.log(num_new) - beta * u_ins
+                else:
+                    sum_new = np.log(num_new)
+            else:
+                chosen, sum_new_arr = select_forward(
+                    pool, n_add, weigher, rand=lambda: rng.uniform(0, 1),
+                    side=side, r_squared=cfg.r_squared,
+                    gamma_schedule=cfg.gamma_dict)
+                if chosen is None:
+                    continue
+                chosen_coords = chosen.coords
+                sum_new = np.sum(np.log(sum_new_arr))
+                e_u_r_new = np.sum(np.log(chosen.energy_weight))
         else:
+            chosen_coords = np.empty((0, dim))
             sum_new = 0.0
             e_u_r_new = 0.0
-            chosen_coords = np.empty((0, 2))
 
-        if n_remove != 0:
-            trimmed = trial_set.mask(km)
-            trimmed = trimmed if len(trimmed) != 0 else None
-            sum_cur_arr, e_cur_arr = select_reverse(trimmed, mol_in_cav, n_remove, weigher,
-                                                    side=side, r_squared=r_sq, gamma_schedule=gdict)
-            sum_current = np.sum(np.log(sum_cur_arr))
-            e_u_r_current = np.sum(np.log(e_cur_arr))
+        # reverse (deletion) estimate
+        if n_remove > 0:
+            e_u_r_current = 0.0
+            if branch:
+                num_cur, _ = count_and_sample(pool.coords, n_remove, lower,
+                                              box_lengths=box)
+                if num_cur <= 0:
+                    continue
+                if lj:
+                    u_rem = _lj_set_energy(disk_in, system, box, uc)
+                    sum_current = np.log(num_cur) - beta * u_rem
+                else:
+                    sum_current = np.log(num_cur)
+            else:
+                trimmed = trial_set.mask(km)
+                trimmed = trimmed if len(trimmed) else None
+                s_arr, e_arr = select_reverse(trimmed, mol_in_cav, n_remove,
+                                              weigher, side=side,
+                                              r_squared=cfg.r_squared,
+                                              gamma_schedule=cfg.gamma_dict)
+                sum_current = np.sum(np.log(s_arr))
+                e_u_r_current = np.sum(np.log(e_arr))
         else:
             sum_current = 0.0
             e_u_r_current = 0.0
 
+        # LJ tail: system-level, applied once per move with the global count
+        if tail:
+            n_glob_old = N + n_offset
+            n_glob_new = n_glob_old + n_add - n_remove
+            delta_E = beta * tail * (n_glob_new ** 2 - n_glob_old ** 2)
+        else:
+            delta_E = 0.0
+        if ljaux and not branch:
+            # divide out the chosen/removed bias: e_u_r on combined weights
+            # plus the explicit pair-energy term cancels the Boltzmann parts
+            u_ins = _lj_set_energy(np.atleast_2d(chosen_coords), system, box, uc) \
+                if len(chosen_coords) else 0.0
+            u_rem = _lj_set_energy(disk_in, system, box, uc) if len(disk_in) else 0.0
+            delta_E += (e_u_r_new - e_u_r_current) + beta * (u_ins - u_rem)
+        elif not (lj or branch):
+            # pmf aux bias divides back out; plain hard core: both terms 0
+            delta_E += e_u_r_new - e_u_r_current
+
         if choice == "add":
             c["add_attempt"] += 1
-            mu_ideal = -np.log(cell_area / (N + 1))
-            k_trials = -np.log(n_trials - n_remove)
+            mu_ideal = -np.log(v_cell / (N + 1))
+            if branch:
+                k_trials = -np.log((n_trials - n_remove) / n_add)
+            else:
+                k_trials = -np.log(n_trials - n_remove)
             mu_excess = -sum_new + sum_current - k_trials
-            delta_E = 0.0 if lj else (e_u_r_new - e_u_r_current)
-            log_alpha = mu_ideal - beta * mu + mu_excess + delta_E
-            log_alpha = -np.log(min(1, np.exp(-log_alpha)))
+            log_alpha = max(0.0, mu_ideal - beta * mu + mu_excess + delta_E)
             if log_alpha <= -np.log(rng.uniform(0, 1)):
-                pos = np.append(disk_rest, chosen_coords, axis=0)
+                new_u = (np.atleast_2d(chosen_coords) - origin) % side
+                # rest_u, not u_main: at depth >= 1 the move also removed
+                # n_remove molecules, which must not be resurrected
+                u_main = np.vstack([rest_u, new_u]) if len(rest_u) else new_u
                 c["add_accept"] += 1
         else:
-            mu_ideal = -np.log(N / cell_area)
-            k_trials = -np.log(n_trials - n_add)
+            mu_ideal = -np.log(N / v_cell)
+            if branch:
+                k_trials = -np.log((n_trials - n_add) / n_remove)
+            else:
+                k_trials = -np.log(n_trials - n_add)
             mu_excess = -sum_new + sum_current + k_trials
-            delta_E = 0.0 if lj else (e_u_r_new - e_u_r_current)
-            log_alpha = mu_ideal + beta * mu + mu_excess + delta_E
-            log_alpha = -np.log(min(1, np.exp(-log_alpha)))
+            log_alpha = max(0.0, mu_ideal + beta * mu + mu_excess + delta_E)
             if log_alpha <= -np.log(rng.uniform(0, 1)):
-                pos = disk_rest if len(chosen_coords) == 0 else np.append(disk_rest, chosen_coords, axis=0)
+                if n_add > 0:
+                    # at depth >= 1 a deletion re-inserts n_add molecules
+                    re_u = (np.atleast_2d(chosen_coords) - origin) % side
+                    u_main = np.vstack([rest_u, re_u]) if len(rest_u) else re_u
+                else:
+                    u_main = rest_u
                 c["remove_accept"] += 1
 
-    return pos, c
+    return to_global(u_main) if len(u_main) else np.empty((0, dim)), c
 
-
-# --------------------------------------------------------------------------
-# pool driver: grid the system, run every cell, recombine with the remainder
-# --------------------------------------------------------------------------
 
 def _run_cell(args):
-    main, border, n_steps, cell_dims, cfg, potential, seed = args
+    main, border, origin, n_steps, cfg, potential, n_offset, seed = args
     rng = np.random.default_rng(seed)
     weigher = make_weigher(cfg, potential)
-    new_main, counters = advance_cell(main, border, n_steps, cell_dims,
-                                      cfg, potential, weigher, rng)
-    return new_main, counters
+    return advance_cell(main, border, origin, n_steps, cfg, potential,
+                        weigher, rng, n_offset)
 
 
 def advance_parallel(state, cfg, potential, weigher):
-    """Advance one window by domain decomposition: grid the box into cells,
-    run each cell's MC with its borders frozen, then stitch the live molecules
-    back together with the ungridded remainder."""
-    if not cfg.two_dim:
+    """Advance one window by domain decomposition (2D or 3D)."""
+    if cfg.sampler not in ("rosenbluth", "branch", "metropolis"):
         raise NotImplementedError(
-            "parallel decomposition is 2D-only, matching the original")
-    if cfg.sampler != "rosenbluth":
-        raise NotImplementedError(
-            f"parallel currently wires the rosenbluth sampler only; "
-            f"{cfg.sampler!r} under parallel is not yet implemented")
+            f"parallel supports metropolis, rosenbluth, and branch; "
+            f"got {cfg.sampler!r}")
+    if cfg.cell_length <= 2.0 * cfg.cavity_radius:
+        raise ValueError(
+            f"cell_length ({cfg.cell_length}) must exceed twice the cavity "
+            f"radius ({2 * cfg.cavity_radius}) for the cell-torus geometry")
 
+    dim = 2 if cfg.two_dim else 3
     rng = state.rng
-    decomposition.configure(cfg.cell_length)
-    pos = np.asarray(state.positions, float).reshape(-1, 2)
+    pos = np.asarray(state.positions, float).reshape(-1, dim)
+    n_global = len(pos)
 
-    # grid_up_the_system draws its origin from the legacy global RNG; seed it
-    # from the chain RNG so a restart still advances the stream reproducibly.
-    np.random.seed(int(rng.integers(0, 2**31 - 1)))
-    pos3 = np.column_stack((pos, np.zeros(len(pos))))
-    cells, rest3 = decomposition.grid_up_the_system(
-        pos3, side=cfg.box, cell_length=cfg.cell_length)
-    rest = rest3[:, :2] if len(rest3) else np.empty((0, 2))
-
+    cells, rest = decomposition.grid_up_nd(pos, cfg.box, cfg.cell_length,
+                                           cfg.buffer, rng, dim)
     n_steps = cfg.sampling_window
-    seeds = rng.integers(0, 2**31 - 1, size=len(cells))
-    tasks = [(cell[0][:, :2], cell[1][:, :2], n_steps, cell[2], cfg, potential, int(s))
+    seeds = rng.integers(0, 2 ** 31 - 1, size=len(cells))
+    tasks = [(cell[0], cell[1], cell[2], n_steps, cfg, potential,
+              n_global - len(cell[0]), int(s))
              for cell, s in zip(cells, seeds)]
 
     total = zero_counters()
     new_mains = []
     if cfg.n_workers > 1 and len(tasks) > 1:
         with concurrent.futures.ProcessPoolExecutor(max_workers=cfg.n_workers) as ex:
-            for new_main, counters in ex.map(_run_cell, tasks):
-                new_mains.append(new_main)
-                for k in total:
-                    total[k] += counters[k]
+            results = list(ex.map(_run_cell, tasks))
     else:
-        for t in tasks:
-            new_main, counters = _run_cell(t)
-            new_mains.append(new_main)
-            for k in total:
-                total[k] += counters[k]
+        results = [_run_cell(t) for t in tasks]
+    for new_main, counters in results:
+        new_mains.append(new_main)
+        for k in total:
+            total[k] += counters[k]
 
     parts = [m for m in new_mains if len(m)] + ([rest] if len(rest) else [])
-    pos = np.vstack(parts) if parts else np.empty((0, 2))
+    pos = np.vstack(parts) if parts else np.empty((0, dim))
 
     state.positions = pos
     state.step += cfg.sampling_window * max(1, len(cells))

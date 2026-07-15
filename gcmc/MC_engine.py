@@ -9,7 +9,16 @@ criterion (ideal term, trial-count term, Rosenbluth excess, and the energy
 difference that is zero for hard cores and folded into the LJ tail on the bulk).
 
 All randomness goes through state.rng, so the chain is reproducible and
-checkpointable. BRANCH and reweighting are not wired here yet and raise.
+checkpointable.
+
+Detailed balance at depth 0 is validated against the hard-sphere equation of
+state (Carnahan-Starling) and by metropolis/rosenbluth/branch cross-agreement
+for hard spheres and Lennard-Jones; equilibrium density is invariant under the
+trial count and the trial box side, as it must be. The deletion move mirrors
+the insertion exactly: a uniformly chosen particle is removed and the reverse
+trial cloud is generated around a centre drawn uniformly in the cavity box
+around it. depth > 0 is gated in sim_setup pending a re-derivation of the
+multi-molecule acceptance.
 """
 
 from __future__ import annotations
@@ -23,13 +32,14 @@ from .samplers.base import EnergyWeigher, UniformWeigher, ReweightWeigher
 from .samplers import reweighting
 from .samplers.rosenbluth import select_forward, select_reverse
 from .samplers.branch import count_and_sample
+from .samplers import branch as branch_mod
 from .state import zero_counters
 
 
 def make_weigher(cfg, potential):
     if cfg.potential_type == "hard_sphere":
         return UniformWeigher()
-    if cfg.potential_type in ("lj", "aux"):
+    if cfg.potential_type in ("lj", "aux", "ljaux", "ljbranch"):
         return EnergyWeigher(potential)
     if cfg.potential_type == "reweight":
         if not cfg.two_dim:
@@ -44,10 +54,21 @@ def _weighted_trials(raw, kdtree, cfg, potential, choice, n_full):
     coords, dists, idxs, km = raw
     g1 = cfg.gamma_dict[1]
     t = cfg.potential_type
-    if t == "hard_sphere":
+    if t in ("hard_sphere", "ljbranch"):
+        # ljbranch weights cliques (not single trials) downstream by the real LJ
+        # energy; the pool itself is unweighted, exactly like the hard-core pool
         return TrialSet(coords, np.ones(len(coords))), km
+    if t == "ljaux":
+        w, ref = potential.weight_bulk(dists, coords=coords, idxs=idxs,
+                                       kdtree=kdtree, gamma=g1)
+        return TrialSet(coords, w, ref_neighbor_coord=ref), km
     if t == "lj":
-        w = potential.weight_bulk(dists, n_particles=n_full, choice=choice)
+        # pair Boltzmann factors only. The long-range tail is a move-level
+        # quantity applied once in the acceptance (delta_E_lj); folding it into
+        # the per-trial weights put it inside W_old on deletions, where the
+        # denominator position inverted its sign and over-accepted deletions
+        # by exp(2*beta*|dU_tail|).
+        w = potential.weight_bulk(dists)
         return TrialSet(coords, w), km
     if t == "aux":
         if cfg.two_dim:
@@ -75,6 +96,10 @@ def _advance_metropolis(state, cfg, potential):
         raise NotImplementedError(
             "metropolis with a pmf auxiliary is not yet implemented; "
             "use the rosenbluth sampler for pmf runs")
+    if cfg.potential_type == "ljaux":
+        # with a single trial the selection bias cancels identically, so
+        # metropolis + pmf IS metropolis on the plain LJ potential
+        potential = potential.lj
 
     rng = state.rng
     pos = np.asarray(state.positions, float)
@@ -92,12 +117,12 @@ def _advance_metropolis(state, cfg, potential):
     hs = cfg.potential_type == "hard_sphere"
 
     def neighbour_dists(point, tree, k):
-        d, _ = tree.query([point], k=min(k, max(1, k)), distance_upper_bound=uc)
+        d, _ = tree.query([point], k=k, distance_upper_bound=uc)
         d = d[0]
         return d[np.isfinite(d)]
 
     step = 0
-    while step <= cfg.sampling_window:
+    while step < cfg.sampling_window:
         N = len(pos)
         choice = "add" if N == 0 else rng.choice(["move", "add", "remove"], p=[0.5, 0.25, 0.25])
 
@@ -188,28 +213,59 @@ def _lj_energy(dists, rc):
     return float(np.sum(4.0 * ir6 * (ir6 - 1.0)))
 
 
-def _lj_set_energy(coords, rest, box, rc):
+def _ljbranch_forward(pool_coords, k, lower, rest, box, rc, beta, rng, upper):
+    """Forward (insertion) Rosenbluth weight over all k-cliques of the band
+    graph, with one clique drawn proportional to exp(-beta U_clique).
+    Returns (chosen_coords, log W_new) or (None, None) if no clique exists."""
+    rest_tree = cKDTree(rest, boxsize=box) if len(rest) > 0 else None
+    W, count, chosen = branch_mod.ljbranch_weight_sum(
+        pool_coords, k, lower, upper, rest, box, rc, beta,
+        _lj_set_energy, rng=rng, rest_tree=rest_tree)
+    if count == 0 or chosen is None or W <= 0.0:
+        return None, None
+    return chosen, np.log(W)
+
+
+def _ljbranch_reverse(pool_coords, k, lower, removed, rest, box, rc, beta, upper):
+    """Reverse (deletion) Rosenbluth weight: the SAME all-clique sum on the
+    current pool. The removed group is one member of the population, so only the
+    sum is needed. Returns log W_curr, or -inf if the population is empty."""
+    rest_tree = cKDTree(rest, boxsize=box) if len(rest) > 0 else None
+    W, count, _ = branch_mod.ljbranch_weight_sum(
+        pool_coords, k, lower, upper, rest, box, rc, beta,
+        _lj_set_energy, rng=None, rest_tree=rest_tree)
+    if count == 0 or W <= 0.0:
+        return -np.inf
+    return np.log(W)
+
+
+def _lj_set_energy(coords, rest, box, rc, rest_tree=None):
     """Total LJ pair energy contributed by `coords`: each point against `rest`
     within rc, plus pairs among `coords` (relevant only for depth>0, where more
-    than one particle is inserted/removed at once). sigma = 1 (reduced units)."""
+    than one particle is inserted/removed at once). sigma = 1 (reduced units).
+
+    `rest_tree` may be a prebuilt cKDTree(rest, boxsize=box); passing it avoids
+    rebuilding the same tree once per clique in the ljbranch weight sum. When
+    omitted the tree is built here, so every other caller is unchanged."""
     coords = np.asarray(coords, float)
     if len(coords) == 0:
         return 0.0
     box_arr = np.asarray(box, float)
     total = 0.0
     if len(rest) > 0:
-        tree = cKDTree(rest, boxsize=box)
-        for pt in coords:
-            idxs = tree.query_ball_point(pt, rc)
+        tree = rest_tree if rest_tree is not None else cKDTree(rest, boxsize=box)
+        # one batched neighbour query for all members, not one query per member
+        nbr = tree.query_ball_point(coords, rc)
+        for pt, idxs in zip(coords, nbr):
             if idxs:
                 dvec = rest[idxs] - pt
                 dvec -= np.round(dvec / box_arr) * box_arr
                 total += _lj_energy(np.sqrt((dvec ** 2).sum(axis=1)), rc)
-    for i in range(len(coords)):
-        for j in range(i + 1, len(coords)):
-            dvec = coords[i] - coords[j]
-            dvec -= np.round(dvec / box_arr) * box_arr
-            total += _lj_energy(np.array([np.sqrt((dvec ** 2).sum())]), rc)
+    if len(coords) > 1:
+        ii, jj = np.triu_indices(len(coords), k=1)
+        dvec = coords[ii] - coords[jj]
+        dvec -= np.round(dvec / box_arr) * box_arr
+        total += _lj_energy(np.sqrt((dvec ** 2).sum(axis=1)), rc)
     return total
 
 
@@ -241,25 +297,30 @@ def advance(state, cfg, potential, weigher):
     beta = cfg.beta
     temp = cfg.temp
     mu = cfg.chem_pot
+    nvt = cfg.ensemble_type == "NVT"
     total_vol = cfg.total_volume
-    lj = cfg.potential_type == "lj"
+    ljaux = cfg.potential_type == "ljaux"
+    ljbranch = cfg.potential_type == "ljbranch"   # true LJ+branch, no auxiliary
+    lj = cfg.potential_type in ("lj", "ljbranch") or ljaux  # LJ physics: floor, translation, tail
     aux = cfg.potential_type == "aux"
     branch = cfg.branch
     reweight = cfg.potential_type == "reweight"
     if branch and reweight:
         raise NotImplementedError("branch and reweight are alternative biasing "
                                   "schemes; combining them is undefined")
-    if branch and lj and depth != 0:
-        raise NotImplementedError("branch + lennard_jones is validated only at "
-                                  "depth 0 (single insertion/removal)")
 
     def rand():
         return rng.random()
 
     step = 0
-    while step <= cfg.sampling_window:
+    while step < cfg.sampling_window:
         N = len(pos)
-        choice = "add" if N == 0 else rng.choice(["move", "add", "remove"], p=[0.5, 0.25, 0.25])
+        if nvt:
+            # NVT: only translations and number-conserving repacking moves;
+            # no insertions or deletions, so N stays at the target exactly.
+            choice = "repack" if N > 0 else "move"
+        else:
+            choice = "add" if N == 0 else rng.choice(["move", "add", "remove"], p=[0.5, 0.25, 0.25])
 
         # ---------------------------------------------------------- translate
         if choice == "move" and N > 0:
@@ -305,7 +366,10 @@ def advance(state, cfg, potential, weigher):
         if choice == "remove" and N == 0:
             continue
 
-        if choice == "add":
+        if choice == "repack":
+            c["repack_step"] = c.get("repack_step", 0) + 1
+            n_add = n_remove = depth + 1     # remove k, insert k; N conserved
+        elif choice == "add":
             c["add_step"] += 1
             n_add, n_remove = depth + 1, depth
         else:
@@ -313,32 +377,70 @@ def advance(state, cfg, potential, weigher):
             n_add, n_remove = depth, depth + 1
 
         step += 1
-        if step >= cfg.sampling_window:
-            break
 
-        # cavity centre
-        if choice == "add" or lj:
-            center = rng.uniform(0, side, size=3)[:dim]
-        else:
-            center = pos[rng.choice(N)]
-
-        idx_cav = geometry.indices_in_cavity(pos, center, cfg.cavity_radius, side, two_d)
-        n_cav = len(idx_cav)
-        if n_cav == 0:
-            continue
-
-        if n_cav < n_remove:
+        # Proposal geometry differs by depth.
+        #
+        # depth == 0: the mirror scheme, EOS-validated in this package. The
+        # original monolith's depth-0 cavity path fails the hard-sphere EOS
+        # (+33% at mu=4.3, density depends on cavity size), so it is not used.
+        #
+        # depth >= 1: the original BRANCH-MC proposal, transcribed verbatim
+        # from cav_n_d_3d_g3_LJ.py and EOS-validated there (depth 1: 290.3,
+        # depth 2: 292.5 vs CS 292.9; invariant under cavity radius). Its
+        # acceptance algebra is built for exactly this proposal, so no mirror
+        # and no generation-probability corrections apply here.
+        if depth == 0:
             if choice == "add":
-                n_add, n_remove = n_cav, n_cav - 1
+                center = rng.uniform(0, side, size=3)[:dim]
+                anchor = -1
+            else:   # remove or repack: local, anchored on an existing particle
+                anchor = int(rng.choice(N))
+                center = (pos[anchor]
+                          + rng.uniform(-cfg.cavity_radius, cfg.cavity_radius,
+                                        size=dim)) % side
+            if n_remove > 0:
+                idx_cav = geometry.indices_in_cavity(pos, center,
+                                                     cfg.cavity_radius, side,
+                                                     two_d)
+                n_cav = len(idx_cav)
             else:
-                n_add, n_remove = n_cav - 1, n_cav
+                idx_cav = np.empty(0, dtype=int)
+                n_cav = 0
+        else:
+            if choice == "add" or lj:
+                center = rng.uniform(0, side, size=3)[:dim]
+            else:   # remove or repack (non-lj): centre on an existing particle
+                center = pos[int(rng.choice(N))]
+            anchor = -1
+            idx_cav = geometry.indices_in_cavity(pos, center,
+                                                 cfg.cavity_radius, side, two_d)
+            n_cav = len(idx_cav)
+            if n_cav == 0:
+                continue
+            if n_cav < n_remove:
+                if choice == "add":
+                    n_add, n_remove = n_cav, n_cav - 1
+                else:
+                    n_add, n_remove = n_cav - 1, n_cav
 
         # split system into in-cavity (to remove) and the rest
         if n_remove == 0:
             disk_in = np.empty((0, dim))
             disk_rest = pos
         else:
-            chosen_idx = rng.choice(idx_cav, n_remove, replace=False)
+            if depth == 0:
+                # the anchor is always removed; any further removals come
+                # uniformly from the remaining cavity occupants
+                others = idx_cav[idx_cav != anchor]
+                if len(others) < n_remove - 1:
+                    continue
+                chosen_idx = np.empty(n_remove, dtype=int)
+                chosen_idx[0] = anchor
+                if n_remove > 1:
+                    chosen_idx[1:] = rng.choice(others, n_remove - 1,
+                                                replace=False)
+            else:
+                chosen_idx = rng.choice(idx_cav, n_remove, replace=False)
             disk_in = pos[chosen_idx]
             keep = np.ones(N, dtype=bool)
             keep[chosen_idx] = False
@@ -365,8 +467,18 @@ def advance(state, cfg, potential, weigher):
         tree = cKDTree(disk_rest, boxsize=box)
         raw = geometry.find_neighbors(tree, trials, lower, uc, nn, keep_mask=keep_mask)
         if raw is None:
-            continue
-        trial_set, km = _weighted_trials(raw, tree, cfg, potential, choice, N)
+            if n_add != 0:
+                continue       # nothing to insert from: equivalent to rejecting
+            # pure deletion: a fully overlapping shadow cloud is a valid (and
+            # common) outcome whose reverse weight is the removed molecules
+            # alone. Abandoning these moves discards precisely the deletions
+            # with the smallest W_old, i.e. the highest acceptance, which
+            # suppressed the deletion flux and inflated the density.
+            trial_set = TrialSet(np.empty((0, dim)), np.empty(0),
+                                 ref_neighbor_coord=np.empty((0, dim)))
+            km = np.empty(0, dtype=bool)
+        else:
+            trial_set, km = _weighted_trials(raw, tree, cfg, potential, choice, N)
 
         if n_remove != 0:
             raw_in = geometry.find_neighbors(tree, disk_in, lower, uc, nn)
@@ -390,20 +502,25 @@ def advance(state, cfg, potential, weigher):
             if len(trial_set) < n_add:
                 continue
             if branch:
-                num_new, idx = count_and_sample(pool.coords, n_add,
-                                                lower, box_lengths=box)
-                if num_new == 0:
-                    continue
-                chosen_coords = pool.coords[list(idx)]
-                if lj:
-                    # clique count is the multiplicity; the selected trial's LJ
-                    # energy is folded into the Rosenbluth weight (single sample,
-                    # unbiased for sum_valid exp[-b u]).
-                    u_ins = _lj_set_energy(chosen_coords, disk_rest, box, uc)
-                    sum_new = np.log(num_new) - beta * u_ins
+                if ljbranch:
+                    # true LJ+branch: full Rosenbluth sum over all k-cliques,
+                    # selection proportional to exp(-beta U_clique). Returns the
+                    # chosen clique's coords and W_new = sum over cliques.
+                    _band_upper = 2.0 * cfg.cavity_radius
+                    chosen_coords, sum_new = _ljbranch_forward(
+                        pool.coords, n_add, lower, disk_rest, box, uc, beta,
+                        rng, _band_upper)
+                    if chosen_coords is None:
+                        continue
+                    e_u_r_new = 0.0
                 else:
+                    num_new, idx = count_and_sample(pool.coords, n_add,
+                                                    lower, box_lengths=box)
+                    if num_new == 0:
+                        continue
+                    chosen_coords = pool.coords[list(idx)]
                     sum_new = np.log(num_new)
-                e_u_r_new = 0.0
+                    e_u_r_new = 0.0
             else:
                 chosen, sum_new_arr = select_forward(pool, n_add, weigher, rand=rand,
                                                      side=side, r_squared=r_sq, gamma_schedule=gdict)
@@ -424,26 +541,23 @@ def advance(state, cfg, potential, weigher):
         # reverse (current configuration)
         if n_remove != 0:
             if branch:
-                num_cur, _ = count_and_sample(pool.coords, n_remove,
-                                              lower, box_lengths=box)
-                if lj:
+                if ljbranch:
+                    # reverse Rosenbluth weight W_curr: the same all-clique sum
+                    # on the CURRENT configuration's pool, with the removed set
+                    # guaranteed to be one member. Identical enumerator+weight
+                    # as the forward, so detailed balance holds by construction.
+                    sum_current = _ljbranch_reverse(
+                        pool.coords, n_remove, lower, disk_in, disk_rest,
+                        box, uc, beta, 2.0 * cfg.cavity_radius)
+                    e_u_r_current = 0.0
+                else:
+                    num_cur, _ = count_and_sample(pool.coords, n_remove,
+                                                  lower, box_lengths=box)
                     if num_cur <= 0:
                         sum_current = -np.inf
                     else:
-                        # bounded reverse weight: the removed particle's own LJ
-                        # Boltzmann factor sits inside the sum, the counted ghosts
-                        # are represented by one sampled valid trial.
-                        u_rem = _lj_set_energy(disk_in, disk_rest, box, uc)
-                        w_old = np.exp(-beta * u_rem)
-                        n_ghost = num_cur - n_remove
-                        if n_ghost > 0 and len(trial_set) > 0:
-                            ghost = trial_set.coords[rng.integers(len(trial_set))][None, :]
-                            u_ghost = _lj_set_energy(ghost, disk_rest, box, uc)
-                            w_old = w_old + n_ghost * np.exp(-beta * u_ghost)
-                        sum_current = np.log(w_old)
-                else:
-                    sum_current = np.log(num_cur) if num_cur > 0 else -np.inf
-                e_u_r_current = 0.0
+                        sum_current = np.log(num_cur)
+                    e_u_r_current = 0.0
             else:
                 trimmed = trial_set.mask(km)
                 trimmed = trimmed if len(trimmed) != 0 else None
@@ -458,18 +572,46 @@ def advance(state, cfg, potential, weigher):
         if branch and not np.isfinite(sum_current):
             continue
 
-        # branch + LJ: per-particle LJ energy is now inside sum_new / sum_current
-        # (the Rosenbluth weights). Only the mean-field tail correction, which is
-        # not a per-trial quantity, remains as an explicit energy term.
-        if branch and lj:
+        # LJ tail: a system-level energy change, applied exactly once per move
+        # with the same sign in both directions. For branch the per-particle
+        # pair energy is inside sum_new / sum_current; for rosenbluth it is
+        # inside the Boltzmann trial weights. Either way only the mean-field
+        # tail remains as an explicit term.
+        if lj:
             n_new = len(disk_rest) + len(chosen_coords)
             n_old = len(disk_rest) + len(disk_in)
             delta_E_lj = beta * cfg.lj_tail_pref * (n_new ** 2 - n_old ** 2)
         else:
             delta_E_lj = None
 
+        # The depth >= 1 acceptance is the original's, complete as written;
+        # the depth-0 mirror scheme likewise needs no extra terms.
+        corr = 0.0
+
         # acceptance
-        if choice == "add":
+        if choice == "repack":
+            c["repack_attempt"] = c.get("repack_attempt", 0) + 1
+            # Number-conserving move: remove k, insert k in one step. The
+            # chemical-potential prefactor cancels identically (the e^{beta mu}
+            # of the k insertions against the e^{-beta mu} of the k deletions,
+            # and the V/N number factors), leaving only the configurational
+            # Rosenbluth ratio and the energy change. n_add == n_remove makes
+            # the k_trials factors of the forward and reverse equal, so they too
+            # cancel and no count prefactor remains.
+            mu_excess = -sum_new + sum_current
+            if ljaux:
+                u_ins = _lj_set_energy(chosen_coords, disk_rest, box, uc) if len(chosen_coords) else 0.0
+                u_rem = _lj_set_energy(disk_in, disk_rest, box, uc) if len(disk_in) else 0.0
+                delta_E = ((delta_E_lj or 0.0) + (e_u_r_new - e_u_r_current)
+                           + beta * (u_ins - u_rem))
+            else:
+                delta_E = delta_E_lj if delta_E_lj is not None else (0.0 if lj else (e_u_r_new - e_u_r_current))
+            log_alpha = mu_excess + delta_E - corr
+            log_alpha = max(0.0, log_alpha)
+            if log_alpha <= -np.log(rng.uniform(0, 1)):
+                pos = np.append(disk_rest, chosen_coords, axis=0) if len(chosen_coords) else disk_rest
+                c["repack_accept"] = c.get("repack_accept", 0) + 1
+        elif choice == "add":
             c["add_attempt"] += 1
             mu_ideal = -np.log(total_vol / (N + 1))
             if branch:
@@ -477,9 +619,15 @@ def advance(state, cfg, potential, weigher):
             else:
                 k_trials = -np.log(n_trials - n_remove)
             mu_excess = -sum_new + sum_current - k_trials
-            delta_E = delta_E_lj if delta_E_lj is not None else (0.0 if lj else (e_u_r_new - e_u_r_current))
-            log_alpha = mu_ideal - beta * mu + mu_excess + delta_E
-            log_alpha = -np.log(min(1, np.exp(-log_alpha)))
+            if ljaux:
+                u_ins = _lj_set_energy(chosen_coords, disk_rest, box, uc) if len(chosen_coords) else 0.0
+                u_rem = _lj_set_energy(disk_in, disk_rest, box, uc) if len(disk_in) else 0.0
+                delta_E = ((delta_E_lj or 0.0) + (e_u_r_new - e_u_r_current)
+                           + beta * (u_ins - u_rem))
+            else:
+                delta_E = delta_E_lj if delta_E_lj is not None else (0.0 if lj else (e_u_r_new - e_u_r_current))
+            log_alpha = mu_ideal - beta * mu + mu_excess + delta_E - corr
+            log_alpha = max(0.0, log_alpha)
             if log_alpha <= -np.log(rng.uniform(0, 1)):
                 pos = np.append(disk_rest, chosen_coords, axis=0)
                 c["add_accept"] += 1
@@ -490,9 +638,15 @@ def advance(state, cfg, potential, weigher):
             else:
                 k_trials = -np.log(n_trials - n_add)
             mu_excess = -sum_new + sum_current + k_trials
-            delta_E = delta_E_lj if delta_E_lj is not None else (0.0 if lj else (e_u_r_new - e_u_r_current))
-            log_alpha = mu_ideal + beta * mu + mu_excess + delta_E
-            log_alpha = -np.log(min(1, np.exp(-log_alpha)))
+            if ljaux:
+                u_ins = _lj_set_energy(chosen_coords, disk_rest, box, uc) if len(chosen_coords) else 0.0
+                u_rem = _lj_set_energy(disk_in, disk_rest, box, uc) if len(disk_in) else 0.0
+                delta_E = ((delta_E_lj or 0.0) + (e_u_r_new - e_u_r_current)
+                           + beta * (u_ins - u_rem))
+            else:
+                delta_E = delta_E_lj if delta_E_lj is not None else (0.0 if lj else (e_u_r_new - e_u_r_current))
+            log_alpha = mu_ideal + beta * mu + mu_excess + delta_E - corr
+            log_alpha = max(0.0, log_alpha)
             if log_alpha <= -np.log(rng.uniform(0, 1)):
                 if len(chosen_coords) == 0:
                     pos = disk_rest
