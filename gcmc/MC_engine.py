@@ -33,7 +33,9 @@ from .samplers import reweighting
 from .samplers.rosenbluth import select_forward, select_reverse
 from .samplers.branch import count_and_sample
 from .samplers.channel import (ChannelSweep, ChannelSweepLJ, local_from_box,
-                               cuboid_members, random_rotation_matrix)
+                               cuboid_members, random_rotation_matrix,
+                               ChannelSweepFull, ChannelSweepLJFull,
+                               ray_box_chord, axial_coord_full, rod_members_full)
 from .samplers import branch as branch_mod
 from .state import zero_counters
 from .potentials.lennard_jones import lj_pair_energy
@@ -381,6 +383,8 @@ def advance(state, cfg, potential, weigher):
     aux = cfg.potential_type == "aux"
     branch = cfg.branch
     channel = getattr(cfg, "channel", False)   # branch variant: cuboid + sweep
+    channel_full = getattr(cfg, "channel_full_span", False)  # wall-to-wall rod
+    n_trials_base = n_trials                    # full-span resets n_trials/move
     full_repacking = getattr(cfg, "full_repacking", False)  # whole-cavity repack
     reweight = cfg.potential_type == "reweight"
     if branch and reweight:
@@ -536,7 +540,24 @@ def advance(state, cfg, potential, weigher):
             # channel: draw the orientation now so removal membership and the
             # trial cloud share the same oriented body (required for reversibility).
             chan_R = random_rotation_matrix(rng) if channel else None
-            if channel:
+            chan_chord = None         # full-span: (axis, e1, e2, s_min, s_max)
+            if channel and channel_full:
+                # wall-to-wall rod along a freely chosen orientation. The length
+                # is set by where the line meets the box (box for an axis line,
+                # up to box*sqrt(3) for the body diagonal). Membership and the
+                # trial count both follow from that chord, so the two directions
+                # act on one body and the linear trial density stays fixed.
+                axis, e1, e2 = chan_R[:, 0], chan_R[:, 1], chan_R[:, 2]
+                s_min, s_max = ray_box_chord(center, axis, box)
+                chan_chord = (axis, e1, e2, s_min, s_max)
+                chord_len = s_max - s_min
+                w = cfg.channel_width
+                n_trials = max(2, int(round(cfg.trial_density
+                                            * chord_len * w * w)))
+                idx_cav, _ = rod_members_full(
+                    pos, center, axis, e1, e2, s_min, s_max, 0.5 * w, box)
+            elif channel:
+                n_trials = n_trials_base
                 idx_cav = cuboid_members(pos, center, chan_R,
                                          0.5 * cfg.channel_length,
                                          0.5 * cfg.channel_width, side)
@@ -613,7 +634,18 @@ def advance(state, cfg, potential, weigher):
             # pure deletion with no fluid left: nothing to remove.
             continue
         # trial molecules in the cavity
-        if channel:
+        if channel and channel_full:
+            # trials uniform along the wall-to-wall chord: axial s in [s_min,
+            # s_max], square cross-section w x w. Same chord as the membership
+            # test, so insertion and removal act on one body.
+            axis, e1, e2, s_min, s_max = chan_chord
+            b_loc = 0.5 * cfg.channel_width
+            s_t = rng.uniform(s_min, s_max, n_trials)
+            u_t = rng.uniform(-b_loc, b_loc, n_trials)
+            v_t = rng.uniform(-b_loc, b_loc, n_trials)
+            trials = np.mod(center + s_t[:, None] * axis
+                            + u_t[:, None] * e1 + v_t[:, None] * e2, side)
+        elif channel:
             # oriented thin cuboid around the same centre, using the SAME R drawn
             # for the removal-membership test, so insertion and removal act on one
             # body. R is kept so the sweep can recover local coordinates.
@@ -684,7 +716,23 @@ def advance(state, cfg, potential, weigher):
         # channel mode: one sweep over the pool serves both the forward count
         # (Z_{n_add}) and the reverse count (Z_{n_remove}); kmax covers both.
         chan_sweep = None
-        if channel and len(pool):
+        if channel and channel_full and len(pool):
+            # every pool atom (surviving trial or removed member) lies on the
+            # rod, so its axial coordinate is recovered from the same chord. The
+            # sweep uses minimum-image box distances and retention eviction, so
+            # the wall-to-wall wrap (the seam) is scored exactly.
+            axis, e1, e2, s_min, s_max = chan_chord
+            ax_pool = axial_coord_full(pool.coords, center, axis,
+                                       s_min, s_max, box)
+            kmx = max(n_add, n_remove)
+            if ljbranch:
+                chan_sweep = ChannelSweepLJFull(pool.coords, ax_pool,
+                                                pool.energy_weight, box,
+                                                lower, uc, beta, kmx)
+            else:
+                chan_sweep = ChannelSweepFull(pool.coords, ax_pool, box,
+                                              lower, kmx)
+        elif channel and len(pool):
             U_pool = local_from_box(pool.coords, center, chan_R, side)
             kmx = max(n_add, n_remove)
             if ljbranch:

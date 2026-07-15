@@ -94,9 +94,24 @@
           "description": "XOR alternative to depth: repack the whole cavity each exchange, removing every sphere found and inserting one more (add), one fewer (remove), or the same count (repack). Ignores depth; do not give both. Cavity samplers only (not metropolis)."
         },
         "channel_length": {
-          "type": "number",
-          "exclusiveMinimum": 0,
-          "description": "channel only: length of the long axis of the oriented trial cuboid."
+          "oneOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "fixed-length rod: the long axis of the oriented trial cuboid. Must satisfy the periodic guard sqrt(channel_length^2 + 2*channel_width^2) <= box - cutoff, so trial distances never wrap."
+            },
+            {
+              "type": "string",
+              "enum": [
+                "full",
+                "box",
+                "full_box",
+                "span"
+              ],
+              "description": "full-span rod: the rod runs wall to wall along a freely drawn orientation, so its length is set per move by where the line meets the box (box for an axis line, up to box*sqrt(3) for the body diagonal). The periodic guard is lifted and the sweep uses minimum-image distances with retention eviction, so a clique that closes through the periodic boundary (the seam) is scored exactly once. Requires trial_density; sampler.trials is rejected because the length, hence the trial count, varies per move."
+            }
+          ],
+          "description": "channel only: length of the long axis of the oriented trial cuboid. A positive number selects the fixed-length rod; the string \"full\" (or \"box\"/\"full_box\"/\"span\") selects the wall-to-wall full-span rod."
         },
         "channel_width": {
           "type": "number",

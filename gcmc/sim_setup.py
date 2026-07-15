@@ -236,6 +236,10 @@ class Config:
     channel: bool = False
     channel_length: float = 0.0          # cuboid length along the sweep axis
     channel_width: float = 0.0           # cuboid cross-section (square side)
+    channel_full_span: bool = False      # channel_length == "full": wall-to-wall
+                                         # oriented rod, any orientation, exact PBC
+                                         # (the periodic guard is lifted; the sweep
+                                         # uses minimum-image distances + retention)
 
     @property
     def box_dims(self):
@@ -523,6 +527,7 @@ def from_params(p):
     lower_cutoff = float(run.get("lower_cutoff", _lower_default))
     r_squared = lower_cutoff * lower_cutoff
 
+    channel_full_span = False
     if metropolis:
         trial_box_side = 0.0
         cav = 0.0
@@ -540,22 +545,46 @@ def from_params(p):
         # rejected above.
         trial_box_side = 0.0
         cav = 0.0
-        channel_length = float(smp.get("channel_length", 0.0))
+        _clen = smp.get("channel_length", 0.0)
+        channel_full_span = isinstance(_clen, str) and _clen.strip().lower() in (
+            "full", "box", "full_box", "span")
         channel_width = float(smp.get("channel_width", 0.0))
-        if channel_length <= 0.0 or channel_width <= 0.0:
-            raise ValueError("channel sampler needs channel_length and "
-                             "channel_width > 0")
         if not (diameter <= channel_width <= 2.0 * diameter + 1e-9):
             raise ValueError(
                 f"channel_width must lie in [sigma, 2 sigma] = "
                 f"[{diameter}, {2 * diameter}]; got {channel_width}")
-        chan_vol = channel_length * channel_width * channel_width
-        if "trials" in smp:
-            n_trials = int(smp["trials"])
-            trial_density = round(n_trials / chan_vol, 6)
-        else:
+        if channel_full_span:
+            # Full-span rod: the length is set per move by the orientation (wall
+            # to wall, box for an axis line up to box*sqrt(3) for the body
+            # diagonal), so there is no fixed channel_length and no fixed trial
+            # count. trial_density (spheres per unit volume) fixes the linear
+            # density; the engine draws density * chord_volume trials each move.
+            # A nominal cap sized on the longest possible chord bounds arrays.
+            channel_length = 0.0
+            if "trials" in smp:
+                raise ValueError(
+                    "full-span channel sets its length per move, so a fixed "
+                    "trial count is ambiguous; give sampler.trial_density "
+                    "(spheres per unit volume) instead of sampler.trials")
             trial_density = float(smp.get("trial_density", 0.0))
-            n_trials = int(round(trial_density * chan_vol))
+            if trial_density <= 0.0:
+                raise ValueError("full-span channel needs trial_density > 0")
+            _maxchord = box * (3.0 ** 0.5)
+            n_trials = max(2, int(round(trial_density * _maxchord
+                                        * channel_width * channel_width)))
+        else:
+            channel_length = float(_clen)
+            if channel_length <= 0.0:
+                raise ValueError("channel sampler needs channel_length > 0 "
+                                 "(or the string \"full\" for a wall-to-wall "
+                                 "rod), and channel_width > 0")
+            chan_vol = channel_length * channel_width * channel_width
+            if "trials" in smp:
+                n_trials = int(smp["trials"])
+                trial_density = round(n_trials / chan_vol, 6)
+            else:
+                trial_density = float(smp.get("trial_density", 0.0))
+                n_trials = int(round(trial_density * chan_vol))
     else:
         trial_box_side = float(smp.get("trial_box_side", 3.0))
         cav = trial_box_side / 2.0
@@ -695,16 +724,19 @@ def from_params(p):
         if not full_repacking and int(smp.get("depth", 0)) < 1:
             raise ValueError("channel sampler needs depth >= 1 (depth 0 has no "
                              "clique structure to sweep), or set full_repacking")
-        # periodic guard: insertion and removal share one oriented cuboid, so the
-        # whole pool lives in that body. Its space diagonal must stay below the
-        # box minus the interaction range (sigma for hard core, rc for LJ) so
-        # local distances equal periodic distances.
-        guard_cut = uc if lj else diameter
-        diag = _m.sqrt(channel_length ** 2 + 2.0 * channel_width ** 2)
-        if diag > box - guard_cut:
-            raise ValueError(
-                f"channel geometry violates the periodic guard: cuboid diagonal "
-                f"{diag:.3f} must be <= box - cutoff = {box - guard_cut:.3f}")
+        # periodic guard: for the FIXED-length rod, insertion and removal share
+        # one oriented cuboid, so the whole pool lives in that body. Its space
+        # diagonal must stay below the box minus the interaction range (sigma for
+        # hard core, rc for LJ) so local distances equal periodic distances. The
+        # full-span rod lifts this guard on purpose and instead computes true
+        # minimum-image distances in the sweep, so the guard does not apply.
+        if not channel_full_span:
+            guard_cut = uc if lj else diameter
+            diag = _m.sqrt(channel_length ** 2 + 2.0 * channel_width ** 2)
+            if diag > box - guard_cut:
+                raise ValueError(
+                    f"channel geometry violates the periodic guard: cuboid diagonal "
+                    f"{diag:.3f} must be <= box - cutoff = {box - guard_cut:.3f}")
 
     # ---- fail fast on physically invalid runs, one specific message each ----
     _r_int = uc if lj else diameter
@@ -745,6 +777,7 @@ def from_params(p):
         depth=(0 if (metropolis or full_repacking) else int(smp.get("depth", 0))),
         branch=branch, metropolis=metropolis,
         channel=channel, channel_length=channel_length, channel_width=channel_width,
+        channel_full_span=channel_full_span,
         full_repacking=full_repacking,
         move_factor=move_factor,
         temp=temp, rc=(uc if lj else None),
