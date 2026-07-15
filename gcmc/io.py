@@ -23,7 +23,13 @@ import numpy as np
 from ase import Atoms
 from ase.io import write as ase_write
 
-SCHEMA = 1
+# Checkpoint schema version. Bumped 1 -> 2 when the muVT move selection stopped
+# forcing "add" at N=0 (item 1) and the 3D translation drew an independent z
+# component instead of a derived one (item 3). Both change how many random values
+# a step consumes, so a schema-1 checkpoint replayed under schema 2 continues as a
+# valid but different Markov chain; the run id and stored schema make that visible
+# rather than silently mixing two streams.
+SCHEMA = 2
 
 
 # ---------------------------------------------------------------- run dir
@@ -148,31 +154,33 @@ def trim_trajectory(path, max_step):
     a resumed append-mode run does not duplicate frames written after the last
     checkpoint but before a kill. No-op if the file is absent. Frames are extxyz
     blocks: a count line, a comment line carrying `step=<int>`, then that many
-    atom lines. We keep whole frames with step <= max_step."""
+    atom lines; whole frames with step <= max_step are kept.
+
+    The copy is streamed frame by frame into a temporary file rather than reading
+    the whole trajectory into memory, so trimming a multi-gigabyte run costs one
+    frame of memory instead of the entire file."""
     if not os.path.exists(path):
         return
     import re
-    with open(path) as f:
-        lines = f.readlines()
-    kept = []
-    i = 0
-    n = len(lines)
-    while i < n:
-        try:
-            natoms = int(lines[i].strip())
-        except (ValueError, IndexError):
-            # not a frame header; keep the stray line and advance
-            kept.append(lines[i]); i += 1
-            continue
-        block = lines[i:i + natoms + 2]          # header + comment + atoms
-        m = re.search(r"step=(\d+)", block[1]) if len(block) > 1 else None
-        step = int(m.group(1)) if m else 0
-        if step <= max_step:
-            kept.extend(block)
-        i += natoms + 2
     tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        f.writelines(kept)
+    with open(path) as fin, open(tmp, "w") as fout:
+        while True:
+            header = fin.readline()
+            if header == "":
+                break                              # EOF
+            try:
+                natoms = int(header.strip())
+            except ValueError:
+                fout.write(header)                 # stray line: pass it through
+                continue
+            comment = fin.readline()
+            atoms = [fin.readline() for _ in range(natoms)]
+            m = re.search(r"step=(\d+)", comment)
+            step = int(m.group(1)) if m else 0
+            if step <= max_step:
+                fout.write(header)
+                fout.write(comment)
+                fout.writelines(atoms)
     os.replace(tmp, path)
 
 
@@ -284,14 +292,51 @@ def load_matrix(path, dimension):
 
 
 def load_config_file(path, dimension):
-    """Load an equilibrated starting configuration from a plain coordinate file:
-    one molecule per line, whitespace-separated floats `x y z` (z present and 0
-    for 2D systems). Returns an (N, dimension) array, using the first
-    `dimension` columns and wrapping nothing (the file is taken as authoritative
-    in-box coordinates)."""
+    """Load an equilibrated starting configuration. Two formats are accepted and
+    chosen automatically from the first line:
+
+      (1) Extended XYZ, the format the equilibrated library is stored in: the
+          first line is the atom count, the second is a comment carrying
+          `Lattice=...` and `Properties=species:S:1:pos:R:3`, then one
+          `species x y z` row per atom. Read through ASE (last frame if several).
+
+      (2) A bare coordinate table: whitespace-separated floats `x y z`, one
+          molecule per line (z present and 0 for 2D). Read with numpy.
+
+    Returns an (N, dimension) array using the first `dimension` spatial columns.
+    The file is taken as authoritative in-box coordinates (nothing is wrapped)."""
+    with open(path) as f:
+        first = f.readline().strip()
+    is_xyz = False
+    if first:
+        try:
+            int(first)          # an atom-count first line marks (extended) XYZ
+            is_xyz = True
+        except ValueError:
+            is_xyz = False
+    if is_xyz:
+        try:
+            from ase.io import read as ase_read
+            atoms = ase_read(path, index="-1")      # ASE picks xyz/extxyz by header
+        except Exception as e:
+            raise ValueError(
+                f"{path}: first line is an atom count so this looks like an XYZ "
+                f"file, but it could not be parsed as XYZ/extended-XYZ ({e}). "
+                f"Expected: an integer count, a comment line, then rows of "
+                f"`species x y z`.")
+        pos = np.asarray(atoms.get_positions(), dtype=float)
+        if pos.ndim != 2 or pos.shape[1] < dimension:
+            raise ValueError(
+                f"{path}: parsed {pos.shape} positions but need at least "
+                f"{dimension} spatial columns for a {dimension}D run")
+        return np.ascontiguousarray(pos[:, :dimension])
+
     data = np.loadtxt(path, dtype=float)
     if data.ndim == 1:                       # a single line -> one molecule
         data = data.reshape(1, -1)
     if data.shape[1] < dimension:
-        raise ValueError(f"{path}: has {data.shape[1]} columns, need {dimension}")
+        raise ValueError(
+            f"{path}: has {data.shape[1]} numeric columns, need {dimension} for a "
+            f"{dimension}D run. If this is an XYZ file, its first line must be the "
+            f"atom count so it is read as XYZ rather than a bare number table.")
     return np.ascontiguousarray(data[:, :dimension])

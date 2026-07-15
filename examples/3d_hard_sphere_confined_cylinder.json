@@ -1,0 +1,22 @@
+{
+  "potential": {
+    "main": "hard_core"
+  },
+  "sampler": {
+    "type": "metropolis"
+  },
+  "ensemble": {
+    "type": "confined",
+    "mu": 2.0,
+    "dimension": 3,
+    "box": 12.0,
+    "pore": {
+      "geometry": "cylinder",
+      "R": 3.0
+    }
+  },
+  "run": {
+    "seed": 1,
+    "sampling_window": 1000
+  }
+}

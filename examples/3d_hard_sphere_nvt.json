@@ -1,0 +1,21 @@
+{
+  "potential": {
+    "main": "hard_core"
+  },
+  "sampler": {
+    "type": "rosenbluth",
+    "depth": 1,
+    "trials": 30,
+    "trial_box_side": 3.0
+  },
+  "ensemble": {
+    "type": "NVT",
+    "N": 200,
+    "dimension": 3,
+    "box": 12.0
+  },
+  "run": {
+    "seed": 1,
+    "sampling_window": 1000
+  }
+}

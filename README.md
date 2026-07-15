@@ -132,7 +132,43 @@ The headline table. ✓ = supported and validated; ✓* = supported with a cavea
   configurational-bias scheme over the *k-cliques* of the cavity's overlap
   graph, with the complete Rosenbluth sum under the real LJ energy (no hard-core
   auxiliary). This is the package's headline method for dense-fluid efficiency.
+- **`channel`** — BRANCH-MC over an oriented rod instead of a spherical cavity.
+  Trials are dropped into a thin cuboid (`channel_width` square cross-section)
+  and the clique sum is evaluated by a transfer-matrix sweep along the rod's long
+  axis, replacing exponential clique enumeration with a linear-cost DP. Insertion
+  and removal share one rod (same centre, same rotation), which is what makes the
+  move reversible. 3D only; needs `depth >= 1` or `full_repacking`.
 - **`reweight`** — 2D hexatic (ψ₆) reweighting; 2D only.
+
+#### Channel rod length: fixed vs full-span
+
+`channel_length` takes either a number or the string `"full"`.
+
+- **number** — a fixed-length rod. It must satisfy the periodic guard
+  `sqrt(channel_length² + 2·channel_width²) ≤ box − cutoff`, so no trial pair
+  ever wraps the box and the sweep can use plain local distances.
+- **`"full"`** — a *full-span* rod that runs wall to wall along a freely drawn
+  orientation. Its length is set per move by where the line meets the box:
+  `box` for an axis-aligned line, up to `box·√3` down the body diagonal. This is
+  the "tetris" move: an entire line of spheres, boundary to boundary, is replaced
+  in one step. The periodic guard is lifted; instead the sweep scores every pair
+  at its true minimum-image distance and evicts trials from the DP state by
+  *retention* (a trial stays live until the last trial that interacts with it has
+  been processed). Retention is what enforces the **seam** — when a rod's two
+  ends are periodic neighbours, the entry-end trial stays in state across the
+  whole sweep, so a clique closing through the boundary is counted exactly once,
+  never twice, never dropped.
+
+  Full-span requires `trial_density` (spheres per unit volume): the rod's length,
+  and hence its trial count, changes from move to move, so a fixed
+  `sampler.trials` is rejected. There is no orientation cap and no bandwidth cap;
+  orientations are drawn Haar-uniform.
+
+```json
+{ "sampler": { "type": "channel", "full_repacking": true,
+               "trial_density": 2.5,
+               "channel_length": "full", "channel_width": 1.0 } }
+```
 
 ### 3. Depth — what BRANCH-MC actually is
 
@@ -298,6 +334,16 @@ self-consistency. 32 physics tests in `tests/test_physics.py`:
   fix for the matrix-blocked trial slots across the full dilute range is pending.
 - **QA is serial, μVT, hard_core or LJ+branch only** — enforced by the validator.
 - **Depth is capped at 3.**
+- **Full-span channel with LJ is cheap at small depth, expensive at
+  `full_repacking`.** Cost is set by the DP bandwidth, i.e. how many trials sit
+  inside one interaction window. Hard spheres see a window of σ, so the rod stays
+  narrow and full-span tetris is inexpensive at any length. LJ sees a window of
+  `rc = 2.5σ`, which admits many non-overlapping centres at once; combined with
+  the unbounded `kmax` of `full_repacking` on a wall-to-wall rod, the state count
+  can blow up. Use `depth = 1..3` for LJ full-span, or shorten the rod with a
+  numeric `channel_length`. This is a cost limitation, not a correctness one, and
+  by design there is no bandwidth cap: aborting a move on a
+  configuration-dependent cost threshold would break detailed balance.
 
 ---
 

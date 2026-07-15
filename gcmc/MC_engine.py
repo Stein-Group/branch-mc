@@ -33,38 +33,45 @@ from .samplers import reweighting
 from .samplers.rosenbluth import select_forward, select_reverse
 from .samplers.branch import count_and_sample
 from .samplers.channel import (ChannelSweep, ChannelSweepLJ, local_from_box,
-                               cuboid_members, random_rotation_matrix)
+                               cuboid_members, random_rotation_matrix,
+                               ChannelSweepFull, ChannelSweepLJFull,
+                               ray_box_chord, axial_coord_full, rod_members_full)
 from .samplers import branch as branch_mod
 from .state import zero_counters
+from .potentials.lennard_jones import lj_pair_energy
 
 
 
 def _pore_bounds(cfg):
     """Centre-accessible bounds for a hard pore inside the cubic cell of side
-    cfg.box. Returns (kind, params). The slab/cylinder is centred in the cell."""
+    cfg.box. Returns (kind, params). The slab/cylinder is centred in the cell.
+    A sphere of radius cfg.radius must keep its centre off the wall by that
+    radius, so the clearance is cfg.radius, not a hardcoded 0.5."""
     L = cfg.box
+    cl = cfg.radius
     if cfg.pore_geometry == "slit":
         z0 = (L - cfg.pore_H) / 2.0
-        return ("slit", z0 + 0.5, z0 + cfg.pore_H - 0.5)          # zmin, zmax for centres
-    return ("cylinder", L / 2.0, cfg.pore_R - 0.5)                 # axis centre, rmax for centres
+        return ("slit", z0 + cl, z0 + cfg.pore_H - cl)           # zmin, zmax for centres
+    return ("cylinder", L / 2.0, cfg.pore_R - cl)                 # axis centre, rmax for centres
 
 
 def _inside_pore(coords, cfg):
     """Boolean mask: which centres satisfy the hard wall. coords is (M, dim) or
-    a single (dim,) point. Hard spheres (radius 0.5) must keep their centres off
-    the wall by 0.5."""
+    a single (dim,) point. A sphere of radius cfg.radius must keep its centre off
+    the wall by that radius (the configurable clearance, not a hardcoded 0.5)."""
     if cfg.pore_geometry is None:
         return None
     a = np.atleast_2d(np.asarray(coords, float))
     kind = cfg.pore_geometry
+    cl = cfg.radius
     if kind == "slit":
         L = cfg.box; z0 = (L - cfg.pore_H) / 2.0
         z = a[:, 2]
-        ok = (z >= z0 + 0.5) & (z <= z0 + cfg.pore_H - 0.5)
+        ok = (z >= z0 + cl) & (z <= z0 + cfg.pore_H - cl)
     else:
         L = cfg.box; cx = cy = L / 2.0
         r = np.hypot(a[:, 0] - cx, a[:, 1] - cy)
-        ok = r <= (cfg.pore_R - 0.5)
+        ok = r <= (cfg.pore_R - cl)
     return ok if np.ndim(coords) > 1 else bool(ok[0])
 
 
@@ -166,18 +173,27 @@ def _advance_metropolis(state, cfg, potential):
     hs = cfg.potential_type == "hard_sphere"
 
     def neighbour_dists(point, tree, k):
-        d, _ = tree.query([point], k=k, distance_upper_bound=uc)
+        # saturating query: double k until the neighbour list is not truncated,
+        # so an LJ energy summed over it never silently drops an in-range pair.
+        d, _ = geometry.query_saturating(tree, [point], k, uc)
         d = d[0]
         return d[np.isfinite(d)]
 
     step = 0
     while step < cfg.sampling_window:
         N = len(pos)
-        choice = "add" if N == 0 else rng.choice(["move", "add", "remove"], p=[0.5, 0.25, 0.25])
+        # One fixed move-type distribution regardless of N. The proposal ratio
+        # q(0->1)/q(1->0) is then 1 and never has to enter the acceptance; forcing
+        # "add" at N=0 (the old code) left that ratio out and biased P(N=0) by a
+        # factor of 4. A move or remove proposed at N=0 is simply a null / rejected
+        # attempt, counted so the window advances as it would from any state.
+        choice = rng.choice(["move", "add", "remove"], p=[0.5, 0.25, 0.25])
 
         # ----- translate -----
-        if choice == "move" and N > 0:
+        if choice == "move":
             c["move_step"] += 1
+            if N == 0:
+                continue                      # null proposal: nothing to move
             j = rng.choice(N)
             old = pos[j]
             without = np.delete(pos, j, axis=0)
@@ -192,19 +208,21 @@ def _advance_metropolis(state, cfg, potential):
             tree = cKDTree(without, boxsize=box)
             d_new = neighbour_dists(moved, tree, nn)
             if hs:
-                if not (d_new.size and np.any(d_new < lower)):
+                if not (d_new.size and geometry.overlaps(d_new, lower).any()):
                     pos = np.append(without, [moved], axis=0)
                     c["move_accept"] += 1
             else:
+                # LJ hard core at the floor: a move onto an overlap is rejected
+                # outright (the same floor the biased samplers apply), so every
+                # sampler shares one "LJ plus hard core at lower_cutoff" model.
+                if d_new.size and geometry.overlaps(d_new, lower).any():
+                    continue
                 d_old = neighbour_dists(old, tree, nn)
                 u_new = _lj_energy(d_new, uc)
                 u_old = _lj_energy(d_old, uc)
                 if np.log(rng.uniform(0, 1)) <= -beta * (u_new - u_old):
                     pos = np.append(without, [moved], axis=0)
                     c["move_accept"] += 1
-            continue
-
-        if choice == "remove" and N == 0:
             continue
 
         # ----- insertion -----
@@ -220,9 +238,9 @@ def _advance_metropolis(state, cfg, potential):
                 d = neighbour_dists(trial, tree, nn)
             else:
                 d = np.empty(0)
+            if d.size and geometry.overlaps(d, lower).any():
+                continue                      # hard core at the floor (both models)
             if hs:
-                if d.size and np.any(d < lower):
-                    continue
                 log_bf = 0.0
             else:
                 u = _lj_energy(d, uc) + cfg.lj_tail_pref * (2.0 * N + 1.0)
@@ -236,6 +254,8 @@ def _advance_metropolis(state, cfg, potential):
         else:
             c["remove_step"] += 1
             step += 1
+            if N == 0:
+                continue                      # rejected attempt: nothing to remove
             j = rng.choice(N)
             chosen = pos[j]
             without = np.delete(pos, j, axis=0)
@@ -254,7 +274,10 @@ def _advance_metropolis(state, cfg, potential):
     state.positions = pos
     state.step += cfg.sampling_window
     packing = (len(pos) * cfg.volume_of_molecule) / cfg.total_volume
-    return {"N": len(pos), "packing_fraction": packing, "counters": c}
+    # metropolis has no cavity, so n_cav is not defined; report 0 for a uniform
+    # stats schema.
+    return {"N": len(pos), "packing_fraction": packing, "counters": c,
+            "n_cav": 0.0}
 
 
 def _lj_energy(dists, rc):
@@ -262,8 +285,7 @@ def _lj_energy(dists, rc):
     d = d[(d < rc) & (d > 0)]
     if d.size == 0:
         return 0.0
-    ir6 = (1.0 / d) ** 6
-    return float(np.sum(4.0 * ir6 * (ir6 - 1.0)))
+    return float(np.sum(lj_pair_energy(d)))
 
 
 def _ljbranch_forward(pool, k, lower, box, rc, beta, rng):
@@ -361,6 +383,9 @@ def advance(state, cfg, potential, weigher):
     aux = cfg.potential_type == "aux"
     branch = cfg.branch
     channel = getattr(cfg, "channel", False)   # branch variant: cuboid + sweep
+    channel_full = getattr(cfg, "channel_full_span", False)  # wall-to-wall rod
+    n_trials_base = n_trials                    # full-span resets n_trials/move
+    full_repacking = getattr(cfg, "full_repacking", False)  # whole-cavity repack
     reweight = cfg.potential_type == "reweight"
     if branch and reweight:
         raise NotImplementedError("branch and reweight are alternative biasing "
@@ -369,75 +394,110 @@ def advance(state, cfg, potential, weigher):
     def rand():
         return rng.random()
 
+    # running total of cavity occupancy (spheres found in the trial cuboid/cavity
+    # at each exchange), reported as a per-window mean so a run can check the
+    # local density n_cav/v_cav against the global N/V.
+    _ncav_sum = 0.0
+    _ncav_count = 0
+
     step = 0
     while step < cfg.sampling_window:
         N = len(pos)
         if nvt:
-            # NVT: only translations and number-conserving repacking moves;
-            # no insertions or deletions, so N stays at the target exactly.
-            choice = "repack" if N > 0 else "move"
+            # NVT: only number-conserving repacking moves; no insertions or
+            # deletions, so N stays at the target exactly. An empty system has
+            # nothing to repack, so the window completes as a no-op rather than
+            # spinning forever on null proposals.
+            if N == 0:
+                break
+            choice = "repack"
         else:
-            choice = "add" if N == 0 else rng.choice(["move", "add", "remove"], p=[0.5, 0.25, 0.25])
+            # One fixed move-type distribution regardless of N. Forcing "add" at
+            # N=0 (the old code) dropped the proposal ratio q(0->1)/q(1->0)=4 out
+            # of the acceptance and biased P(N=0) by that factor. A move or remove
+            # proposed at N=0 is a null / rejected attempt, counted so the window
+            # advances as from any state.
+            choice = rng.choice(["move", "add", "remove"], p=[0.5, 0.25, 0.25])
 
         # ---------------------------------------------------------- translate
-        if choice == "move" and N > 0:
+        if choice == "move":
             c["move_step"] += 1
+            if N == 0:
+                continue                      # null proposal: nothing to move
             j = rng.choice(N)
             old = pos[j]
             without = np.delete(pos, j, axis=0)
-            ranf1, ranf2 = rng.uniform(0, 1, 2)
-            mx = (old[0] + mf * (ranf1 - 0.5)) % side
-            my = (old[1] + mf * (ranf2 - 0.5)) % side
             if two_d:
+                ranf1, ranf2 = rng.uniform(0, 1, 2)
+                mx = (old[0] + mf * (ranf1 - 0.5)) % side
+                my = (old[1] + mf * (ranf2 - 0.5)) % side
                 moved = np.array([mx, my])
             else:
-                ranf3 = (ranf1 + ranf2) % 1
+                # three independent displacement components. The old code set the
+                # z draw to (ranf1 + ranf2) % 1, pinning every displacement to a
+                # fixed 2D surface and starving z mixing; drawing a third uniform
+                # frees it. This consumes one extra RNG value per 3D translation,
+                # so old checkpoints resume as a valid but different chain.
+                ranf1, ranf2, ranf3 = rng.uniform(0, 1, 3)
+                mx = (old[0] + mf * (ranf1 - 0.5)) % side
+                my = (old[1] + mf * (ranf2 - 0.5)) % side
                 mz = (old[2] + mf * (ranf3 - 0.5)) % side
                 moved = np.array([mx, my, mz])
             if cfg.pore_geometry is not None and not _inside_pore(moved, cfg):
                 continue                      # move into the wall: rejected
+            if len(without) == 0 and not has_matrix:
+                # lone sphere in an empty box: no neighbours, no energy change,
+                # so the standard Metropolis move is always accepted.
+                pos = moved.reshape(1, -1)
+                c["move_accept"] += 1
+                continue
             # translation overlap test must also see the frozen matrix, so a
             # fluid particle cannot move onto an obstacle. Matrix appended after
             # `without`; it is never selected as the moved particle.
             tree = cKDTree(np.append(without, matrix, axis=0) if has_matrix else without,
                            boxsize=box)
             if lj:
-                d_new, _ = tree.query([moved], k=nn, distance_upper_bound=uc)
+                d_new, _ = geometry.query_saturating(tree, [moved], nn, uc)
                 d_new = d_new[0][np.isfinite(d_new[0])]
-                if d_new.size and np.any(d_new < lower):
+                if d_new.size and geometry.overlaps(d_new, lower).any():
                     pass
                 else:
-                    d_old, _ = tree.query([old], k=nn, distance_upper_bound=uc)
+                    d_old, _ = geometry.query_saturating(tree, [old], nn, uc)
                     d_old = d_old[0][np.isfinite(d_old[0])]
 
                     def _u(d):
                         if d.size == 0:
                             return 0.0
-                        ir6 = (1.0 / d) ** 6
-                        return np.sum(4.0 * ir6 * (ir6 - 1.0))
+                        return float(np.sum(lj_pair_energy(d)))
                     dU = _u(d_new) - _u(d_old)
                     if np.log(rng.uniform(0, 1)) <= -dU / temp:
                         pos = np.append(without, [moved], axis=0)
                         c["move_accept"] += 1
             else:
-                if len(tree.query_ball_point([moved], lower)[0]) == 0:
+                if len(tree.query_ball_point([moved], geometry.overlap_radius(lower))[0]) == 0:
                     pos = np.append(without, [moved], axis=0)
                     c["move_accept"] += 1
             continue
 
         # ---------------------------------------------------------- add/remove
-        if choice == "remove" and N == 0:
-            continue
-
         if choice == "repack":
             c["repack_step"] += 1
             n_add = n_remove = depth + 1     # remove k, insert k; N conserved
         elif choice == "add":
             c["add_step"] += 1
             n_add, n_remove = depth + 1, depth
-        else:
+        elif choice == "remove":
             c["remove_step"] += 1
+            if N == 0:
+                # rejected attempt: nothing to remove, but the exchange step still
+                # counts toward the window, matching the metropolis path.
+                step += 1
+                continue
             n_add, n_remove = depth, depth + 1
+        else:
+            # "move" is fully handled above and every other value is a bug; fail
+            # loudly rather than silently falling through into the remove branch.
+            raise RuntimeError(f"unhandled move choice {choice!r}")
 
         step += 1
 
@@ -452,7 +512,7 @@ def advance(state, cfg, potential, weigher):
         # depth 2: 292.5 vs CS 292.9; invariant under cavity radius). Its
         # acceptance algebra is built for exactly this proposal, so no mirror
         # and no generation-probability corrections apply here.
-        if depth == 0:
+        if depth == 0 and not full_repacking:
             if choice == "add":
                 center = rng.uniform(0, side, size=3)[:dim]
                 anchor = -1
@@ -469,6 +529,8 @@ def advance(state, cfg, potential, weigher):
             else:
                 idx_cav = np.empty(0, dtype=int)
                 n_cav = 0
+            _ncav_sum += n_cav
+            _ncav_count += 1
         else:
             if choice == "add":
                 center = rng.uniform(0, side, size=3)[:dim]
@@ -478,7 +540,24 @@ def advance(state, cfg, potential, weigher):
             # channel: draw the orientation now so removal membership and the
             # trial cloud share the same oriented body (required for reversibility).
             chan_R = random_rotation_matrix(rng) if channel else None
-            if channel:
+            chan_chord = None         # full-span: (axis, e1, e2, s_min, s_max)
+            if channel and channel_full:
+                # wall-to-wall rod along a freely chosen orientation. The length
+                # is set by where the line meets the box (box for an axis line,
+                # up to box*sqrt(3) for the body diagonal). Membership and the
+                # trial count both follow from that chord, so the two directions
+                # act on one body and the linear trial density stays fixed.
+                axis, e1, e2 = chan_R[:, 0], chan_R[:, 1], chan_R[:, 2]
+                s_min, s_max = ray_box_chord(center, axis, box)
+                chan_chord = (axis, e1, e2, s_min, s_max)
+                chord_len = s_max - s_min
+                w = cfg.channel_width
+                n_trials = max(2, int(round(cfg.trial_density
+                                            * chord_len * w * w)))
+                idx_cav, _ = rod_members_full(
+                    pos, center, axis, e1, e2, s_min, s_max, 0.5 * w, box)
+            elif channel:
+                n_trials = n_trials_base
                 idx_cav = cuboid_members(pos, center, chan_R,
                                          0.5 * cfg.channel_length,
                                          0.5 * cfg.channel_width, side)
@@ -486,7 +565,29 @@ def advance(state, cfg, potential, weigher):
                 idx_cav = geometry.indices_in_cavity(pos, center,
                                                      cfg.cavity_radius, side, two_d)
             n_cav = len(idx_cav)
-            if n_cav == 0:
+            _ncav_sum += n_cav
+            _ncav_count += 1
+            if full_repacking:
+                # whole-cavity repack: throw away depth and act on everything the
+                # cavity holds. add removes all n_cav and inserts one more, remove
+                # inserts one fewer, repack keeps the count. An empty cavity has
+                # nothing to repack, so add falls to a plain insertion and the
+                # rest are rejected. The insertion count can never exceed the
+                # trial pool.
+                if n_cav == 0:
+                    if choice == "add":
+                        n_add, n_remove = 1, 0
+                    else:
+                        continue
+                elif choice == "repack":
+                    n_add = n_remove = n_cav
+                elif choice == "add":
+                    n_add, n_remove = n_cav + 1, n_cav
+                else:
+                    n_add, n_remove = n_cav - 1, n_cav
+                if n_add > n_trials:
+                    continue     # more insertions than the trial cloud can supply
+            elif n_cav == 0:
                 # empty cavity. An ADD needs nothing to remove, so it kicks down
                 # to a pure depth-0 insertion (n_add=1, n_remove=0) rather than
                 # being abandoned -- abandoning it is what drained the fluid at
@@ -511,7 +612,7 @@ def advance(state, cfg, potential, weigher):
             disk_in = np.empty((0, dim))
             disk_rest = pos
         else:
-            if depth == 0:
+            if depth == 0 and not full_repacking:
                 # the anchor is always removed; any further removals come
                 # uniformly from the remaining cavity occupants
                 others = idx_cav[idx_cav != anchor]
@@ -529,16 +630,22 @@ def advance(state, cfg, potential, weigher):
             keep[chosen_idx] = False
             disk_rest = pos[keep]
 
-        if len(disk_rest) == 0 and not has_matrix:
-            # bulk run with nothing to weigh trials against (N==0, no matrix):
-            # the depth-0 path handles a first insertion, so skip here rather
-            # than divide by an empty reference.
-            continue
         if len(disk_rest) == 0 and has_matrix and n_add == 0:
             # pure deletion with no fluid left: nothing to remove.
             continue
         # trial molecules in the cavity
-        if channel:
+        if channel and channel_full:
+            # trials uniform along the wall-to-wall chord: axial s in [s_min,
+            # s_max], square cross-section w x w. Same chord as the membership
+            # test, so insertion and removal act on one body.
+            axis, e1, e2, s_min, s_max = chan_chord
+            b_loc = 0.5 * cfg.channel_width
+            s_t = rng.uniform(s_min, s_max, n_trials)
+            u_t = rng.uniform(-b_loc, b_loc, n_trials)
+            v_t = rng.uniform(-b_loc, b_loc, n_trials)
+            trials = np.mod(center + s_t[:, None] * axis
+                            + u_t[:, None] * e1 + v_t[:, None] * e2, side)
+        elif channel:
             # oriented thin cuboid around the same centre, using the SAME R drawn
             # for the removal-membership test, so insertion and removal act on one
             # body. R is kept so the sweep can recover local coordinates.
@@ -563,11 +670,15 @@ def advance(state, cfg, potential, weigher):
             keep_mask[rng.choice(n_trials, size=n_remove, replace=False)] = False
 
         # exclusion tree: fluid-rest PLUS frozen matrix. Trials/shadows that
-        # overlap either are rejected. The matrix is appended after disk_rest so
-        # the first len(disk_rest) tree indices are still the mobile fluid, which
-        # is all the downstream weight/selection logic ever indexes into.
-        excl = np.append(disk_rest, matrix, axis=0) if has_matrix else disk_rest
-        tree = cKDTree(excl, boxsize=box)
+        # overlap either are rejected. On an empty box there is nothing to build
+        # a tree from, so tree is None and find_neighbors returns all trials
+        # admissible (member weight 1); the first insertion / last removal then
+        # go through the ordinary weight and acceptance path.
+        if len(disk_rest) == 0 and not has_matrix:
+            tree = None
+        else:
+            excl = np.append(disk_rest, matrix, axis=0) if has_matrix else disk_rest
+            tree = cKDTree(excl, boxsize=box)
         pore_valid = _inside_pore(trials, cfg) if cfg.pore_geometry is not None else None
         raw = geometry.find_neighbors(tree, trials, lower, uc, nn,
                                       keep_mask=keep_mask, valid=pore_valid)
@@ -605,7 +716,23 @@ def advance(state, cfg, potential, weigher):
         # channel mode: one sweep over the pool serves both the forward count
         # (Z_{n_add}) and the reverse count (Z_{n_remove}); kmax covers both.
         chan_sweep = None
-        if channel and len(pool):
+        if channel and channel_full and len(pool):
+            # every pool atom (surviving trial or removed member) lies on the
+            # rod, so its axial coordinate is recovered from the same chord. The
+            # sweep uses minimum-image box distances and retention eviction, so
+            # the wall-to-wall wrap (the seam) is scored exactly.
+            axis, e1, e2, s_min, s_max = chan_chord
+            ax_pool = axial_coord_full(pool.coords, center, axis,
+                                       s_min, s_max, box)
+            kmx = max(n_add, n_remove)
+            if ljbranch:
+                chan_sweep = ChannelSweepLJFull(pool.coords, ax_pool,
+                                                pool.energy_weight, box,
+                                                lower, uc, beta, kmx)
+            else:
+                chan_sweep = ChannelSweepFull(pool.coords, ax_pool, box,
+                                              lower, kmx)
+        elif channel and len(pool):
             U_pool = local_from_box(pool.coords, center, chan_R, side)
             kmx = max(n_add, n_remove)
             if ljbranch:
@@ -743,9 +870,12 @@ def advance(state, cfg, potential, weigher):
                            + beta * (u_ins - u_rem))
             else:
                 delta_E = delta_E_lj if delta_E_lj is not None else (0.0 if lj else (e_u_r_new - e_u_r_current))
-            log_alpha = mu_excess + delta_E - corr
-            log_alpha = max(0.0, log_alpha)
-            if log_alpha <= -np.log(rng.uniform(0, 1)):
+            # neg_log_acc is minus the log acceptance ratio, clamped at 0 so the
+            # acceptance probability exp(-neg_log_acc) never exceeds 1. The move is
+            # accepted when neg_log_acc <= -log(u), u ~ U(0,1).
+            neg_log_acc = mu_excess + delta_E - corr
+            neg_log_acc = max(0.0, neg_log_acc)
+            if neg_log_acc <= -np.log(rng.uniform(0, 1)):
                 pos = np.append(disk_rest, chosen_coords, axis=0) if len(chosen_coords) else disk_rest
                 c["repack_accept"] += 1
         elif choice == "add":
@@ -763,9 +893,9 @@ def advance(state, cfg, potential, weigher):
                            + beta * (u_ins - u_rem))
             else:
                 delta_E = delta_E_lj if delta_E_lj is not None else (0.0 if lj else (e_u_r_new - e_u_r_current))
-            log_alpha = mu_ideal - beta * mu + mu_excess + delta_E - corr
-            log_alpha = max(0.0, log_alpha)
-            if log_alpha <= -np.log(rng.uniform(0, 1)):
+            neg_log_acc = mu_ideal - beta * mu + mu_excess + delta_E - corr
+            neg_log_acc = max(0.0, neg_log_acc)
+            if neg_log_acc <= -np.log(rng.uniform(0, 1)):
                 pos = np.append(disk_rest, chosen_coords, axis=0)
                 c["add_accept"] += 1
         else:
@@ -782,9 +912,9 @@ def advance(state, cfg, potential, weigher):
                            + beta * (u_ins - u_rem))
             else:
                 delta_E = delta_E_lj if delta_E_lj is not None else (0.0 if lj else (e_u_r_new - e_u_r_current))
-            log_alpha = mu_ideal + beta * mu + mu_excess + delta_E - corr
-            log_alpha = max(0.0, log_alpha)
-            if log_alpha <= -np.log(rng.uniform(0, 1)):
+            neg_log_acc = mu_ideal + beta * mu + mu_excess + delta_E - corr
+            neg_log_acc = max(0.0, neg_log_acc)
+            if neg_log_acc <= -np.log(rng.uniform(0, 1)):
                 if len(chosen_coords) == 0:
                     pos = disk_rest
                 else:
@@ -794,4 +924,6 @@ def advance(state, cfg, potential, weigher):
     state.positions = pos
     state.step += cfg.sampling_window
     packing = (len(pos) * cfg.volume_of_molecule) / total_vol
-    return {"N": len(pos), "packing_fraction": packing, "counters": c}
+    n_cav_mean = (_ncav_sum / _ncav_count) if _ncav_count else 0.0
+    return {"N": len(pos), "packing_fraction": packing, "counters": c,
+            "n_cav": n_cav_mean}

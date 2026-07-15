@@ -22,20 +22,42 @@ import numpy as np
 from . import sim_setup, hash_fingerprint, io, MC_engine
 from .state import ChainState, zero_counters
 
-LOG_HEADER = ("#MC_cycle(M)  pckng_frctn  N  add_acc add_att add_stp "
-              "rm_acc rm_stp mv_acc mv_stp  wall_s  mu  avgN  density")
+# One fixed width per column, shared by the header and every data row, so the
+# labels sit directly above their values and the log reads as a clean table.
+_LOG_COLS = [
+    ("MC_cycle(M)", 13), ("pckng_frctn", 13), ("N", 7),
+    ("add_acc", 9), ("add_att", 9), ("add_stp", 9),
+    ("rm_acc", 9), ("rm_stp", 9), ("mv_acc", 9), ("mv_stp", 9),
+    ("wall_s", 11), ("mu", 12), ("avgN", 11), ("avg_n_cav", 12),
+    ("density", 14),
+]
+_LOG_WIDTHS = [w for _, w in _LOG_COLS]
+
+
+def _log_header():
+    h = "".join(name.rjust(w) for name, w in _LOG_COLS)
+    return "#" + h[1:]          # mark as a comment without shifting the columns
+
+
+def _log_row(cells):
+    return "".join(str(c).rjust(w) for c, w in zip(cells, _LOG_WIDTHS))
+
+
+LOG_HEADER = _log_header()
 
 
 
 def _inside_pore_seed(pt, cfg):
-    """Is a single point inside the hard pore (centre clearance 0.5)?"""
+    """Is a single point inside the hard pore? The centre clearance is the
+    configurable sphere radius cfg.radius, not a hardcoded 0.5."""
     L = cfg.box
+    cl = cfg.radius
     if cfg.pore_geometry == "slit":
         z0 = (L - cfg.pore_H) / 2.0
-        return z0 + 0.5 <= pt[2] <= z0 + cfg.pore_H - 0.5
+        return z0 + cl <= pt[2] <= z0 + cfg.pore_H - cl
     cx = cy = L / 2.0
     import math as _m
-    return _m.hypot(pt[0] - cx, pt[1] - cy) <= cfg.pore_R - 0.5
+    return _m.hypot(pt[0] - cx, pt[1] - cy) <= cfg.pore_R - cl
 
 
 def _save_pore_geometry(cfg, directory):
@@ -79,12 +101,14 @@ def _init_config(cfg, rng):
     #
     # initial_config is either a directory or a file, decided by whether it has
     # a file extension (not by os.path.isdir, which silently mis-resolves when a
-    # job's working directory differs from where it was launched). A directory
-    # selects the file per run by chemical potential, system and box:
-    #     <dir>/<subfolder>/mu_<mu.2f>_<family>_<dim>d_box<L>.xyz
-    # e.g. equilibrated/hard_disk_3d/mu_3.25_hard_3d_box20.xyz
-    # so every mu in a sweep loads its own start. Use an absolute path to be
-    # safe across SLURM / subprocess working directories.
+    # job's working directory differs from where it was launched). A directory is
+    # the equilibrated library, nested by system, temperature (LJ only) and box:
+    #     equilibrated/lj/T_0.85/box_20/mu_0.0_lj_3d_box20.xyz
+    #     equilibrated/hard_disk_2d/box_200/mu_1.00_hard_2d_box_200.xyz
+    #     equilibrated/NVT/box_20/...           matrix/ is loaded via matrix_config
+    # The per-run file is picked by matching chemical potential, box, dimension
+    # and (for LJ) temperature, so every mu in a sweep loads its own start. Use an
+    # absolute path to be safe across SLURM / subprocess working directories.
     spec = cfg.initial_config
     if not spec:
         if getattr(cfg, "pore_geometry", None) is not None:
@@ -149,35 +173,88 @@ def _init_config(cfg, rng):
                 if len(pts) >= n:
                     return pts[:n]
                 per += 1
-        if cfg.depth > 0:
-            # depth >= 1 insertions need an occupied cavity and a removal at
-            # N=1 can downgrade to a pure deletion, so N=0 is absorbing: a
-            # near-empty start can die and never grow. Seed a hard-core-valid
-            # grid at moderate density instead (the original relied on dense
-            # restart files for the same reason).
-            g = np.arange(0.65, cfg.box, (4.0 / 3.0) * cfg.diameter)
-            g = g[g < cfg.box - 0.5 * cfg.diameter]
-            pts = np.array(list(itertools.product(g, repeat=cfg.dimension)))
-            return pts
-        return rng.uniform(0, cfg.box, size=(1, cfg.dimension))
+        # Bulk muVT with no initial_config: start EMPTY. Insertion centres on a
+        # uniform random point and needs nothing present, so N=0 -> 1 grows on
+        # its own; removal and displacement only ever act on existing particles.
+        # No lattice: this method places trials at uniform random points, so a
+        # gridded start would be foreign to it. Provide initial_config only to
+        # start from a pre-equilibrated structure (e.g. the metastable liquid).
+        return np.empty((0, cfg.dimension))
 
     if os.path.splitext(spec)[1]:                      # has an extension -> file
-        path = spec
-    else:                                              # directory -> build path
-        lj = cfg.potential_type == "lj"
-        family = "lj" if lj else "hard"
-        subfolder = "lj" if lj else f"hard_disk_{cfg.dimension}d"
-        b = int(cfg.box) if float(cfg.box).is_integer() else cfg.box
-        fname = f"mu_{cfg.chem_pot:.2f}_{family}_{cfg.dimension}d_box{b}.xyz"
-        path = os.path.join(spec, subfolder, fname)
+        path = os.path.abspath(spec)
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"initial_config file not found: {path}\n"
+                f"  (resolved from cwd={os.getcwd()}). Use an absolute path if the "
+                f"run is launched from a different directory than the config.")
+        pos = io.load_config_file(path, cfg.dimension)
+        print(f"loaded initial config: {len(pos)} molecules from {path}")
+        return pos
 
-    path = os.path.abspath(path)
-    if not os.path.exists(path):
+    # A directory points at the equilibrated library, which is nested by system,
+    # (temperature for LJ) and box, with per-mu files whose decimal formatting
+    # differs between families, e.g.
+    #     equilibrated/lj/T_0.85/box_20/mu_0.0_lj_3d_box20.xyz
+    #     equilibrated/hard_disk_2d/box_200/mu_1.00_hard_2d_box_200.xyz
+    #     equilibrated/NVT/box_20/mu_..._box_20.xyz
+    # Rather than reconstruct an exact filename (the formats are inconsistent),
+    # search the tree and match on the values parsed from each candidate: chemical
+    # potential and box always, dimension and (for LJ) temperature when present.
+    import glob as _glob
+    import re as _re
+    root = os.path.abspath(spec)
+    if not os.path.isdir(root):
         raise FileNotFoundError(
-            f"initial_config not found: {path}\n"
-            f"  (resolved from cwd={os.getcwd()}). If runs are launched from a "
-            f"different directory than the config tree, set run."
-            f"initial_config to an absolute path.")
+            f"initial_config directory not found: {root} (resolved from "
+            f"cwd={os.getcwd()}). Point it at the equilibrated library folder or "
+            f"at a single .xyz file.")
+    is_lj = cfg.potential_type in ("lj", "ljbranch", "ljaux")
+    all_xyz = _glob.glob(os.path.join(root, "**", "*.xyz"), recursive=True)
+    if not all_xyz:
+        raise FileNotFoundError(
+            f"no .xyz configurations found anywhere under initial_config directory "
+            f"{root}. Expected files like mu_<mu>_<family>_<dim>d_box<L>.xyz.")
+
+    def _num(pattern, text):
+        m = _re.search(pattern, text)
+        return float(m.group(1)) if m else None
+
+    matches = []
+    for f in all_xyz:
+        name = os.path.basename(f)
+        f_mu = _num(r"mu_(-?\d+(?:\.\d+)?)", name)
+        f_box = _num(r"box_?(\d+(?:\.\d+)?)", f)       # from the path (box_<L> dir)
+        f_dim = _num(r"(\d)d", name)
+        f_T = _num(r"[/\\]T_(\d+(?:\.\d+)?)[/\\]", f)
+        if f_mu is None or abs(f_mu - cfg.chem_pot) > 1e-6:
+            continue
+        if f_box is not None and abs(f_box - float(cfg.box)) > 1e-6:
+            continue
+        if f_dim is not None and int(f_dim) != cfg.dimension:
+            continue
+        if is_lj and f_T is not None and abs(f_T - float(cfg.temp)) > 1e-6:
+            continue
+        matches.append(f)
+
+    if len(matches) == 0:
+        sample = sorted(os.path.relpath(f, root) for f in all_xyz)[:12]
+        raise FileNotFoundError(
+            f"no equilibrated config under {root} matches this run "
+            f"(mu={cfg.chem_pot}, box={cfg.box}, dimension={cfg.dimension}"
+            + (f", T={cfg.temp}" if is_lj else "") + "). "
+            f"{len(all_xyz)} .xyz files are present, for example: {sample}. "
+            f"Check that a matching mu/box (and T for LJ) exists, or point "
+            f"initial_config at the exact file.")
+    if len(matches) > 1:
+        rels = sorted(os.path.relpath(m, root) for m in matches)[:8]
+        raise ValueError(
+            f"initial_config is ambiguous: {len(matches)} files under {root} match "
+            f"mu={cfg.chem_pot}, box={cfg.box}"
+            + (f", T={cfg.temp}" if is_lj else "") + f": {rels}. Point "
+            f"initial_config at a more specific subdirectory or at the exact file.")
+
+    path = matches[0]
     pos = io.load_config_file(path, cfg.dimension)
     print(f"loaded initial config: {len(pos)} molecules from {path}")
     return pos
@@ -327,6 +404,12 @@ def run(params, root="runs"):
                 state.n_history = state.n_history[-cfg.control_window:]
             avg_n = sum(state.n_history) / len(state.n_history)
 
+            # running mean of cavity occupancy over the same window (diagnostic)
+            state.ncav_history.append(stats.get("n_cav", 0.0))
+            if len(state.ncav_history) > cfg.control_window:
+                state.ncav_history = state.ncav_history[-cfg.control_window:]
+            avg_ncav = sum(state.ncav_history) / len(state.ncav_history)
+
             if targeting:
                 # Robbins-Monro update on log-N: mu += gamma * (lnN_target - lnN).
                 # Gain decays as gamma0/(1+win/tau) so mu converges and settles.
@@ -338,11 +421,13 @@ def run(params, root="runs"):
 
             if state.step >= cfg.burn_in:
                 cc = stats["counters"]
-                log.write(f"{state.step/1e6:.6f}  {stats['packing_fraction']:.8f}  "
-                          f"{stats['N']}  {cc['add_accept']} {cc['add_attempt']} "
-                          f"{cc['add_step']} {cc['remove_accept']} {cc['remove_step']} "
-                          f"{cc['move_accept']} {cc['move_step']}  {win_wall:.4f}  "
-                          f"{cur_mu:.6f}  {avg_n:.4f}  {avg_n / V:.8f}")
+                log.write(_log_row([
+                    f"{state.step/1e6:.6f}", f"{stats['packing_fraction']:.8f}",
+                    stats['N'], cc['add_accept'], cc['add_attempt'],
+                    cc['add_step'], cc['remove_accept'], cc['remove_step'],
+                    cc['move_accept'], cc['move_step'], f"{win_wall:.4f}",
+                    f"{cur_mu:.6f}", f"{avg_n:.4f}", f"{avg_ncav:.4f}",
+                    f"{avg_n / V:.8f}"]))
 
             win += 1
             if win % cfg.checkpoint_every == 0:
