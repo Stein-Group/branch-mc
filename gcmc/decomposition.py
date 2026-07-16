@@ -1,9 +1,19 @@
-"""Domain decomposition for the parallel 2D path.
+"""Domain decomposition for the parallel path.
 
 Ported verbatim from the original parallelization.grid_up_the_system and the
-PARALLEL-mode geometry helpers, so the parallel decomposition is byte-identical
-to the verified original. The decomposition is 2D only; 3D parallel is guarded
-elsewhere.
+PARALLEL-mode geometry helpers, so the 2D decomposition is byte-identical to
+the verified original.
+
+Two structures answering different questions, both staying: `grid_up_nd` says
+which cell OWNS a molecule (domain decomposition, 2D and 3D, and the only
+symbol the parallel engine calls); `neighbors.CellList` answers neighbour
+search inside a cell. The verbatim 2D helpers below `grid_up_the_system` are
+kept as the reference the characterisation tier pins against orig/; the engine
+does not call them (see cell_unify_plan.md U2).
+
+3D parallel is no longer guarded: it is supported deliberately for metropolis,
+rosenbluth and branch (cell_unify_plan.md U0, GO 2026-07-14). What is still
+rejected up front, in sim_setup, is reweight, QA, channel and confined.
 
 `cell_length_global` is the per-cell side the grid uses; the parallel engine
 sets it via configure() before applying the cell PBC, matching the original

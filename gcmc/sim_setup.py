@@ -8,34 +8,77 @@ a specific message.
 
 Schema
 ------
+potential, sampler and ensemble are required; auxiliary and run are optional
+blocks (omitting `run` entirely takes every default). The machine-readable twin
+of this block is examples/schema.json, which validation uses.
+
 {
   "potential":  {"main": "hard_core" | "lennard_jones",
-                 "T": float},                       # T required iff main = lennard_jones
+                 "T": float,                        # required iff main = lennard_jones, else forbidden
+                 "tail": bool},                     # default True; LJ only; auto-off under a pore/QA matrix
 
   "auxiliary":  {"type": "pmf",                      # OPTIONAL block; omit = no aux
                  "g3_csv": str,                      # required iff present and 3D
-                 "eta": float, "gamma_max": float, "delta_eta": float},
+                 "eta": float,                       # default 0.69 (2D)
+                 "gamma_max": float, "delta_eta": float},
 
   "sampler":    {"type": "metropolis" | "rosenbluth" | "branch" | "channel" | "reweight",
-                 "depth": int, "use_depth": bool,    # forbidden for metropolis; channel needs depth >= 1
-                 "trials": int | "trial_density": float,   # forbidden for metropolis
-                 "trial_box_side": float,                  # rosenbluth/branch only (cube trial box); rejected for channel
+                 "depth": int,                             # default 0; forbidden for metropolis;
+                                                           #   channel needs depth >= 1; XOR full_repacking
+                 "full_repacking": bool,                   # default False; repacks the whole cavity instead
+                                                           #   of a fixed depth. Not metropolis. XOR depth.
+                 "trials": int | "trial_density": float,   # trials default 30; forbidden for metropolis; XOR
+                 "trial_box_side": float,                  # default 3.0; rosenbluth/branch only (cube trial
+                                                           #   box); rejected for channel and metropolis
                  "channel_length": float, "channel_width": float},  # channel only: oriented cuboid extents
 
-  "ensemble":   {"mu": float | "sweep": [float],     # exactly one; sweep is launcher-only
-                 "dimension": 2 | 3, "box": float,
+  "ensemble":   {"dimension": 2 | 3,                 # required
                  "type": "muVT" | "NVT" | "QA" | "confined",   # default muVT
-                 "N": int | "packing_fraction": float,         # NVT target
-                 "pore": {"geometry": "slit" | "cylinder", ...}},  # confined only
+                 "mu": float,                        # muVT: exactly one of mu or ONE target_* key
+                 "target_eta" | "target_density" | "target_N",  # controller drives mu to it; not with sweep
+                 "N": int | "packing_fraction": float,         # NVT only, exactly one; mu/sweep forbidden
+                 "pore": {"geometry": "slit" | "cylinder",     # confined only
+                          "H": float,                          #   slit gap; must exceed 2*run.radius
+                          "R": float,                          #   cylinder radius; 2R must exceed 2*run.radius
+                          "L_z": float},                       #   cylinder axis length, default ensemble.box
+                 "box": float,                       # default by (dimension, run.kind): 2D 75 / 2D par 200
+                                                     #   / 3D 20 / 3D par 50
+                 "sweep": [float]},                  # LEGACY, unusable: the launcher does not expand it (it
+                                                     #   is not a sweep axis), so it reaches here unexpanded
+                                                     #   and raises. Sweep with a LIST on an axis instead.
 
-  "run":        {"kind": "single" | "parallel", "n_workers": int,
-                 "sampling_window": int, "target_cycles": float, "burn_in": int,
-                 "traj_every": int, "checkpoint_every": int, "seed": int,
-                 "initial_config": str, "matrix_config": str,   # matrix_config: QA only
-                 "radius": float, "move_factor": float,
-                 "upper_cutoff": float, "lower_cutoff": float, "no_neigh": int,
-                 "cell_length": float, "buffer": float, "x_spacing": float, "y_spacing": float}
+  "run":        {"kind": "single" | "parallel", "n_workers": int,   # n_workers default 1
+                 "n_cores": int,                     # launcher only: core budget (= --cores N); ignored here
+                 "sampling_window": int,             # default 1000
+                 "target_cycles": float,             # default 1.0025e9 -- set it for real runs
+                 "burn_in": int,                     # default 0
+                 "traj_every": int,                  # default 0 (off)
+                 "checkpoint_every": int,            # default 1
+                 "seed": int, "initial_config": str,
+                 "matrix_config": str,               # QA only (required by it); file or folder-of-realizations
+                 "radius": float,                    # default 0.5; diameter 2*radius is the hard-core floor
+                 "move_factor": float,               # default 0.25
+                 "upper_cutoff": float,              # default 3.7545 (2D hard/aux), 2.0 (3D hard/aux),
+                                                     #   2.5 (LJ), 3*radius (reweight)
+                 "lower_cutoff": float,              # default 0.9 (any LJ mode) | 2*radius (hard core)
+                 "no_neigh": int,                    # default 40 (2D) / 75 (3D)
+                 "cell_length": float, "buffer": float,   # parallel; defaults 30 and 2. buffer must be >= the
+                                                     #   interaction reach and cell_length+buffer must fit box
+                 "control_gain": float, "control_gain_tau": float, "control_window": int,
+                                                     # muVT target controller; defaults 0.5 / 20.0 / 20
+                 "x_spacing": float, "y_spacing": float,  # INERT: they feed only the verbatim 2D
+                                                     #   grid_up_the_system, which the engine no longer calls
+                 "sweep_label": str}                 # written BY the launcher into each expanded run
 }
+
+Sweeps
+------
+Give a LIST to any sweep axis and launch with `python -m gcmc.launcher` (not
+`gcmc run`): it expands the Cartesian product, one run per combination. The axes
+are ensemble.{mu, packing_fraction, N, target_N, target_eta, target_density},
+sampler.{depth, trial_density, trial_box_side, channel_length, channel_width},
+run.seed, and ensemble.pore.{H, R}. A list that reaches from_params unexpanded
+is an error naming the key.
 
 For rosenbluth/branch, trial_box_side is the full side of the square trial box
 (twice the legacy cavity radius) and the trial-count relation uses trial_box_side^2
@@ -82,7 +125,11 @@ Dimension:
   LJ + pmf    3D only
 
 Parallelism (run.kind='parallel'):
-  not available for reweight or QA; channel is serial only.
+  supports metropolis, rosenbluth, and branch in both 2D and 3D. The 3D case
+  is validated physics (cell_unify_plan.md U3), not just an accepted config.
+  Rejected: reweight and QA (decomposition drops the psi6 field / frozen
+  matrix), channel (serial only), and confined (decomposition drops the pore
+  walls).
 """
 
 from __future__ import annotations
@@ -638,6 +685,13 @@ def from_params(p: dict[str, Any]) -> Config:
         raise ValueError("reweight requires a hard_core main potential")
     if parallel and reweight:
         raise ValueError("parallel does not wire the reweight (psi6) mode")
+    if parallel and confined:
+        raise ValueError(
+            "parallel does not wire confined pores: the domain decomposition "
+            "carries only the fluid in each cell and drops the pore walls, so "
+            "the run would fill the forbidden region with no error. Use "
+            "run.kind='single'."
+        )
     if reweight and not two_dim:
         raise ValueError("reweight (psi6) is a 2D method; use dimension 2")
     if pmf and lj and two_dim:

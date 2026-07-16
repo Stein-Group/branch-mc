@@ -1,0 +1,184 @@
+// params.json schema, annotated. Updated 2026-07-15 against the current code.
+//
+// Every key, default and rule below was read off gcmc/sim_setup.py::from_params
+// and confirmed against a live build, not copied forward from the previous copy.
+// The previous copy had drifted: it documented `use_depth` (a key the code now
+// REJECTS -- it became `full_repacking`), gave traj_every's default as 1 (it is
+// 0), omitted the 3D-parallel box default, and had no `tail`, target_*, channel,
+// QA/NVT/confined, or controller keys at all.
+//
+// This is a reading copy. The two copies that live in the repo are the authority
+// and are now pinned to the code by tests/unit/test_schema_matches_code.py:
+//   examples/schema.json          machine-readable; what config validation uses
+//   gcmc/sim_setup.py docstring   the same schema, annotated, next to the code
+// Prefer those; a detached copy like this one is what rotted last time.
+//
+// Unknown keys are a hard error, per block: a typo surfaces immediately instead
+// of silently becoming different physics. Inactive keys are errors too (an LJ
+// temperature on a hard-core run, a pmf block under reweight), so nothing leaks.
+//
+// Top level: potential, sampler, ensemble are REQUIRED. auxiliary and run are
+// OPTIONAL blocks; omitting `run` entirely is legal and takes every default.
+{
+  "potential": {
+    "main": "hard_core" | "lennard_jones",   // REQUIRED
+    "T": float,                              // REQUIRED iff main = lennard_jones; forbidden otherwise
+    "tail": bool                             // OPTIONAL, default true. lennard_jones only.
+                                             //   Auto-disabled (with a message) under a pore or a QA
+                                             //   matrix, where the uniform space-filling assumption
+                                             //   behind the tail integral does not hold. Asking for it
+                                             //   explicitly there raises rather than being dropped.
+  },
+
+  "auxiliary": {                             // OPTIONAL block (omit = no aux). PMF only.
+    "type": "pmf",                           // REQUIRED iff block present
+    "g3_csv": str,                           // REQUIRED iff aux present AND dimension = 3
+    "eta": float,                            // OPTIONAL, default 0.69 (2D)
+    "gamma_max": float,                      // OPTIONAL, default from original schedule
+    "delta_eta": float                       // OPTIONAL, default from original schedule
+  },                                         // Layers onto hard_core (-> aux) or lennard_jones
+                                             //   (-> ljaux, 3D only). reweight takes no auxiliary.
+
+  "sampler": {
+    "type": "metropolis" | "rosenbluth" | "branch" | "channel" | "reweight",  // REQUIRED
+    "depth": int,                            // OPTIONAL, default 0
+                                             //   forbidden: metropolis, and full_repacking (XOR)
+                                             //   channel requires depth >= 1
+    "full_repacking": bool,                  // OPTIONAL, default false. REPLACES the old `use_depth`.
+                                             //   Instead of a fixed depth, an exchange repacks the whole
+                                             //   cavity: remove every sphere found, insert one more (add),
+                                             //   one fewer (remove), or the same count (repack).
+                                             //   forbidden: metropolis. XOR depth.
+    "trials": int,                           // OPTIONAL, default 30      (forbidden: metropolis; XOR trial_density)
+    "trial_density": float,                  // OPTIONAL                  (forbidden: metropolis; XOR trials)
+    "trial_box_side": float,                 // OPTIONAL, default 3.0     (forbidden: metropolis AND channel)
+                                             //   rosenbluth/branch: full side of the cube trial box
+                                             //   (twice the legacy cavity radius); span = trial_box_side^2.
+    "channel_length": float,                 // channel only: oriented cuboid extents. The channel trial
+    "channel_width": float                   //   region is that cuboid, volume length*width^2, and
+                                             //   trial_density is spheres per unit volume, so the trial
+                                             //   count is trial_density * that volume. Hence no trial_box_side.
+  },
+
+  "ensemble": {
+    "dimension": 2 | 3,                      // REQUIRED
+    "type": "muVT" | "NVT" | "QA" | "confined",   // OPTIONAL, default "muVT"
+
+    // -- muVT (default): exactly one of `mu` or ONE target_* key --
+    "mu": float,                             // chemical potential
+    "target_eta": float,                     // OPTIONAL: the controller drives mu toward this instead.
+    "target_density": float,                 //   At most one target_*; mutually exclusive with `sweep`.
+    "target_N": int,                         //   `mu`, if also given, seeds the controller; otherwise
+                                             //   it cold-starts from the ideal-gas guess.
+
+    // -- NVT: exactly one of N | packing_fraction; mu/sweep forbidden --
+    "N": int,
+    "packing_fraction": float,               // converted to the nearest integer N, held exactly after
+
+    // -- confined only --
+    "pore": {
+      "geometry": "slit" | "cylinder",       // REQUIRED in the block
+      "H": float,                            // slit: gap in z, walls at 0 and H. Must exceed 2*run.radius.
+      "R": float,                            // cylinder: radius, axis along z at centre. 2R must exceed 2*run.radius.
+      "L_z": float                           // cylinder, OPTIONAL, default = ensemble.box
+    },
+
+    "box": float,                            // OPTIONAL, default by (dimension, run.kind):
+                                             //   2D single 75 | 2D parallel 200 | 3D single 20 | 3D parallel 50
+                                             //   (the 3D-parallel default now matters: see the matrix below)
+
+    "sweep": [float, ...]                    // LEGACY, DO NOT USE -- accepted by the key check, then
+                                             //   unusable. The launcher does not expand `sweep` (it is not
+                                             //   a sweep axis), so it reaches from_params unexpanded and
+                                             //   raises "launch it with gcmc.launcher" -- which you did.
+                                             //   Sweep by giving a LIST to a sweep axis instead (below).
+                                             //   This is open finding 1 (the check_cli xfail).
+  },
+
+  "run": {                                   // OPTIONAL block; omit for all defaults
+    "kind": "single" | "parallel",           // OPTIONAL, default "single"
+    "n_workers": int,                        // OPTIONAL (parallel), default 1
+    "n_cores": int,                          // OPTIONAL, launcher only: the core budget for a sweep
+                                             //   (same as --cores N). from_params accepts and ignores it,
+                                             //   so a launcher base config still validates.
+    "sampling_window": int,                  // OPTIONAL, default 1000
+    "target_cycles": float,                  // OPTIONAL, default 1.0025e9 — set for real runs
+    "seed": int,                             // OPTIONAL
+    "initial_config": str,                   // OPTIONAL (file or dir; absolute path recommended)
+    "matrix_config": str,                    // OPTIONAL, QA only (required by it). File, or a FOLDER:
+                                             //   a folder pairs one realization per swept run, by index.
+                                             //   Cannot be combined with a pore.
+    "checkpoint_every": int,                 // OPTIONAL, default 1
+    "traj_every": int,                       // OPTIONAL, default 0  (0 = off; was 1 in the old schema)
+    "burn_in": int,                          // OPTIONAL, default 0
+    "radius": float,                         // OPTIONAL, default 0.5. Sphere radius / LJ sigma-half;
+                                             //   diameter = 2*radius is the hard-core exclusion floor.
+    "move_factor": float,                    // OPTIONAL, default 0.25
+    "upper_cutoff": float,                   // OPTIONAL, default 3.7545 (2D hard/aux), 2.0 (3D hard/aux),
+                                             //   2.5 (LJ), 3*radius (reweight)
+    "lower_cutoff": float,                   // OPTIONAL, default 0.9 (ANY LJ mode) | 2*radius (hard core)
+                                             //   One exclusion floor per run, not per sampler, so a
+                                             //   metropolis isotherm and a channel isotherm sample the
+                                             //   same model. Every LJ run is therefore "truncated LJ plus
+                                             //   a hard core at lower_cutoff", not pure LJ.
+    "no_neigh": int,                         // OPTIONAL, default 40 (2D) / 75 (3D)
+    "cell_length": float,                    // OPTIONAL (parallel), default 30
+    "buffer": float,                         // OPTIONAL (parallel), default 2. Must be >= the interaction
+                                             //   reach (2.5 for LJ, the diameter for hard core): border
+                                             //   rings must hold every molecule that can touch a live one.
+                                             //   cell_length + buffer must also fit inside box.
+    "control_gain": float,                   // OPTIONAL, default 0.5   } muVT target controller;
+    "control_gain_tau": float,               // OPTIONAL, default 20.0  } inert unless a target_* key
+    "control_window": int,                   // OPTIONAL, default 20    } is set
+
+    "x_spacing": float,                      // INERT. Accepted and stored, consumed by nothing: they feed
+    "y_spacing": float,                      //   only the verbatim 2D grid_up_the_system, which the engine
+                                             //   no longer calls (it uses grid_up_nd, which takes no
+                                             //   spacing). Setting them changes no run.
+    "sweep_label": str                       // Written BY the launcher into each expanded run; you do not
+                                             //   normally set it by hand.
+  }
+}
+
+// Sweeps
+// ------
+// Give a LIST to any of these axes and launch with `python -m gcmc.launcher`
+// (not `gcmc run`); it expands the Cartesian product, one run per combination,
+// and names the run dirs after the axes that actually vary:
+//   ensemble: mu, packing_fraction, N, target_N, target_eta, target_density
+//   sampler:  depth, trial_density, trial_box_side, channel_length, channel_width
+//   run:      seed
+//   ensemble.pore: H, R          (nested; the pore size goes in the dir prefix)
+// A list reaching from_params unexpanded is an error, with a message naming the key.
+//
+// Support matrix (from_params raises a specific ValueError on any disallowed mix)
+// ------------------------------------------------------------------------------
+// Samplers x potential:
+//   metropolis, rosenbluth, branch   hard_core or lennard_jones
+//   channel                          hard_core or lennard_jones, depth >= 1
+//   reweight (psi6)                  hard_core only
+//
+// Samplers x ensemble:
+//   muVT        every sampler
+//   NVT         every sampler except reweight paths that assume muVT targeting
+//   confined    grand-canonical samplers (give mu or a target); 3D only; no matrix
+//   QA          hard_core or LJ+branch only; not metropolis; needs run.matrix_config
+//
+// Dimension:
+//   reweight    2D only
+//   channel     3D only
+//   confined    3D only
+//   LJ + pmf    3D only
+//
+// Parallelism (run.kind = "parallel"):
+//   supports metropolis, rosenbluth and branch in BOTH 2D and 3D. The old
+//   "parallel is 2D only" rule is gone by decision (cell_unify_plan.md U0, GO
+//   2026-07-14); 3D physics is validated on the cluster in U3, not assumed.
+//   Rejected: reweight and QA (the decomposition drops the psi6 field / frozen
+//   matrix), channel (serial only), confined (the decomposition drops the pore
+//   walls).
+//   Caveat, not a config rule: depth >= 1 under parallel is APPROXIMATE. The
+//   cell proposal satisfies global balance only under full translation
+//   invariance, which a cell cannot give. The bias is set by the cavity/cell
+//   ratio: +19% at cell_length = 2.7 cavity widths, +1.3 +/- 0.8 % at 6.7,
+//   +0.9 +/- 0.6 % at 10. Serial is the exact reference at depth >= 1.
