@@ -75,9 +75,20 @@ def calculate_q6_3d(deltas3d, finite_mask, gamma):
 def calculate_order_parameter(coords, dists, idxs, kdtree, side_of_box, gamma):
     """Bridge: gather neighbour displacements under PBC and dispatch by
     dimensionality. 2D returns (cos_sum, sin_sum, counts); 3D returns Q6**gamma.
+
+    `kdtree` is None when the exclusion set is empty -- an empty box, or the last
+    particles being removed at once. Every trial then has zero neighbours, which
+    is the same state the `counts == 0` branches below already handle, so it is
+    given the same answer rather than dereferencing a missing index. Before this,
+    the reweight sampler could not start from an empty configuration at all.
     """
-    n_data = kdtree.data.shape[0]
     ndim = coords.shape[1]
+    if kdtree is None:
+        n = len(coords)
+        if ndim == 2:
+            return np.zeros(n), np.zeros(n), np.zeros(n, dtype=int)
+        return np.ones(n) * 0.3 ** gamma
+    n_data = kdtree.data.shape[0]
     box = np.array([side_of_box] * ndim) if np.isscalar(side_of_box) else np.asarray(side_of_box)
     safe = np.minimum(idxs, n_data - 1)
     neigh = kdtree.data[safe]

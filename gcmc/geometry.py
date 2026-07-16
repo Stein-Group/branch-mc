@@ -87,6 +87,58 @@ def indices_in_cavity(coords, center, radius, side, two_dim):
     return np.nonzero(mask)[0]
 
 
+def find_neighbors_pair(cl, trials, members, lower_cutoff, upper_cutoff,
+                        no_neigh, keep_mask=None, valid=None,
+                        dists_needed=True):
+    """`find_neighbors` for the trial cloud and the removed members in ONE query.
+
+    An exchange asks the same question twice: neighbours of the trials, then
+    neighbours of the members it is about to remove. Both bodies sit in the same
+    cuboid, and a cell-list query costs far more in numpy dispatch than in
+    arithmetic -- about 40 calls whatever the point count -- so asking once for
+    the concatenation and splitting the rows is close to half the neighbour cost
+    of an exchange step.
+
+    The rows come back one column wider than either query alone would give (the
+    width is the largest in-range count over BOTH bodies). Every live weigher is
+    insensitive to that: padding is neutral in a product and masked out of a
+    count. See `test_neighbors_parity.py::test_weights_are_identical_from_either_container`.
+
+    `dists_needed=False` asks for the nearest neighbour only. The hard-core
+    weight is `1` for every admissible trial and reads no distance at all, so on
+    that path the full padded rows are computed and thrown away; asking for the
+    minimum skips a scatter and a per-row sort. Anything that reads `dists` or
+    `idxs` (LJ, aux, reweight) must leave it True.
+
+    Returns (raw_trials, raw_members), each in `find_neighbors` form or None.
+    """
+    if cl is None or cl.n_active == 0:
+        return (find_neighbors(None, trials, lower_cutoff, upper_cutoff,
+                               no_neigh, keep_mask=keep_mask, valid=valid),
+                find_neighbors(None, members, lower_cutoff, upper_cutoff,
+                               no_neigh))
+    nt = len(trials)
+    both = np.vstack((trials, members)) if len(members) else trials
+    distances, indices = cl.query(both, upper_cutoff, min_only=not dists_needed)
+    ok = np.all(distances >= lower_cutoff, axis=1)
+
+    good = ok[:nt]
+    if valid is not None:
+        good = good & np.asarray(valid, bool)
+    if np.any(good):
+        km = keep_mask[good] if keep_mask is not None else None
+        raw_t = trials[good], distances[:nt][good], indices[:nt][good], km
+    else:
+        raw_t = None
+
+    if len(members) == 0:
+        return raw_t, None
+    gm = ok[nt:]
+    if not np.any(gm):
+        return raw_t, None
+    return raw_t, (members[gm], distances[nt:][gm], indices[nt:][gm], None)
+
+
 def find_neighbors(kdtree, trial_mols, lower_cutoff, upper_cutoff, no_neigh,
                    keep_mask=None, valid=None, saturation_requery=False):
     """Query each trial's neighbours within `upper_cutoff`, drop any trial that
@@ -103,7 +155,26 @@ def find_neighbors(kdtree, trial_mols, lower_cutoff, upper_cutoff, no_neigh,
     from that sum; the hard-core path leaves it off, since its weight ignores the
     distances entirely. When the fixed-k query is already unsaturated the columns
     are identical either way, so the flag is a no-op below ordinary density.
+
+    `kdtree` may instead be a `neighbors.CellList`. It answers a radius query, so
+    its neighbour list is complete by construction and `saturation_requery` has
+    nothing to do; its rows are as wide as the largest in-range count rather than
+    `no_neigh`, which every live weigher is insensitive to (padding is neutral in
+    a product or a masked count). An empty cell list takes the same
+    all-admissible path an absent tree does, so the two agree on an empty system.
     """
+    if kdtree is not None and hasattr(kdtree, "n_active"):
+        if kdtree.n_active == 0:
+            kdtree = None                     # empty system: the None path, exactly
+        else:
+            distances, indices = kdtree.query(trial_mols, upper_cutoff)
+            good = np.all(distances >= lower_cutoff, axis=1)
+            if valid is not None:
+                good = good & np.asarray(valid, bool)
+            if not np.any(good):
+                return None
+            km = keep_mask[good] if keep_mask is not None else None
+            return trial_mols[good], distances[good], indices[good], km
     if kdtree is None:
         # empty system: nothing to overlap and no neighbours. Every trial is
         # admissible with padded (infinite-distance) neighbour rows, so the
@@ -135,3 +206,24 @@ def find_neighbors(kdtree, trial_mols, lower_cutoff, upper_cutoff, no_neigh,
     idxs = indices[good]
     km = keep_mask[good] if keep_mask is not None else None
     return coords, dists, idxs, km
+
+
+def indices_in_cavity_cl(cl, center, radius, side, two_dim):
+    """`indices_in_cavity` restricted to the cells the cube cavity touches.
+
+    Returns SLOT IDS, sorted ascending. The gather is a superset; the per-axis
+    wrap-aware test below is the same one the full scan uses, so the cavity is
+    exactly the cavity it always was.
+    """
+    center = np.asarray(center, float)[:cl.dim]
+    cand = cl.gather_aabb(center - radius, center + radius, sort=False)
+    if cand.size and cl.n_matrix:
+        cand = cand[~cl.is_matrix[cand]]
+    if cand.size == 0:
+        return np.empty(0, dtype=np.int64)
+    coords = cl.coords[cand]
+    mask = _axis_in_cavity(coords[:, 0], center[0], radius, side)
+    mask &= _axis_in_cavity(coords[:, 1], center[1], radius, side)
+    if not two_dim:
+        mask &= _axis_in_cavity(coords[:, 2], center[2], radius, side)
+    return np.sort(cand[mask])
