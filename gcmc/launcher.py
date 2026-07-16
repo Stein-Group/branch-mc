@@ -31,64 +31,79 @@ Examples (serial unless noted):
 """
 
 from __future__ import annotations
+
 import argparse
 import copy
 import itertools
 import json
+import logging
 import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any
 
-_THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-                "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS")
+_THREAD_VARS = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
 
 # (axis label, params section, key). Order fixes the product / id ordering.
-_AXES = (("mu", "ensemble", "mu"),
-         ("packing_fraction", "ensemble", "packing_fraction"),
-         ("N", "ensemble", "N"),
-         ("target_N", "ensemble", "target_N"),
-         ("target_eta", "ensemble", "target_eta"),
-         ("target_density", "ensemble", "target_density"),
-         ("depth", "sampler", "depth"),
-         ("seed", "run", "seed"),
-         ("trial_density", "sampler", "trial_density"),
-         ("trial_box_side", "sampler", "trial_box_side"),
-         ("channel_length", "sampler", "channel_length"),
-         ("channel_width", "sampler", "channel_width"))
+_AXES = (
+    ("mu", "ensemble", "mu"),
+    ("packing_fraction", "ensemble", "packing_fraction"),
+    ("N", "ensemble", "N"),
+    ("target_N", "ensemble", "target_N"),
+    ("target_eta", "ensemble", "target_eta"),
+    ("target_density", "ensemble", "target_density"),
+    ("depth", "sampler", "depth"),
+    ("seed", "run", "seed"),
+    ("trial_density", "sampler", "trial_density"),
+    ("trial_box_side", "sampler", "trial_box_side"),
+    ("channel_length", "sampler", "channel_length"),
+    ("channel_width", "sampler", "channel_width"),
+)
 
 # nested pore axes (ensemble.pore.{H,R}); handled separately since they live one
 # level deeper than the flat _AXES entries.
 _PORE_AXES = (("poreH", "H"), ("poreR", "R"))
 
 
-def _as_list(v):
+def _as_list(v: Any) -> list[Any]:
+    """Wrap a scalar into a one-element list; pass lists/tuples through --
+    how a sweep axis and a fixed value share one code path."""
     return list(v) if isinstance(v, (list, tuple)) else [v]
 
 
-def _matrix_files_in(folder):
+def _matrix_files_in(folder: str) -> list[str]:
     """A matrix folder (e.g. an NVT runs root) holds one subdirectory per
     realization, each with a trajectory.extxyz (the frozen matrix; its last
     frame is used). Return the per-realization trajectory paths, sorted for a
     deterministic pairing with the swept target list. Also accepts a folder of
     bare .extxyz/.npz files."""
-    import glob
-    folder = os.path.abspath(folder)
+
+    root = Path(folder).resolve()
     # case A: subdirectories each containing trajectory.extxyz
-    subs = sorted(glob.glob(os.path.join(folder, "*", "trajectory.extxyz")))
+    subs = sorted(str(q) for q in root.glob("*/trajectory.extxyz"))
     if subs:
         return subs
     # case B: subdirectories each containing checkpoint.npz
-    subs = sorted(glob.glob(os.path.join(folder, "*", "checkpoint.npz")))
+    subs = sorted(str(q) for q in root.glob("*/checkpoint.npz"))
     if subs:
         return subs
     # case C: a flat folder of matrix files
-    flat = sorted(glob.glob(os.path.join(folder, "*.extxyz")) +
-                  glob.glob(os.path.join(folder, "*.npz")))
+    flat = sorted(
+        [str(q) for q in root.glob("*.extxyz")] + [str(q) for q in root.glob("*.npz")]
+    )
     return flat
 
 
-def expand_sweep(base):
+def expand_sweep(
+    base: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
     """Return (combos, labels): one concrete params dict per Cartesian
     combination of the swept axes, with the matching short id suffixes. A
     scalar axis contributes one value; a list axis is swept; absent axes are
@@ -102,9 +117,9 @@ def expand_sweep(base):
     pore = base.get("ensemble", {}).get("pore", {})
     for label, key in _PORE_AXES:
         if key in pore:
-            present.append((label, "ensemble.pore", key))   # nested marker
+            present.append((label, "ensemble.pore", key))  # nested marker
             grids.append(_as_list(pore[key]))
-    if not present:                       # nothing sweepable present: one run
+    if not present:  # nothing sweepable present: one run
         return [copy.deepcopy(base)], ["single"]
 
     # only axes with more than one distinct value are "swept"; those name the
@@ -120,7 +135,7 @@ def expand_sweep(base):
             else:
                 p.setdefault(section, {})[key] = val
             if i in varying and section != "ensemble.pore":
-                parts.append(f"{label}{val}")   # pore size is in the dir prefix
+                parts.append(f"{label}{val}")  # pore size is in the dir prefix
         lbl = "_".join(parts)
         if lbl:
             p.setdefault("run", {})["sweep_label"] = lbl
@@ -132,28 +147,33 @@ def expand_sweep(base):
     # combo[i] uses matrix[i] (target[i] <-> matrix[i]). This makes a 16-target
     # sweep pick up 16 matrices and run them one-to-one.
     mcfg = base.get("run", {}).get("matrix_config")
-    if mcfg is not None and os.path.isdir(mcfg):
+    if mcfg is not None and Path(mcfg).is_dir():
         files = _matrix_files_in(mcfg)
         if not files:
             raise ValueError(
                 f"run.matrix_config is a folder ({mcfg}) but no matrix files "
                 f"were found in it (expected */trajectory.extxyz, */checkpoint.npz, "
-                f"or *.extxyz/*.npz).")
+                f"or *.extxyz/*.npz)."
+            )
         if len(files) < len(combos):
             raise ValueError(
                 f"sweep needs {len(combos)} matrices (one per swept value) but "
                 f"the folder {mcfg} has only {len(files)}. Provide at least as "
-                f"many realizations as swept values, or shorten the sweep.")
+                f"many realizations as swept values, or shorten the sweep."
+            )
         for i, p in enumerate(combos):
             p.setdefault("run", {})["matrix_config"] = files[i]
-            # tag the realization in the label so each run dir is identifiable
-            real_id = os.path.basename(os.path.dirname(files[i])) or os.path.basename(files[i])
-            labels[i] = f"{labels[i]}_m{i:02d}" if labels[i] != "single" else f"m{i:02d}"
+            # the realization index in the label makes each run dir identifiable
+            labels[i] = (
+                f"{labels[i]}_m{i:02d}" if labels[i] != "single" else f"m{i:02d}"
+            )
 
     return combos, labels
 
 
-def cores_per_run(base):
+def cores_per_run(base: dict[str, Any]) -> int:
+    """Cores one run of this params file consumes: run.n_workers for the
+    parallel (domain-decomposed) kind, else 1."""
     run = base.get("run", {})
     if run.get("kind") == "parallel":
         nw = run.get("n_workers")
@@ -163,7 +183,9 @@ def cores_per_run(base):
     return 1
 
 
-def plan(base, cores):
+def plan(
+    base: dict[str, Any], cores: int
+) -> tuple[list[dict[str, Any]], list[str], int, int]:
     """Validate the budget; return (combos, labels, per_run, concurrency)."""
     combos, labels = expand_sweep(base)
     per = cores_per_run(base)
@@ -172,12 +194,27 @@ def plan(base, cores):
         raise ValueError(
             f"core budget exceeded: {len(combos)} run(s) x {per} core(s) each "
             f"= {total} cores needed, but only {cores} available. Reduce the "
-            f"sweep, lower run.n_workers, or request more cores.")
+            f"sweep, lower run.n_workers, or request more cores."
+        )
     return combos, labels, per, max(1, cores // per)
 
 
-def launch_sweep(base, cores, *, root="runs", launch_dir="launch", threads=1,
-                 pin=True, wait=True):
+def launch_sweep(
+    base: dict[str, Any],
+    cores: int,
+    *,
+    root: str = "runs",
+    launch_dir: str = "launch",
+    threads: int = 1,
+    pin: bool = True,
+    wait: bool = True,
+) -> list[int] | list[subprocess.Popen[bytes]]:
+    """Expand the sweep and run every combination as its own `python -m gcmc
+    run` subprocess within the core budget: per-run params snapshots under
+    `launch_dir`, BLAS/OMP thread caps exported so numpy cannot oversubscribe,
+    optional taskset pinning for serial runs (with a probe-and-fallback, see
+    inline comment), and a simple keep-the-budget-full scheduler when
+    `wait=True`. Returns exit codes (wait) or Popen handles (no wait)."""
     combos, labels, per, concurrency = plan(base, cores)
     os.makedirs(launch_dir, exist_ok=True)
     # serial runs take one core and can be pinned; parallel runs manage their
@@ -186,31 +223,32 @@ def launch_sweep(base, cores, *, root="runs", launch_dir="launch", threads=1,
 
     next_core = [0]
 
-    def start(params, label):
-        pf = os.path.join(launch_dir, f"params_{label}.json")
+    def start(params: dict[str, Any], label: str) -> subprocess.Popen[bytes]:
+        pf = Path(launch_dir) / f"params_{label}.json"
         with open(pf, "w") as f:
             json.dump(params, f, indent=2, sort_keys=True)
         env = dict(os.environ)
         for v in _THREAD_VARS:
             env[v] = str(threads)
-        cmd = [sys.executable, "-m", "gcmc", "run", pf, "--root", root]
+        cmd = [sys.executable, "-m", "gcmc", "run", str(pf), "--root", root]
         if taskset is not None:
             # prefix taskset, but fall back to unpinned if affinity is refused
             # (e.g. restricted cgroups): pinning is an optimisation, not a
             # correctness requirement, so a node that forbids it must not fail
             core = str(next_core[0] % cores)
             next_core[0] += 1
-            probe = subprocess.run([taskset, "-c", core, "true"],
-                                   capture_output=True)
+            probe = subprocess.run([taskset, "-c", core, "true"], capture_output=True)
             if probe.returncode == 0:
-                cmd = [taskset, "-c", core] + cmd
+                cmd = [taskset, "-c", core, *cmd]
         return subprocess.Popen(cmd, env=env)
 
     pending = list(zip(combos, labels))
     if not wait:
         return [start(p, l) for p, l in pending]
 
-    done, running, used = [], [], 0
+    done: list[int] = []
+    running: list[tuple[subprocess.Popen[bytes], int]] = []
+    used = 0
     while pending or running:
         while pending and used + per <= cores and len(running) < concurrency:
             p, l = pending.pop(0)
@@ -222,18 +260,29 @@ def launch_sweep(base, cores, *, root="runs", launch_dir="launch", threads=1,
     return done
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
+    """CLI wrapper over `launch_sweep`; see --help for the knobs."""
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
+    )
     ap = argparse.ArgumentParser(prog="python -m gcmc.launcher")
     ap.add_argument("base", help="base params.json; sweepable axes may be lists")
-    ap.add_argument("--cores", type=int, default=None,
-                    help="cores available this job (required; or run.n_cores)")
+    ap.add_argument(
+        "--cores",
+        type=int,
+        default=None,
+        help="cores available this job (required; or run.n_cores)",
+    )
     ap.add_argument("--root", default="runs")
     ap.add_argument("--launch-dir", default="launch")
     ap.add_argument("--threads", type=int, default=1)
     ap.add_argument("--no-pin", action="store_true")
     ap.add_argument("--no-wait", action="store_true")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="print the plan and exit without launching")
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the plan and exit without launching",
+    )
     args = ap.parse_args(argv)
 
     with open(args.base) as f:
@@ -245,23 +294,32 @@ def main(argv=None):
         ap.error("cores is required: pass --cores N or set run.n_cores in the base")
 
     combos, labels, per, concurrency = plan(base, cores)
-    print(f"{len(combos)} run(s) x {per} core(s) = {len(combos) * per} of "
-          f"{cores} cores; up to {concurrency} concurrent")
+    print(
+        f"{len(combos)} run(s) x {per} core(s) = {len(combos) * per} of "
+        f"{cores} cores; up to {concurrency} concurrent"
+    )
     if args.dry_run:
         for l in labels:
             print("  ", l)
-        return
+        return 0
 
-    result = launch_sweep(base, cores, root=args.root, launch_dir=args.launch_dir,
-                          threads=args.threads, pin=not args.no_pin,
-                          wait=not args.no_wait)
+    result = launch_sweep(
+        base,
+        cores,
+        root=args.root,
+        launch_dir=args.launch_dir,
+        threads=args.threads,
+        pin=not args.no_pin,
+        wait=not args.no_wait,
+    )
     if args.no_wait:
         print(f"launched {len(result)} runs")
     else:
         print(f"finished {len(result)} runs, return codes {result}")
         if any(result):
-            sys.exit(1)
+            return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

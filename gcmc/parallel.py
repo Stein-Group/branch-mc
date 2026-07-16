@@ -32,21 +32,22 @@ every molecule that can interact with a live one.
 """
 
 from __future__ import annotations
+
 import concurrent.futures
+
 import numpy as np
 from scipy.spatial import cKDTree
 
-from . import decomposition
-from . import geometry
-from .trials import TrialSet
-from .MC_engine import _weighted_trials, _lj_set_energy, _lj_energy, make_weigher
-from .samplers.rosenbluth import select_forward, select_reverse
+from . import decomposition, geometry
+from ._types import BoolArray
+from .MC_engine import _lj_energy, _lj_set_energy, _weighted_trials, make_weigher
 from .samplers.branch import count_and_sample
+from .samplers.rosenbluth import select_forward, select_reverse
 from .state import zero_counters
+from .trials import TrialSet
 
 
-def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng,
-                 n_offset):
+def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng, n_offset):
     """Advance one cell by n_steps insertion/deletion proposals.
 
     main    : (N, dim) global coordinates of the cell's live molecules
@@ -65,7 +66,7 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng,
     box = cfg.box_dims
     beta, mu, mf = cfg.beta, cfg.chem_pot, cfg.move_factor
     n_trials = cfg.no_of_trial_molecules
-    v_cell = L_c ** dim
+    v_cell = L_c**dim
     ljaux = cfg.potential_type == "ljaux"
     lj = cfg.potential_type == "lj" or ljaux
     branch = cfg.sampler == "branch"
@@ -89,8 +90,11 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng,
     step = 0
     while step < n_steps:
         N = len(u_main)
-        choice = "add" if N == 0 else rng.choice(
-            ["move", "add", "remove"], p=[0.5, 0.25, 0.25])
+        choice = (
+            "add"
+            if N == 0
+            else rng.choice(["move", "add", "remove"], p=[0.5, 0.25, 0.25])
+        )
 
         # ----- translate (cell-torus wrap keeps the molecule owned) -----
         if choice == "move":
@@ -111,11 +115,14 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng,
                     c["move_accept"] += 1
             else:
                 old = to_global(u_main[j])[0]
-                d_old, _ = tree.query(old, k=min(nn, len(system)),
-                                      distance_upper_bound=uc)
-                d_new, _ = tree.query(moved, k=min(nn, len(system)),
-                                      distance_upper_bound=uc)
-                d_old = np.atleast_1d(d_old); d_new = np.atleast_1d(d_new)
+                d_old, _ = tree.query(
+                    old, k=min(nn, len(system)), distance_upper_bound=uc
+                )
+                d_new, _ = tree.query(
+                    moved, k=min(nn, len(system)), distance_upper_bound=uc
+                )
+                d_old = np.atleast_1d(d_old)
+                d_new = np.atleast_1d(d_new)
                 d_old = d_old[np.isfinite(d_old)]
                 d_new = d_new[np.isfinite(d_new)]
                 if d_new.size and np.any(d_new < lower):
@@ -142,8 +149,7 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng,
                 anchor = -1
             else:
                 anchor = int(rng.choice(N))
-                u_center = (u_main[anchor]
-                            + rng.uniform(-cav, cav, size=dim)) % L_c
+                u_center = (u_main[anchor] + rng.uniform(-cav, cav, size=dim)) % L_c
             if n_remove == 0:
                 disk_in_u = np.empty((0, dim))
                 rest_u = u_main
@@ -191,8 +197,7 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng,
         system = system_for(rest_u)
 
         # trial cloud on the cell torus around the centre, mapped to global
-        trials_u = (rng.uniform(-cav, cav, size=(n_trials, dim))
-                    + u_center) % L_c
+        trials_u = (rng.uniform(-cav, cav, size=(n_trials, dim)) + u_center) % L_c
         trials = to_global(trials_u)
 
         keep_mask = np.ones(n_trials, dtype=bool)
@@ -202,20 +207,25 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng,
         if len(system) == 0:
             # empty environment: every trial survives with unit pair weight
             trial_set = TrialSet(trials, np.ones(n_trials))
-            km = keep_mask
+            km: BoolArray | None = keep_mask
         else:
             tree = cKDTree(system, boxsize=box)
-            raw = geometry.find_neighbors(tree, trials, lower, uc, nn,
-                                          keep_mask=keep_mask)
+            raw = geometry.find_neighbors(
+                tree, trials, lower, uc, nn, keep_mask=keep_mask
+            )
             if raw is None:
                 if n_add != 0:
                     continue
-                trial_set = TrialSet(np.empty((0, dim)), np.empty(0),
-                                     ref_neighbor_coord=np.empty((0, dim)))
+                trial_set = TrialSet(
+                    np.empty((0, dim)),
+                    np.empty(0),
+                    ref_neighbor_coord=np.empty((0, dim)),
+                )
                 km = np.empty(0, dtype=bool)
             else:
-                trial_set, km = _weighted_trials(raw, tree, cfg, potential,
-                                                 choice, N + n_offset)
+                trial_set, km = _weighted_trials(
+                    raw, tree, cfg, potential, choice, N + n_offset
+                )
 
         # removed molecule's own weight
         if n_remove > 0:
@@ -225,15 +235,18 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng,
                 raw_in = geometry.find_neighbors(tree, disk_in, lower, uc, nn)
                 if raw_in is None:
                     continue
-                mol_in_cav, _ = _weighted_trials(raw_in, tree, cfg, potential,
-                                                 choice, N + n_offset)
+                mol_in_cav, _ = _weighted_trials(
+                    raw_in, tree, cfg, potential, choice, N + n_offset
+                )
                 if len(mol_in_cav) != n_remove:
                     continue
         else:
             mol_in_cav = None
 
+        assert km is not None  # raw was handled above; km rides with it
         pool = trial_set.mask(km)
         if n_remove > 0:
+            assert mol_in_cav is not None  # built in the n_remove branch above
             pool = pool.merge(mol_in_cav)
             if len(pool) > 1:
                 pool = pool[rng.permutation(len(pool))]
@@ -244,9 +257,10 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng,
                 continue
             e_u_r_new = 0.0
             if branch:
-                num_new, idx = count_and_sample(pool.coords, n_add, lower,
-                                                box_lengths=box)
-                if num_new <= 0:
+                num_new, idx = count_and_sample(
+                    pool.coords, n_add, lower, box_lengths=box
+                )
+                if num_new <= 0 or idx is None:
                     continue
                 chosen_coords = pool.coords[list(idx)]
                 if lj:
@@ -256,10 +270,15 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng,
                     sum_new = np.log(num_new)
             else:
                 chosen, sum_new_arr = select_forward(
-                    pool, n_add, weigher, rand=lambda: rng.uniform(0, 1),
-                    side=side, r_squared=cfg.r_squared,
-                    gamma_schedule=cfg.gamma_dict)
-                if chosen is None:
+                    pool,
+                    n_add,
+                    weigher,
+                    rand=lambda: rng.uniform(0, 1),
+                    side=side,
+                    r_squared=cfg.r_squared,
+                    gamma_schedule=cfg.gamma_dict,
+                )
+                if chosen is None or sum_new_arr is None:
                     continue
                 chosen_coords = chosen.coords
                 sum_new = np.sum(np.log(sum_new_arr))
@@ -273,8 +292,9 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng,
         if n_remove > 0:
             e_u_r_current = 0.0
             if branch:
-                num_cur, _ = count_and_sample(pool.coords, n_remove, lower,
-                                              box_lengths=box)
+                num_cur, _ = count_and_sample(
+                    pool.coords, n_remove, lower, box_lengths=box
+                )
                 if num_cur <= 0:
                     continue
                 if lj:
@@ -283,12 +303,18 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng,
                 else:
                     sum_current = np.log(num_cur)
             else:
-                trimmed = trial_set.mask(km)
-                trimmed = trimmed if len(trimmed) else None
-                s_arr, e_arr = select_reverse(trimmed, mol_in_cav, n_remove,
-                                              weigher, side=side,
-                                              r_squared=cfg.r_squared,
-                                              gamma_schedule=cfg.gamma_dict)
+                _trimmed = trial_set.mask(km)
+                trimmed = _trimmed if len(_trimmed) else None
+                assert mol_in_cav is not None  # n_remove > 0 built it above
+                s_arr, e_arr = select_reverse(
+                    trimmed,
+                    mol_in_cav,
+                    n_remove,
+                    weigher,
+                    side=side,
+                    r_squared=cfg.r_squared,
+                    gamma_schedule=cfg.gamma_dict,
+                )
                 sum_current = np.sum(np.log(s_arr))
                 e_u_r_current = np.sum(np.log(e_arr))
         else:
@@ -299,14 +325,17 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng,
         if tail:
             n_glob_old = N + n_offset
             n_glob_new = n_glob_old + n_add - n_remove
-            delta_E = beta * tail * (n_glob_new ** 2 - n_glob_old ** 2)
+            delta_E = beta * tail * (n_glob_new**2 - n_glob_old**2)
         else:
             delta_E = 0.0
         if ljaux and not branch:
             # divide out the chosen/removed bias: e_u_r on combined weights
             # plus the explicit pair-energy term cancels the Boltzmann parts
-            u_ins = _lj_set_energy(np.atleast_2d(chosen_coords), system, box, uc) \
-                if len(chosen_coords) else 0.0
+            u_ins = (
+                _lj_set_energy(np.atleast_2d(chosen_coords), system, box, uc)
+                if len(chosen_coords)
+                else 0.0
+            )
             u_rem = _lj_set_energy(disk_in, system, box, uc) if len(disk_in) else 0.0
             delta_E += (e_u_r_new - e_u_r_current) + beta * (u_ins - u_rem)
         elif not (lj or branch):
@@ -349,36 +378,53 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng,
 
 
 def _run_cell(args):
+    """Worker entry point (one argument tuple, multiprocessing-friendly):
+    build the per-cell rng and weigher, run `advance_cell` on this cell's
+    interior particles with its frozen border, and return the updated
+    interior plus counters."""
     main, border, origin, n_steps, cfg, potential, n_offset, seed = args
     rng = np.random.default_rng(seed)
     weigher = make_weigher(cfg, potential)
-    return advance_cell(main, border, origin, n_steps, cfg, potential,
-                        weigher, rng, n_offset)
+    return advance_cell(
+        main, border, origin, n_steps, cfg, potential, weigher, rng, n_offset
+    )
 
 
 def advance_parallel(state, cfg, potential, weigher):
     """Advance one window by domain decomposition (2D or 3D)."""
     if cfg.sampler not in ("rosenbluth", "branch", "metropolis"):
         raise NotImplementedError(
-            f"parallel supports metropolis, rosenbluth, and branch; "
-            f"got {cfg.sampler!r}")
+            f"parallel supports metropolis, rosenbluth, and branch; got {cfg.sampler!r}"
+        )
     if cfg.cell_length <= 2.0 * cfg.cavity_radius:
         raise ValueError(
             f"cell_length ({cfg.cell_length}) must exceed twice the cavity "
-            f"radius ({2 * cfg.cavity_radius}) for the cell-torus geometry")
+            f"radius ({2 * cfg.cavity_radius}) for the cell-torus geometry"
+        )
 
     dim = 2 if cfg.two_dim else 3
     rng = state.rng
     pos = np.asarray(state.positions, float).reshape(-1, dim)
     n_global = len(pos)
 
-    cells, rest = decomposition.grid_up_nd(pos, cfg.box, cfg.cell_length,
-                                           cfg.buffer, rng, dim)
+    cells, rest = decomposition.grid_up_nd(
+        pos, cfg.box, cfg.cell_length, cfg.buffer, rng, dim
+    )
     n_steps = cfg.sampling_window
-    seeds = rng.integers(0, 2 ** 31 - 1, size=len(cells))
-    tasks = [(cell[0], cell[1], cell[2], n_steps, cfg, potential,
-              n_global - len(cell[0]), int(s))
-             for cell, s in zip(cells, seeds)]
+    seeds = rng.integers(0, 2**31 - 1, size=len(cells))
+    tasks = [
+        (
+            cell[0],
+            cell[1],
+            cell[2],
+            n_steps,
+            cfg,
+            potential,
+            n_global - len(cell[0]),
+            int(s),
+        )
+        for cell, s in zip(cells, seeds)
+    ]
 
     total = zero_counters()
     new_mains = []
@@ -398,5 +444,9 @@ def advance_parallel(state, cfg, potential, weigher):
     state.positions = pos
     state.step += cfg.sampling_window * max(1, len(cells))
     packing = (len(pos) * cfg.volume_of_molecule) / cfg.total_volume
-    return {"N": len(pos), "packing_fraction": packing, "counters": total,
-            "n_cells": len(cells)}
+    return {
+        "N": len(pos),
+        "packing_fraction": packing,
+        "counters": total,
+        "n_cells": len(cells),
+    }

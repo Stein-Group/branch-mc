@@ -17,11 +17,23 @@ so to compare against an excess-convention reference (e.g. Fernaud-Lomba-Lee),
 use  beta*mu_excess = beta*mu_code - ln(rho_fluid),  which -> -ln(phi) as rho->0.
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 import numpy as np
 from scipy.spatial import cKDTree
 
+from ._types import FloatArray
 
-def free_volume_fraction(matrix, box, diameter, n_test=400_000, seed=0):
+
+def free_volume_fraction(
+    matrix: FloatArray,
+    box: float,
+    diameter: float,
+    n_test: int = 400_000,
+    seed: int = 0,
+) -> float:
     """phi = fraction of uniformly random points whose nearest matrix sphere is
     at least `diameter` away (i.e. a hard-sphere test particle fits there)."""
     matrix = np.asarray(matrix, float)
@@ -33,7 +45,9 @@ def free_volume_fraction(matrix, box, diameter, n_test=400_000, seed=0):
     return float(np.mean(tree.query(pts % box, k=1)[0] >= diameter))
 
 
-def excess_mu_infinite_dilution(matrix, box, diameter, **kw):
+def excess_mu_infinite_dilution(
+    matrix: FloatArray, box: float, diameter: float, **kw: Any
+) -> float:
     """beta * mu_excess at infinite dilution = -ln(phi)."""
     phi = free_volume_fraction(matrix, box, diameter, **kw)
     if phi <= 0.0:

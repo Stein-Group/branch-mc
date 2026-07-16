@@ -48,26 +48,34 @@ on any converted path: a radius query is complete by construction.
 
 Caller contract for slot lifetime, which the engine relies on and a rebuild would
 otherwise break: a slot that has been `remove`d and might still be `reactivate`d
-must not be held across an `insert`, because an insert may rebuild and hand that
-slot back to the free list. Every engine path obeys this -- a proposal removes,
-queries, and then either reactivates (reject) or inserts (accept, the removed
-slots are dead).
+must not be held across an `insert` OR a `move` of a DIFFERENT slot, because
+both may rebuild once the pending list crosses its threshold, and a rebuild
+hands every tombstoned slot back to the free list. (`move` checks the threshold
+only after it has re-activated its own slot, so moving a tombstoned slot is
+always safe for that slot itself.) Every engine path obeys this -- a proposal
+removes, queries, and then either reactivates (reject) or inserts / moves
+(accept, at which point the removed slots are dead or revived, never in limbo).
 
 No scipy here, by rule and by test.
 """
 
 from __future__ import annotations
+
 import math
+
 import numpy as np
 
-# Default number of not-yet-indexed insertions tolerated before the CSR index is
-# rebuilt. The rebuild is O(N) (2.2 ms at N = 15,000); at 512 it amortises to
-# well under 5 us per insertion, which is noise beside the per-move Python cost.
-# Not-yet-indexed insertions tolerated before the CSR index is rebuilt. Every
-# gather pairs the surviving pending slots with EVERY query point, so a large
-# pending list is not free: at 512 it doubled the pair count of a 40-trial query
-# and cost more than the O(N) rebuild it was deferring. 32 puts the rebuild at
-# roughly 20 us/step at N = 15,000 and keeps the pending block negligible.
+from ._types import BoolArray, FloatArray, IntArray
+
+# Number of not-yet-indexed slots tolerated before the CSR index is rebuilt.
+# The trade is asymmetric. A rebuild is O(N) (2.2 ms at N = 15,000) but rare;
+# a pending slot is cheap to hold but taxes EVERY query, because every gather
+# pairs the surviving pending slots with every query point. At 512 the pending
+# block doubled the pair count of a 40-trial query and cost more than the O(N)
+# rebuild it was deferring; 32 puts the amortised rebuild at roughly 20 us/step
+# at N = 15,000 and keeps the pending block negligible. Both `insert` and
+# `move` check the threshold, so the pending list is bounded on every path,
+# including exchange-free (pure-translation) runs where `insert` never fires.
 PENDING_THRESHOLD = 32
 
 
@@ -86,18 +94,54 @@ class CellList:
                             a CSR rebuild).
     """
 
-    __slots__ = ("box", "dim", "cutoff", "nc", "cw", "_strides", "_ncell",
-                 "_coordsT", "active", "is_matrix", "_cell", "_in_csr",
-                 "_indexed", "_visible", "_dirty",
-                 "_pending_flag", "_pending", "_free", "_n_slots", "_capacity",
-                 "_sorted", "_start", "_count", "_cellsel", "n_active",
-                 "_pending_threshold", "n_rebuilds", "n_matrix",
-                 "_inv_cw", "_offs_cache",
-                 "_lut_cache", "_pending_arr")
+    __slots__ = (
+        "_capacity",
+        "_cell",
+        "_cellsel",
+        "_coordsT",
+        "_count",
+        "_dirty",
+        "_free",
+        "_in_csr",
+        "_indexed",
+        "_inv_cw",
+        "_lut_cache",
+        "_n_slots",
+        "_ncell",
+        "_offs_cache",
+        "_pending",
+        "_pending_arr",
+        "_pending_flag",
+        "_pending_threshold",
+        "_sorted",
+        "_start",
+        "_strides",
+        "_visible",
+        "active",
+        "box",
+        "cutoff",
+        "cw",
+        "dim",
+        "is_matrix",
+        "n_active",
+        "n_matrix",
+        "n_rebuilds",
+        "nc",
+    )
 
     # ------------------------------------------------------------------ build
-    def __init__(self, box, dim, cutoff, capacity=1024,
-                 pending_threshold=PENDING_THRESHOLD):
+    def __init__(
+        self,
+        box: float | FloatArray,
+        dim: int,
+        cutoff: float,
+        capacity: int = 1024,
+        pending_threshold: int = PENDING_THRESHOLD,
+    ) -> None:
+        """Empty cell list. Grid geometry (cell counts nc, widths cw, row-major
+        strides) is fixed here from box and cutoff; slot storage starts at
+        `capacity` and grows on demand. Insert particles with `bulk_insert` /
+        `insert` or use `from_positions`."""
         self.dim = int(dim)
         self.box = np.broadcast_to(np.asarray(box, float), (self.dim,)).copy()
         self.cutoff = float(cutoff)
@@ -106,9 +150,9 @@ class CellList:
         self.nc = np.maximum(1, np.floor(self.box / self.cutoff)).astype(np.int64)
         self.cw = self.box / self.nc
         self._inv_cw = 1.0 / self.cw
-        self._offs_cache = {}
-        self._lut_cache = {}
-        self._pending_arr = None
+        self._offs_cache: dict[int | tuple[str, int], IntArray] = {}
+        self._lut_cache: dict[tuple[int, ...], tuple[IntArray, IntArray, IntArray]] = {}
+        self._pending_arr: IntArray | None = None
         st = np.ones(self.dim, dtype=np.int64)
         for a in range(self.dim - 2, -1, -1):
             st[a] = st[a + 1] * self.nc[a + 1]
@@ -135,8 +179,8 @@ class CellList:
         self._visible = np.zeros(cap, dtype=bool)
         self._dirty = 0
         self._pending_flag = np.zeros(cap, dtype=bool)
-        self._pending = []
-        self._free = list(range(cap - 1, -1, -1))     # pop() yields ascending
+        self._pending: list[int] = []
+        self._free: list[int] = list(range(cap - 1, -1, -1))  # pop() yields ascending
         self._n_slots = 0
         self.n_active = 0
         self.n_matrix = 0
@@ -148,8 +192,15 @@ class CellList:
         self._cellsel = np.zeros(self._ncell, dtype=bool)
 
     @classmethod
-    def from_positions(cls, positions, box, dim, cutoff, matrix=None,
-                       pending_threshold=PENDING_THRESHOLD):
+    def from_positions(
+        cls,
+        positions: FloatArray,
+        box: float | FloatArray,
+        dim: int,
+        cutoff: float,
+        matrix: FloatArray | None = None,
+        pending_threshold: int = PENDING_THRESHOLD,
+    ) -> CellList:
         """Build from a fluid configuration plus optional frozen obstacles.
 
         Obstacles take the lowest slots so `is_matrix` is a prefix, then the
@@ -160,8 +211,7 @@ class CellList:
         n_mat = 0 if matrix is None else len(matrix)
         n = len(positions) + n_mat
         cap = max(2 * n, n + 1024, 16)
-        cl = cls(box, dim, cutoff, capacity=cap,
-                 pending_threshold=pending_threshold)
+        cl = cls(box, dim, cutoff, capacity=cap, pending_threshold=pending_threshold)
         if n_mat:
             cl.bulk_insert(np.asarray(matrix, float).reshape(-1, dim), matrix=True)
         cl.bulk_insert(positions)
@@ -169,33 +219,53 @@ class CellList:
         return cl
 
     # ------------------------------------------------------------- cell index
-    def _cell_coords(self, points):
+    def _cell_coords(self, points: FloatArray) -> IntArray:
+        """Integer cell coordinates (m, dim) of already-wrapped points.
+
+        The clamp handles one real floating-point edge: np.mod(x, L) can return
+        exactly L for a tiny negative x (L - eps rounds to L), which would index
+        cell nc; minimum() folds it into the last cell."""
         # points are already wrapped into [0, box), so truncation is the floor and
         # the only out-of-range value a rounding edge can produce is nc itself
         p = np.asarray(points, float).reshape(-1, self.dim)
         c = (p * self._inv_cw).astype(np.int64)
         return np.minimum(c, self.nc - 1)
 
-    def _cell_ids(self, points):
+    def _cell_ids(self, points: FloatArray) -> IntArray:
+        """Flat row-major cell id of each point (cell coords dotted with the
+        precomputed strides)."""
         return self._cell_coords(points) @ self._strides
 
     # ---------------------------------------------------------- slot lifetime
-    def _grow(self):
+    def _grow(self) -> None:
+        """Enlarge every slot-indexed array by ~1.5x and rebuild. The rebuild
+        is not optional: growth changes `capacity`, which is the pad index the
+        queries hand out, and rebuilding also re-derives the free list over
+        the new tail in one place instead of two."""
         new = max(self._capacity + 16, int(self._capacity * 1.5))
         ct = np.zeros((self.dim, new), dtype=np.float64)
-        ct[:, :self._capacity] = self._coordsT
+        ct[:, : self._capacity] = self._coordsT
         self._coordsT = ct
-        for name in ("active", "is_matrix", "_cell", "_in_csr", "_indexed",
-                     "_visible", "_pending_flag"):
+        for name in (
+            "active",
+            "is_matrix",
+            "_cell",
+            "_in_csr",
+            "_indexed",
+            "_visible",
+            "_pending_flag",
+        ):
             old = getattr(self, name)
             arr = np.zeros(new, dtype=old.dtype)
-            arr[:self._capacity] = old
+            arr[: self._capacity] = old
             setattr(self, name, arr)
         self._free.extend(range(new - 1, self._capacity - 1, -1))
         self._capacity = new
         self.rebuild()
 
-    def _alloc(self):
+    def _alloc(self) -> int:
+        """Pop one free slot id (growing if exhausted) and extend the
+        in-use high-water mark `_n_slots` that rebuild scans."""
         if not self._free:
             self._grow()
         s = self._free.pop()
@@ -203,7 +273,7 @@ class CellList:
             self._n_slots = s + 1
         return s
 
-    def bulk_insert(self, points, matrix=False):
+    def bulk_insert(self, points: FloatArray, matrix: bool = False) -> IntArray:
         """Insert many points at once (build path). Returns the slot ids.
 
         Vectorised on purpose: the per-window rebuild inserts every particle, and
@@ -237,7 +307,9 @@ class CellList:
         self.n_active += n
         return slots
 
-    def insert(self, point, matrix=False, _defer=False):
+    def insert(
+        self, point: FloatArray, matrix: bool = False, _defer: bool = False
+    ) -> int:
         """Insert one point; returns its slot id. May trigger a CSR rebuild, which
         reclaims tombstoned slots -- see the module note on slot lifetime."""
         s = self._alloc()
@@ -260,7 +332,7 @@ class CellList:
             self.rebuild()
         return s
 
-    def remove(self, slot):
+    def remove(self, slot: int) -> None:
         """Tombstone a slot: invisible to queries, slot id still owned by the
         caller until the next rebuild."""
         if self.is_matrix[slot]:
@@ -273,7 +345,12 @@ class CellList:
                 if self._indexed[slot]:
                     self._dirty += 1
 
-    def reactivate(self, slot):
+    def reactivate(self, slot: int) -> None:
+        """Undo a `remove`: the rejection path of a proposal. Restores the
+        slot's query visibility through whichever path (CSR row or pending
+        list) still describes it; a no-op on an already-active slot. Only
+        valid while the tombstone still owns the slot -- see the module
+        lifetime contract."""
         if not self.active[slot]:
             self.active[slot] = True
             self.n_active += 1
@@ -282,10 +359,19 @@ class CellList:
                 if self._indexed[slot]:
                     self._dirty -= 1
 
-    def move(self, slot, new_point):
+    def move(self, slot: int, new_point: FloatArray) -> int:
         """Set a slot's position (activating it if it was tombstoned). Stays in
         its CSR bucket when the cell does not change, which is the common case
-        for a translation, so no rebuild pressure accumulates."""
+        for a translation, so most moves add no rebuild pressure at all.
+
+        A cell-crossing move parks the slot on the pending list, exactly like an
+        insert, and the same threshold applies: without it, an exchange-free run
+        (pure translation MC, where `insert` never fires) would accumulate
+        pending slots without bound and every query would degrade back toward
+        the O(N) scan the cell list exists to avoid. The threshold check runs
+        LAST, after this slot is active again, so a rebuild here can never
+        reclaim the very slot being moved; it can reclaim other tombstones,
+        which is why the module-level lifetime contract covers `move` too."""
         p = np.mod(np.asarray(new_point, float), self.box)
         cid = int(self._cell_ids(p)[0])
         self._coordsT[:, slot] = p
@@ -307,11 +393,16 @@ class CellList:
                 self._visible[slot] = True
                 if self._indexed[slot]:
                     self._dirty -= 1
+        # Rebuild check AFTER the slot is active: a rebuild frees tombstones,
+        # and this slot must not be one of them when its coordinates were just
+        # written. See the docstring and the module lifetime contract.
+        if len(self._pending) > self._pending_threshold:
+            self.rebuild()
         return slot
 
-    def rebuild(self):
+    def rebuild(self) -> None:
         """Reindex every active slot into the CSR buckets; free the tombstones."""
-        live = np.nonzero(self.active[:self._n_slots])[0]
+        live = np.nonzero(self.active[: self._n_slots])[0]
         cells = self._cell[live]
         order = np.argsort(cells, kind="stable")
         self._sorted = live[order].astype(np.int64)
@@ -328,13 +419,13 @@ class CellList:
         self._pending_flag[:] = False
         self._pending = []
         self._pending_arr = None
-        dead = np.nonzero(~self.active[:self._n_slots])[0]
+        dead = np.nonzero(~self.active[: self._n_slots])[0]
         self._free = list(range(self._capacity - 1, self._n_slots - 1, -1))
         self._free.extend(dead[::-1].tolist())
         self.n_rebuilds += 1
 
     # ---------------------------------------------------------------- gathers
-    def _gather_cells(self, cells):
+    def _gather_cells(self, cells: IntArray) -> IntArray:
         """Active slots in `cells` (a UNIQUE int64 array of cell ids).
 
         Not-yet-indexed slots are appended wholesale rather than filtered by
@@ -346,7 +437,7 @@ class CellList:
         out = []
         if self._sorted.size:
             s = self._start[cells]
-            lens = self._count[cells]          # one gather, not start[c+1]-start[c]
+            lens = self._count[cells]  # one gather, not start[c+1]-start[c]
             tot = int(lens.sum())
             if tot:
                 base = s - (np.cumsum(lens) - lens)
@@ -365,17 +456,22 @@ class CellList:
             return np.empty(0, dtype=np.int64)
         return out[0] if len(out) == 1 else np.concatenate(out)
 
-    def _reach(self, margin):
+    def _reach(self, margin: float) -> IntArray:
+        """Per-axis cell reach `e`: how many neighbouring cells a query with
+        this margin must include on each side (at least 1, the classic
+        27-cell stencil, since cw >= cutoff >= any query radius)."""
         return np.maximum(1, np.ceil(float(margin) / self.cw).astype(np.int64))
 
-    def _offsets(self, e):
+    def _offsets(self, e: int) -> IntArray:
+        """Cached [-e..e] int64 offset vector (one allocation per distinct
+        reach, ever)."""
         o = self._offs_cache.get(e)
         if o is None:
             o = np.arange(-e, e + 1, dtype=np.int64)
             self._offs_cache[e] = o
         return o
 
-    def _ghost_lut(self, reach):
+    def _ghost_lut(self, reach: IntArray) -> tuple[IntArray, IntArray, IntArray]:
         """(pad_strides, block_delta, lut) for a uniform reach `e`.
 
         A point's cell block is the same fixed set of index offsets in a grid
@@ -394,10 +490,12 @@ class CellList:
             return got
         e = np.asarray(key, dtype=np.int64)
         pad = self.nc + 2 * e
-        grids = np.meshgrid(*[np.arange(int(p), dtype=np.int64) for p in pad],
-                            indexing="ij")
-        real = [np.mod(g - e[a], self.nc[a]) * self._strides[a]
-                for a, g in enumerate(grids)]
+        grids = np.meshgrid(
+            *[np.arange(int(p), dtype=np.int64) for p in pad], indexing="ij"
+        )
+        real = [
+            np.mod(g - e[a], self.nc[a]) * self._strides[a] for a, g in enumerate(grids)
+        ]
         lut = sum(real).ravel()
         pstr = np.ones(self.dim, dtype=np.int64)
         for a in range(self.dim - 2, -1, -1):
@@ -410,7 +508,7 @@ class CellList:
         self._lut_cache[key] = got
         return got
 
-    def gather_points(self, points, margin):
+    def gather_points(self, points: FloatArray, margin: float) -> IntArray:
         """Active slots in every cell within `margin` of any of `points`.
 
         A superset of the true neighbourhood, which is all the callers need: the
@@ -423,7 +521,9 @@ class CellList:
         blocks, _ = self._point_cells(points, margin)
         return np.sort(self._gather_cells(np.unique(blocks)))
 
-    def gather_aabb(self, lo, hi, margin=0.0, sort=True):
+    def gather_aabb(
+        self, lo: FloatArray, hi: FloatArray, margin: float = 0.0, sort: bool = True
+    ) -> IntArray:
         """Active slots in cells overlapping the periodic AABB [lo - margin,
         hi + margin]. `lo`/`hi` may lie outside the box.
 
@@ -445,11 +545,13 @@ class CellList:
             i1 = math.floor(float(hi[a]) * float(self._inv_cw[a]))
             if i1 - i0 + 1 >= nca:
                 col = self._axis_cache(a)
-            elif 0 <= i0 and i1 < nca:
+            elif i0 >= 0 and i1 < nca:
                 col = np.arange(i0, i1 + 1, dtype=np.int64) * self._strides[a]
             else:
-                col = np.mod(np.arange(i0, i1 + 1, dtype=np.int64),
-                             nca) * self._strides[a]
+                col = (
+                    np.mod(np.arange(i0, i1 + 1, dtype=np.int64), nca)
+                    * self._strides[a]
+                )
             cols.append(col)
         cells = cols[0][:, None] + cols[1][None, :]
         if self.dim == 3:
@@ -457,7 +559,9 @@ class CellList:
         cand = self._gather_cells(cells.ravel())
         return np.sort(cand) if sort else cand
 
-    def _axis_cache(self, a):
+    def _axis_cache(self, a: int) -> IntArray:
+        """Cached stride-multiplied index column for a FULL axis, used when a
+        span covers every cell on axis `a`."""
         key = ("axis", a)
         o = self._offs_cache.get(key)
         if o is None:
@@ -467,23 +571,25 @@ class CellList:
 
     # ---------------------------------------------------------------- queries
     @property
-    def capacity(self):
+    def capacity(self) -> int:
         """Slot-table size; also the pad index `query` returns."""
         return self._capacity
 
     @property
-    def coords(self):
+    def coords(self) -> FloatArray:
         """Slot-indexed (capacity, dim) view of the coordinate table."""
         return self._coordsT.T
 
     @property
-    def data(self):
+    def data(self) -> FloatArray:
         """Slot-indexed coordinate table. `idxs` from `query` index into it; the
         pad index is `data.shape[0]`, so the `min(idx, n - 1)` clamp the weighers
         apply lands on a real (if arbitrary) row, exactly as with a kd-tree."""
         return self._coordsT.T
 
-    def _point_cells(self, points, margin):
+    def _point_cells(
+        self, points: FloatArray, margin: float
+    ) -> tuple[IntArray, BoolArray]:
         """Cell ids of each point's own neighbourhood block: (m, O), no repeats.
 
         An axis whose block would wrap onto itself (2e + 1 >= nc, i.e. a box only
@@ -518,10 +624,11 @@ class CellList:
             for a in range(self.dim):
                 nca, e = int(self.nc[a]), int(reach[a])
                 if 2 * e + 1 >= nca:
-                    col = np.broadcast_to(np.arange(nca, dtype=np.int64),
-                                          (len(ci), nca))
+                    col = np.broadcast_to(
+                        np.arange(nca, dtype=np.int64), (len(ci), nca)
+                    )
                 else:
-                    col = np.mod(ci[:, a:a + 1] + self._offsets(e), nca)
+                    col = np.mod(ci[:, a : a + 1] + self._offsets(e), nca)
                 cols.append(col * self._strides[a])
             out = cols[0][:, :, None] + cols[1][:, None, :]
             if self.dim == 3:
@@ -532,7 +639,9 @@ class CellList:
         pi = (ci + reach) @ pstr
         return lut[pi[:, None] + delta[None, :]], need_image
 
-    def _neighbor_pairs(self, points, margin):
+    def _neighbor_pairs(
+        self, points: FloatArray, margin: float
+    ) -> tuple[IntArray, IntArray, BoolArray | None]:
         """(row, slot) for every (point, candidate-in-its-cell-block) pair.
 
         This is the shape that matters. Gathering the UNION of the points' cell
@@ -543,13 +652,13 @@ class CellList:
         should be and there is still no Python loop over points or cells.
         """
         m = len(points)
-        blocks, need_image = self._point_cells(points, margin)   # (m, O)
+        blocks, need_image = self._point_cells(points, margin)  # (m, O)
         rows_out, slots_out = [], []
 
         if self._sorted.size:
             flat = blocks.ravel()
             s = self._start[flat]
-            lens = self._count[flat]           # one gather, not start[c+1]-start[c]
+            lens = self._count[flat]  # one gather, not start[c+1]-start[c]
             tot = int(lens.sum())
             if tot:
                 # one repeat, not three: fold the segment start and the running
@@ -558,8 +667,7 @@ class CellList:
                 gidx = np.repeat(base, lens)
                 gidx += np.arange(tot)
                 slots = self._sorted[gidx]
-                rows = np.repeat(np.arange(m),
-                                 lens.reshape(m, -1).sum(axis=1))
+                rows = np.repeat(np.arange(m), lens.reshape(m, -1).sum(axis=1))
                 if self._dirty:
                     keep = self._visible[slots]
                     rows, slots = rows[keep], slots[keep]
@@ -581,8 +689,11 @@ class CellList:
                 need_image = np.ones(self.dim, dtype=bool)
 
         if not rows_out:
-            return (np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64),
-                    need_image)
+            return (
+                np.empty(0, dtype=np.int64),
+                np.empty(0, dtype=np.int64),
+                need_image,
+            )
         if len(rows_out) == 1:
             return rows_out[0], slots_out[0], need_image
         # two sources; `query` scatters on the assumption that rows ascend
@@ -591,13 +702,22 @@ class CellList:
         o = np.argsort(rows, kind="stable")
         return rows[o], slots[o], need_image
 
-    def _pending_array(self):
+    def _pending_array(self) -> IntArray:
+        """The pending list as a cached int64 array; the cache is invalidated
+        by every append so gathers never re-materialise an unchanged list."""
         if self._pending_arr is None:
-            self._pending_arr = np.fromiter(self._pending, dtype=np.int64,
-                                            count=len(self._pending))
+            self._pending_arr = np.fromiter(
+                self._pending, dtype=np.int64, count=len(self._pending)
+            )
         return self._pending_arr
 
-    def _pair_dists(self, points, rows, slots, need_image=None):
+    def _pair_dists(
+        self,
+        points: FloatArray,
+        rows: IntArray,
+        slots: IntArray,
+        need_image: BoolArray | None = None,
+    ) -> FloatArray:
         """Minimum-image distance of each (point, slot) pair.
 
         Three things here are load-bearing, all measured:
@@ -623,10 +743,17 @@ class CellList:
                 dd -= np.round(dd / L) * L
             dd *= dd
             acc = dd if acc is None else acc + dd
+        assert acc is not None  # dim >= 1, the loop always runs
         return np.sqrt(acc)
 
-    def query(self, points, upper_cutoff, inclusive=False, min_width=2,
-              min_only=False):
+    def query(
+        self,
+        points: FloatArray,
+        upper_cutoff: float,
+        inclusive: bool = False,
+        min_width: int = 2,
+        min_only: bool = False,
+    ) -> tuple[FloatArray, IntArray]:
         """Neighbours of each point within `upper_cutoff`.
 
         `min_only=True` returns a single column: the nearest neighbour's distance
@@ -645,7 +772,7 @@ class CellList:
         m = len(pts)
         pad = self._capacity
 
-        def empty(k):
+        def empty(k: int) -> tuple[FloatArray, IntArray]:
             k = max(1, int(k))
             return (np.full((m, k), np.inf), np.full((m, k), pad, dtype=np.int64))
 
@@ -676,8 +803,7 @@ class CellList:
             # `rows` is already ascending, so the scatter needs no sort: the
             # within-row column is just the running index. Sorting each short row
             # afterwards beats a lexsort over every pair.
-            col = np.arange(len(rows)) - np.repeat(np.cumsum(counts) - counts,
-                                                   counts)
+            col = np.arange(len(rows)) - np.repeat(np.cumsum(counts) - counts, counts)
             dists[rows, col] = d
             idxs[rows, col] = slots
             order = np.argsort(dists, axis=1, kind="stable")
@@ -685,7 +811,7 @@ class CellList:
             idxs = np.take_along_axis(idxs, order, axis=1)
         return dists, idxs
 
-    def count_within(self, point, radius):
+    def count_within(self, point: FloatArray, radius: float) -> int:
         """Number of active slots within `radius` of `point`, inclusive -- the
         `len(query_ball_point(p, r))` the hard-core overlap test asks for."""
         d = self.query_point(point, radius, sort=False)[0]
@@ -693,7 +819,13 @@ class CellList:
             return 0
         return int((d <= radius).sum())
 
-    def query_point(self, point, radius, sort=True, inclusive=True):
+    def query_point(
+        self,
+        point: FloatArray,
+        radius: float,
+        sort: bool = True,
+        inclusive: bool = True,
+    ) -> tuple[FloatArray, IntArray]:
         """(dists, slots) within `radius` of ONE point.
 
         A single point does not need the row bookkeeping `query` carries -- the
@@ -715,7 +847,9 @@ class CellList:
             d, slots = d[o], slots[o]
         return d, slots
 
-    def neighbours_within(self, point, radius, inclusive=True):
+    def neighbours_within(
+        self, point: FloatArray, radius: float, inclusive: bool = True
+    ) -> tuple[IntArray, FloatArray]:
         """(slots, dists) within `radius` of a single point, unsorted."""
         p = np.mod(np.asarray(point, float).reshape(1, self.dim), self.box)
         if self.n_active == 0:
@@ -727,12 +861,14 @@ class CellList:
         keep = (d <= radius) if inclusive else (d < radius)
         return slots[keep], d[keep]
 
-    def matrix_at(self, idxs):
+    def matrix_at(self, idxs: IntArray) -> BoolArray:
         """Boolean "is a frozen obstacle" for each returned neighbour index, with
         the pad index clamped. Pads always carry an infinite distance, so their
         value never changes a weight."""
         i = np.minimum(np.asarray(idxs), self._capacity - 1)
         return self.is_matrix[i]
 
-    def active_slots(self):
-        return np.nonzero(self.active[:self._n_slots])[0]
+    def active_slots(self) -> IntArray:
+        """Ascending slot ids of every active particle (fluid AND matrix);
+        diagnostics and tests use this, the hot path never does."""
+        return np.nonzero(self.active[: self._n_slots])[0]

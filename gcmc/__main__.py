@@ -9,11 +9,20 @@ the one a parallel job runs directly.
 """
 
 from __future__ import annotations
+
 import argparse
+import logging
+
 from . import runner
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
+    """Parse the CLI (currently the single `run` subcommand) and dispatch to
+    runner.run; prints the terminal step/N/directory line the sweep scripts
+    grep for."""
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
+    )
     p = argparse.ArgumentParser(prog="python -m gcmc")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -24,8 +33,11 @@ def main(argv=None):
     args = p.parse_args(argv)
     if args.cmd == "run":
         state, paths = runner.run(args.params, root=args.root)
+        # Compatibility contract: this exact "done: ..." line goes to stdout;
+        # cluster sweep scripts grep it. Keep it a print, not a log record.
         print(f"done: step={state.step} N={len(state.positions)} dir={paths.directory}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

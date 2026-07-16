@@ -17,7 +17,22 @@ the original's (None, None) short-circuit.
 """
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, TypeAlias
+
 import numpy as np
+import numpy.typing as npt
+
+from ._types import BoolArray, FloatArray, IntArray
+
+if TYPE_CHECKING:
+    from .neighbors import CellList
+
+# (trial coords, padded distances, padded neighbour ids, keep mask or None):
+# the raw neighbour result every weighting mode consumes. dists/idxs are
+# whatever the container returned (scipy gives float64/intp), so they are
+# typed as the arrays they are used as, not re-cast at runtime.
+RawNeighbors: TypeAlias = tuple[FloatArray, FloatArray, IntArray, "BoolArray | None"]
 
 # The single overlap convention for the whole package. Two centres overlap iff
 # their separation is at most `sigma - OVERLAP_TOL`; a pair at exactly sigma is a
@@ -27,19 +42,21 @@ import numpy as np
 OVERLAP_TOL = 1e-12
 
 
-def overlap_radius(sigma):
+def overlap_radius(sigma: float) -> float:
     """The largest separation that still counts as overlapping, i.e. the radius
     to hand a `query_ball_point` / `query_pairs` overlap search so that a pair at
     exactly sigma is excluded from the overlap set."""
     return sigma - OVERLAP_TOL
 
 
-def overlaps(d, sigma):
+def overlaps(d: FloatArray | float, sigma: float) -> BoolArray:
     """Boolean overlap indicator for separations `d` against diameter `sigma`."""
     return np.asarray(d, dtype=float) <= sigma - OVERLAP_TOL
 
 
-def query_saturating(kdtree, points, k, upper_cutoff):
+def query_saturating(
+    kdtree: Any, points: npt.ArrayLike, k: int, upper_cutoff: float
+) -> tuple[FloatArray, IntArray]:
     """kd-tree query for the k nearest neighbours within `upper_cutoff`, doubling
     k until the query is unsaturated (its farthest returned slot is infinite for
     every point) or k reaches the tree size. A fixed-k query that comes back full
@@ -65,11 +82,18 @@ def query_saturating(kdtree, points, k, upper_cutoff):
         k = min(2 * k, n)
 
 
-def wrap(coords, side):
+def wrap(coords: FloatArray, side: float | FloatArray) -> FloatArray:
+    """Map coordinates into the primary periodic image [0, side)."""
     return np.mod(coords, side)
 
 
-def _axis_in_cavity(col, c, radius, side):
+def _axis_in_cavity(col: FloatArray, c: float, radius: float, side: float) -> BoolArray:
+    """Per-axis membership in the periodic interval [c - radius, c + radius]
+    on a ring of circumference `side`: when the interval pokes past either
+    face it is tested as the union of its two in-box pieces, which is the
+    wrap-aware equivalent of |x - c| <= radius. Shared by the O(N) scan and
+    the cell-gather shortlist, so both use the SAME inclusion convention
+    (closed interval at both ends)."""
     lo = c - radius
     hi = c + radius
     if lo < 0:
@@ -79,7 +103,15 @@ def _axis_in_cavity(col, c, radius, side):
     return (col >= lo) & (col <= hi)
 
 
-def indices_in_cavity(coords, center, radius, side, two_dim):
+def indices_in_cavity(
+    coords: FloatArray, center: FloatArray, radius: float, side: float, two_dim: bool
+) -> IntArray:
+    """Row indices of all particles inside the axis-aligned CUBE cavity of
+    half-width `radius` around `center` (periodic, per-axis test). The cavity
+    of the depth-0 local exchange move is this cube, not a sphere -- the move's
+    acceptance algebra only needs the same body for removal membership and
+    trial generation, not isotropy. O(N) full scan; the cell-list shortlist
+    version is `indices_in_cavity_cl`."""
     mask = _axis_in_cavity(coords[:, 0], center[0], radius, side)
     mask &= _axis_in_cavity(coords[:, 1], center[1], radius, side)
     if not two_dim:
@@ -87,9 +119,17 @@ def indices_in_cavity(coords, center, radius, side, two_dim):
     return np.nonzero(mask)[0]
 
 
-def find_neighbors_pair(cl, trials, members, lower_cutoff, upper_cutoff,
-                        no_neigh, keep_mask=None, valid=None,
-                        dists_needed=True):
+def find_neighbors_pair(
+    cl: CellList | None,
+    trials: FloatArray,
+    members: FloatArray,
+    lower_cutoff: float,
+    upper_cutoff: float,
+    no_neigh: int,
+    keep_mask: BoolArray | None = None,
+    valid: BoolArray | None = None,
+    dists_needed: bool = True,
+) -> tuple[RawNeighbors | None, RawNeighbors | None]:
     """`find_neighbors` for the trial cloud and the removed members in ONE query.
 
     An exchange asks the same question twice: neighbours of the trials, then
@@ -113,10 +153,18 @@ def find_neighbors_pair(cl, trials, members, lower_cutoff, upper_cutoff,
     Returns (raw_trials, raw_members), each in `find_neighbors` form or None.
     """
     if cl is None or cl.n_active == 0:
-        return (find_neighbors(None, trials, lower_cutoff, upper_cutoff,
-                               no_neigh, keep_mask=keep_mask, valid=valid),
-                find_neighbors(None, members, lower_cutoff, upper_cutoff,
-                               no_neigh))
+        return (
+            find_neighbors(
+                None,
+                trials,
+                lower_cutoff,
+                upper_cutoff,
+                no_neigh,
+                keep_mask=keep_mask,
+                valid=valid,
+            ),
+            find_neighbors(None, members, lower_cutoff, upper_cutoff, no_neigh),
+        )
     nt = len(trials)
     both = np.vstack((trials, members)) if len(members) else trials
     distances, indices = cl.query(both, upper_cutoff, min_only=not dists_needed)
@@ -139,8 +187,16 @@ def find_neighbors_pair(cl, trials, members, lower_cutoff, upper_cutoff,
     return raw_t, (members[gm], distances[nt:][gm], indices[nt:][gm], None)
 
 
-def find_neighbors(kdtree, trial_mols, lower_cutoff, upper_cutoff, no_neigh,
-                   keep_mask=None, valid=None, saturation_requery=False):
+def find_neighbors(
+    kdtree: Any,
+    trial_mols: FloatArray,
+    lower_cutoff: float,
+    upper_cutoff: float,
+    no_neigh: int,
+    keep_mask: BoolArray | None = None,
+    valid: BoolArray | None = None,
+    saturation_requery: bool = False,
+) -> RawNeighbors | None:
     """Query each trial's neighbours within `upper_cutoff`, drop any trial that
     overlaps the system (a neighbour closer than `lower_cutoff`), and return the
     surviving raw arrays. Weighting is the caller's job.
@@ -165,7 +221,7 @@ def find_neighbors(kdtree, trial_mols, lower_cutoff, upper_cutoff, no_neigh,
     """
     if kdtree is not None and hasattr(kdtree, "n_active"):
         if kdtree.n_active == 0:
-            kdtree = None                     # empty system: the None path, exactly
+            kdtree = None  # empty system: the None path, exactly
         else:
             distances, indices = kdtree.query(trial_mols, upper_cutoff)
             good = np.all(distances >= lower_cutoff, axis=1)
@@ -190,14 +246,16 @@ def find_neighbors(kdtree, trial_mols, lower_cutoff, upper_cutoff, no_neigh,
         km = keep_mask[good] if keep_mask is not None else None
         return trial_mols[good], dists, idxs, km
     if saturation_requery:
-        distances, indices = query_saturating(kdtree, trial_mols, no_neigh,
-                                              upper_cutoff)
+        distances, indices = query_saturating(
+            kdtree, trial_mols, no_neigh, upper_cutoff
+        )
     else:
-        distances, indices = kdtree.query(trial_mols, k=no_neigh,
-                                          distance_upper_bound=upper_cutoff)
+        distances, indices = kdtree.query(
+            trial_mols, k=no_neigh, distance_upper_bound=upper_cutoff
+        )
     good = np.all(distances >= lower_cutoff, axis=1)
-    if valid is not None:                 # one-body pore wall: out-of-pore
-        good = good & np.asarray(valid, bool)   # trials are rejected like overlaps
+    if valid is not None:  # one-body pore wall: out-of-pore
+        good = good & np.asarray(valid, bool)  # trials are rejected like overlaps
     if not np.any(good):
         return None
 
@@ -208,14 +266,16 @@ def find_neighbors(kdtree, trial_mols, lower_cutoff, upper_cutoff, no_neigh,
     return coords, dists, idxs, km
 
 
-def indices_in_cavity_cl(cl, center, radius, side, two_dim):
+def indices_in_cavity_cl(
+    cl: CellList, center: FloatArray, radius: float, side: float, two_dim: bool
+) -> IntArray:
     """`indices_in_cavity` restricted to the cells the cube cavity touches.
 
     Returns SLOT IDS, sorted ascending. The gather is a superset; the per-axis
     wrap-aware test below is the same one the full scan uses, so the cavity is
     exactly the cavity it always was.
     """
-    center = np.asarray(center, float)[:cl.dim]
+    center = np.asarray(center, float)[: cl.dim]
     cand = cl.gather_aabb(center - radius, center + radius, sort=False)
     if cand.size and cl.n_matrix:
         cand = cand[~cl.is_matrix[cand]]

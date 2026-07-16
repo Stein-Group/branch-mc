@@ -1,0 +1,319 @@
+"""Shared setup for the neighbour-refactor harness (bench + reference trajectories).
+
+Nothing here is imported by the package; it exists so `bench_neighbors.py` and
+`gen_reference_traj.py` agree on the configurations they measure and freeze.
+
+Test-only code, so scipy is used freely.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import math
+import os
+import sys
+
+import numpy as np
+
+sys.path.insert(
+    0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
+
+from gcmc import MC_engine, sim_setup
+from gcmc.state import ChainState
+
+REF = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ref")
+
+# Frozen engines, for benchmarking against the current one in the same process.
+# The container's clock drifts between runs, so a speedup measured against a
+# stored number is not a measurement; measured back to back, it is.
+ENGINES = {"current": "gcmc", "stageA": "gcmcA", "baseline": "gcmc0"}
+
+
+def load_engine(name):
+    """(sim_setup, MC_engine, ChainState) of a frozen or current package."""
+    import importlib
+
+    pkg = ENGINES[name]
+    if pkg != "gcmc":
+        d = {"gcmcA": "engineA", "gcmc0": "engine0"}[pkg]
+        path = os.path.join(REF, d)
+        if path not in sys.path:
+            sys.path.insert(0, path)
+    importlib.import_module(pkg)
+    return (
+        importlib.import_module(pkg + ".sim_setup"),
+        importlib.import_module(pkg + ".MC_engine"),
+        importlib.import_module(pkg + ".state").ChainState,
+    )
+
+
+def lattice_seed(box, n, dim, rng, min_dist=1.0, jitter=0.12):
+    """`n` non-overlapping centres on a jittered simple-cubic lattice in [0, box).
+
+    The lattice pitch is chosen so the jittered spheres cannot touch: pitch is the
+    smallest that fits `n` sites, and the jitter is capped at (pitch - min_dist)/2
+    per axis so the worst case (two neighbours displaced toward each other on the
+    same axis) still clears `min_dist`.
+    """
+    per = int(math.ceil(n ** (1.0 / dim)))
+    pitch = box / per
+    if pitch <= min_dist:
+        raise ValueError(f"cannot fit {n} spheres of diameter {min_dist} in box {box}")
+    amp = min(jitter, 0.5 * (pitch - min_dist) / math.sqrt(dim)) * 0.999
+    grids = np.meshgrid(*([np.arange(per)] * dim), indexing="ij")
+    sites = np.stack([g.ravel() for g in grids], axis=1) * pitch + 0.5 * pitch
+    sel = rng.permutation(len(sites))[:n]
+    pos = sites[sel] + rng.uniform(-amp, amp, size=(n, dim))
+    return np.mod(pos, box)
+
+
+def cs_mu(rho, radius=0.5):
+    """Carnahan-Starling chemical potential (reduced, Lambda = 1) for hard spheres
+    at number density `rho`, used only to keep a benchmark near stationary N."""
+    eta = rho * (4.0 / 3.0) * math.pi * radius**3
+    mu_ex = (8.0 * eta - 9.0 * eta**2 + 3.0 * eta**3) / (1.0 - eta) ** 3
+    return math.log(rho) + mu_ex
+
+
+def build(params, seed, positions=None, matrix=None, engine=None):
+    """cfg / potential / weigher / state for a params dict."""
+    ss, eng, CS = (sim_setup, MC_engine, ChainState) if engine is None else engine
+    cfg = ss.from_params(params)
+    if matrix is not None:
+        cfg = dataclasses.replace(cfg, matrix_positions=np.asarray(matrix, float))
+    pot = cfg.build_potential()
+    wgh = eng.make_weigher(cfg, pot)
+    st = CS.fresh(cfg.dimension, seed=seed)
+    if positions is not None:
+        st.positions = np.asarray(positions, float)
+    return cfg, pot, wgh, st
+
+
+# ---------------------------------------------------------------------------
+# Reference modes. Each entry: (params, seed, n_seed, matrix_n).
+# Small boxes and short windows: these are correctness oracles, not benchmarks.
+# ---------------------------------------------------------------------------
+
+_HS = {"main": "hard_core"}
+_LJ = {"main": "lennard_jones", "T": 0.85}
+
+
+def _p(potential, sampler, ensemble, run=None):
+    return {
+        "potential": dict(potential),
+        "sampler": dict(sampler),
+        "ensemble": dict(ensemble),
+        "run": dict(run or {}),
+    }
+
+
+REF_MODES = {
+    "hs_branch": {
+        "params": _p(
+            _HS,
+            {"type": "branch", "depth": 1, "trials": 30, "trial_box_side": 3.0},
+            {"mu": 3.0, "dimension": 3, "box": 10.0},
+            {"sampling_window": 60},
+        ),
+        "seed": 11,
+        "n_seed": 300,
+    },
+    "hs_rosenbluth": {
+        "params": _p(
+            _HS,
+            {"type": "rosenbluth", "depth": 0, "trials": 30, "trial_box_side": 3.0},
+            {"mu": 3.0, "dimension": 3, "box": 10.0},
+            {"sampling_window": 60},
+        ),
+        "seed": 12,
+        "n_seed": 300,
+    },
+    "hs_channel": {
+        "params": _p(
+            _HS,
+            {
+                "type": "channel",
+                "depth": 1,
+                "trial_density": 3.0,
+                "channel_length": 6.0,
+                "channel_width": 1.5,
+            },
+            {"mu": 3.0, "dimension": 3, "box": 12.0},
+            {"sampling_window": 60},
+        ),
+        "seed": 13,
+        "n_seed": 500,
+    },
+    "hs_channel_full": {
+        "params": _p(
+            _HS,
+            {
+                "type": "channel",
+                "depth": 1,
+                "trial_density": 1.0,
+                "channel_length": "full",
+                "channel_width": 1.5,
+            },
+            {"mu": 3.0, "dimension": 3, "box": 12.0},
+            {"sampling_window": 40},
+        ),
+        "seed": 14,
+        "n_seed": 500,
+    },
+    "hs_full_repacking": {
+        "params": _p(
+            _HS,
+            {
+                "type": "channel",
+                "full_repacking": True,
+                "trial_density": 3.0,
+                "channel_length": 6.0,
+                "channel_width": 1.5,
+            },
+            {"mu": 3.0, "dimension": 3, "box": 12.0},
+            {"sampling_window": 40},
+        ),
+        "seed": 15,
+        "n_seed": 400,
+    },
+    "lj": {
+        "params": _p(
+            _LJ,
+            {"type": "rosenbluth", "depth": 0, "trials": 30, "trial_box_side": 3.0},
+            {"mu": -3.2, "dimension": 3, "box": 10.0},
+            {"sampling_window": 40},
+        ),
+        "seed": 16,
+        "n_seed": 400,
+    },
+    "ljbranch": {
+        "params": _p(
+            _LJ,
+            {"type": "branch", "depth": 1, "trials": 20, "trial_box_side": 3.0},
+            {"mu": -3.2, "dimension": 3, "box": 10.0},
+            {"sampling_window": 30},
+        ),
+        "seed": 17,
+        "n_seed": 400,
+    },
+    "lj_channel": {
+        "params": _p(
+            _LJ,
+            {
+                "type": "channel",
+                "depth": 1,
+                "trial_density": 1.2,
+                "channel_length": 5.0,
+                "channel_width": 1.2,
+            },
+            {"mu": -3.2, "dimension": 3, "box": 12.0},
+            {"sampling_window": 30},
+        ),
+        "seed": 18,
+        "n_seed": 700,
+    },
+    "lj_channel_full": {
+        "params": _p(
+            _LJ,
+            {
+                "type": "channel",
+                "depth": 1,
+                "trial_density": 0.6,
+                "channel_length": "full",
+                "channel_width": 1.2,
+            },
+            {"mu": -3.2, "dimension": 3, "box": 12.0},
+            {"sampling_window": 20},
+        ),
+        "seed": 19,
+        "n_seed": 700,
+    },
+    "hs_matrix": {
+        "params": _p(
+            _HS,
+            {"type": "branch", "depth": 1, "trials": 30, "trial_box_side": 3.0},
+            {"mu": 4.0, "dimension": 3, "box": 10.0},
+            {"sampling_window": 40},
+        ),
+        "seed": 20,
+        "n_seed": 150,
+        "matrix_n": 60,
+    },
+    "hs_pore": {
+        "params": _p(
+            _HS,
+            {"type": "branch", "depth": 1, "trials": 30, "trial_box_side": 3.0},
+            {
+                "mu": 4.0,
+                "dimension": 3,
+                "box": 12.0,
+                "type": "confined",
+                "pore": {"geometry": "cylinder", "R": 3.0},
+            },
+            {"sampling_window": 40},
+        ),
+        "seed": 21,
+        "n_seed": 0,
+    },
+    "hs_empty": {
+        "params": _p(
+            _HS,
+            {"type": "branch", "depth": 1, "trials": 30, "trial_box_side": 3.0},
+            {"mu": 3.0, "dimension": 3, "box": 8.0},
+            {"sampling_window": 60},
+        ),
+        "seed": 22,
+        "n_seed": 0,
+    },
+    "hd2d": {
+        "params": _p(
+            _HS,
+            {"type": "rosenbluth", "depth": 0, "trials": 30, "trial_box_side": 3.0},
+            {"mu": 3.0, "dimension": 2, "box": 20.0},
+            {"sampling_window": 60},
+        ),
+        "seed": 23,
+        "n_seed": 200,
+    },
+    "metropolis": {
+        "params": _p(
+            _HS,
+            {"type": "metropolis"},
+            {"mu": 3.0, "dimension": 3, "box": 10.0},
+            {"sampling_window": 60},
+        ),
+        "seed": 24,
+        "n_seed": 300,
+    },
+}
+
+REF_WINDOWS = 3
+
+
+def make_mode(name, engine=None):
+    """(cfg, potential, weigher, state) for a reference mode, freshly seeded."""
+    spec = REF_MODES[name]
+    p = spec["params"]
+    dim = p["ensemble"]["dimension"]
+    box = p["ensemble"]["box"]
+    rng = np.random.default_rng(1000 + spec["seed"])
+
+    matrix = None
+    if spec.get("matrix_n"):
+        all_pts = lattice_seed(box, spec["n_seed"] + spec["matrix_n"], dim, rng)
+        matrix = all_pts[: spec["matrix_n"]]
+        pos = all_pts[spec["matrix_n"] :]
+    elif spec["n_seed"] == 0:
+        pos = np.empty((0, dim))
+    else:
+        pos = lattice_seed(box, spec["n_seed"], dim, rng)
+
+    if name == "hs_pore":
+        # confined: the seeder must place centres inside the cylinder
+        cfg0 = (sim_setup if engine is None else engine[0]).from_params(p)
+        pts = lattice_seed(box, 400, dim, rng)
+        r = np.hypot(pts[:, 0] - box / 2, pts[:, 1] - box / 2)
+        pos = pts[r <= cfg0.pore_R - cfg0.radius][:120]
+
+    return build(p, spec["seed"], positions=pos, matrix=matrix, engine=engine)

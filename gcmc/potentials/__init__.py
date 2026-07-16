@@ -1,4 +1,6 @@
-from .base import Potential, make_potential, available, register
-from . import hard_sphere, lennard_jones, aux  # noqa: F401  (registration)
+from __future__ import annotations
 
-__all__ = ["Potential", "make_potential", "available", "register"]
+from . import aux, hard_sphere, lennard_jones
+from .base import Potential, available, make_potential, register
+
+__all__ = ["Potential", "available", "make_potential", "register"]

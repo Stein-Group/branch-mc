@@ -16,10 +16,18 @@ method is a 2D-hard-disk hexatic technique; the engine raises on 3D reweight.
 """
 
 from __future__ import annotations
+
+from typing import Any
+
 import numpy as np
+import numpy.typing as npt
+
+from .._types import BoolArray, FloatArray, IntArray
 
 
-def calculate_psi_6_2d(deltas2d, finite_mask, gamma):
+def calculate_psi_6_2d(
+    deltas2d: FloatArray, finite_mask: BoolArray, gamma: float
+) -> tuple[FloatArray, FloatArray, FloatArray]:
     """6-fold bond-orientational phasor sums for each point. Returns
     (cos_sum, sin_sum, counts); the magnitude is formed later by psi6_magnitude.
     gamma is unused here, kept for signature parity with the original."""
@@ -32,7 +40,9 @@ def calculate_psi_6_2d(deltas2d, finite_mask, gamma):
     return cos_sum, sin_sum, counts
 
 
-def psi6_magnitude(cos_sum, sin_sum, counts):
+def psi6_magnitude(
+    cos_sum: FloatArray, sin_sum: FloatArray, counts: FloatArray
+) -> FloatArray:
     """|<exp(6 i theta)>| per molecule, with the original's liquid floor: a zero
     or undefined value (no neighbours) is set to 0.3, the psi6 of a random
     arrangement."""
@@ -44,19 +54,24 @@ def psi6_magnitude(cos_sum, sin_sum, counts):
     return psi6
 
 
-def _sph_harm(m, l, phi, theta):
+def _sph_harm(
+    m: int, l: int, phi: FloatArray, theta: FloatArray
+) -> npt.NDArray[np.complex128]:
     """Y_l^m, tolerant of the scipy rename (sph_harm -> sph_harm_y with swapped
     argument order)."""
     from scipy import special
+
     if hasattr(special, "sph_harm"):
         return special.sph_harm(m, l, phi, theta)
     return special.sph_harm_y(l, m, theta, phi)
 
 
-def calculate_q6_3d(deltas3d, finite_mask, gamma):
+def calculate_q6_3d(
+    deltas3d: FloatArray, finite_mask: BoolArray, gamma: float
+) -> FloatArray:
     """Local Steinhardt Q6 (dormant; the 3D reweight path is not wired)."""
     x, y, z = deltas3d[..., 0], deltas3d[..., 1], deltas3d[..., 2]
-    r = np.sqrt(x ** 2 + y ** 2 + z ** 2)
+    r = np.sqrt(x**2 + y**2 + z**2)
     theta = np.arccos(np.clip(z / np.where(r > 0, r, 1.0), -1.0, 1.0))
     phi = np.arctan2(y, x)
     N = deltas3d.shape[0]
@@ -69,27 +84,27 @@ def calculate_q6_3d(deltas3d, finite_mask, gamma):
         q6m[has, i] = s[has] / counts[has]
     Q6 = np.ones(N) * 0.3
     Q6[has] = np.sqrt(4 * np.pi / 13 * np.sum(np.abs(q6m) ** 2, axis=1)[has])
-    return Q6 ** gamma
+    return Q6**gamma
 
 
-def calculate_order_parameter(coords, dists, idxs, kdtree, side_of_box, gamma):
+def calculate_order_parameter(
+    coords: FloatArray,
+    dists: FloatArray,
+    idxs: IntArray,
+    kdtree: Any,
+    side_of_box: float,
+    gamma: float,
+) -> tuple[FloatArray, FloatArray, FloatArray] | FloatArray:
     """Bridge: gather neighbour displacements under PBC and dispatch by
     dimensionality. 2D returns (cos_sum, sin_sum, counts); 3D returns Q6**gamma.
-
-    `kdtree` is None when the exclusion set is empty -- an empty box, or the last
-    particles being removed at once. Every trial then has zero neighbours, which
-    is the same state the `counts == 0` branches below already handle, so it is
-    given the same answer rather than dereferencing a missing index. Before this,
-    the reweight sampler could not start from an empty configuration at all.
     """
-    ndim = coords.shape[1]
-    if kdtree is None:
-        n = len(coords)
-        if ndim == 2:
-            return np.zeros(n), np.zeros(n), np.zeros(n, dtype=int)
-        return np.ones(n) * 0.3 ** gamma
     n_data = kdtree.data.shape[0]
-    box = np.array([side_of_box] * ndim) if np.isscalar(side_of_box) else np.asarray(side_of_box)
+    ndim = coords.shape[1]
+    box = (
+        np.array([side_of_box] * ndim)
+        if np.isscalar(side_of_box)
+        else np.asarray(side_of_box)
+    )
     safe = np.minimum(idxs, n_data - 1)
     neigh = kdtree.data[safe]
     finite_mask = np.isfinite(dists)

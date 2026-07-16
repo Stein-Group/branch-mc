@@ -18,14 +18,27 @@ References: Danisch, Blin, Sagot (WWW 2018); Chiba, Nishizeki (SIAM J. Comput. 1
 """
 
 from __future__ import annotations
+
+from collections.abc import Iterator, Sequence
+
 import numpy as np
 from scipy.spatial import KDTree
 
+from .._types import RNG as _RNG
+from .._types import BoolArray, FloatArray, IntArray
 from ..geometry import overlap_radius
 from ..potentials.lennard_jones import lj_pair_energy
 
 
-def _build_adj(centers, overlap_distance, box):
+def _build_adj(
+    centers: FloatArray, overlap_distance: float, box: FloatArray
+) -> tuple[BoolArray, FloatArray]:
+    """Compatibility ("non-conflict") adjacency of the trial cloud: adj[i, j]
+    is True iff trials i and j do NOT overlap under the periodic minimum image,
+    so a non-overlapping k-subset of trials is exactly a k-clique of this
+    graph. Built once per pool from a kd-tree pair query (this is pool-local,
+    O(pool size), and deliberately outside the engine's cell-list rule).
+    Returns (adj, wrapped centers)."""
     n = len(centers)
     shifted = np.mod(centers, box)
     tree = KDTree(shifted, boxsize=box)
@@ -38,12 +51,12 @@ def _build_adj(centers, overlap_distance, box):
     return adj, shifted
 
 
-def _degeneracy_rank(adj, n):
+def _degeneracy_rank(adj: BoolArray, n: int) -> IntArray:
     """Bucket-queue degeneracy ordering."""
     nbrs = [np.where(adj[i])[0].tolist() for i in range(n)]
     deg = [len(nb) for nb in nbrs]
     max_d = max(deg) if n > 0 else 0
-    buckets = [set() for _ in range(max_d + 1)]
+    buckets: list[set[int]] = [set() for _ in range(max_d + 1)]
     for v in range(n):
         buckets[deg[v]].add(v)
     rank = np.empty(n, dtype=np.int64)
@@ -66,14 +79,14 @@ def _degeneracy_rank(adj, n):
     return rank
 
 
-def _degree_rank(adj, n):
+def _degree_rank(adj: BoolArray, n: int) -> IntArray:
     """Simple degree sort. One vectorized call."""
     rank = np.empty(n, dtype=np.int64)
     rank[np.argsort(adj.sum(axis=1))] = np.arange(n)
     return rank
 
 
-def _count_sub(A, k):
+def _count_sub(A: BoolArray, k: int) -> int:
     """Count k-cliques in a small bool adjacency matrix."""
     d = A.shape[0]
     if d < k or k <= 0:
@@ -87,13 +100,13 @@ def _count_sub(A, k):
         return int(np.sum(Af * (Af @ Af))) // 6
     total = 0
     for i in range(d - k + 1):
-        fwd = np.where(A[i, i + 1:])[0] + (i + 1)
+        fwd = np.where(A[i, i + 1 :])[0] + (i + 1)
         if fwd.size >= k - 1:
             total += _count_sub(A[np.ix_(fwd, fwd)], k - 1)
     return total
 
 
-def _find_sub(A, k):
+def _find_sub(A: BoolArray, k: int) -> Sequence[int] | None:
     """Find one k-clique in a small adjacency. Returns index list or None."""
     d = A.shape[0]
     if d < k or k <= 0:
@@ -102,7 +115,7 @@ def _find_sub(A, k):
         return [0]
     if k == 2:
         for i in range(d - 1):
-            c = np.argmax(A[i, i + 1:])
+            c = int(np.argmax(A[i, i + 1 :]))
             if A[i, i + 1 + c]:
                 return [i, i + 1 + c]
         return None
@@ -110,20 +123,20 @@ def _find_sub(A, k):
         Af = A.astype(np.float64) if A.dtype != np.float64 else A
         M = Af * (Af @ Af)
         for i in range(d - 1):
-            row = M[i, i + 1:]
+            row = M[i, i + 1 :]
             j = int(np.argmax(row)) + i + 1
             if M[i, j] < 0.5:
                 continue
             cn = np.where(A[i, :j] & A[j, :j])[0]
             if len(cn) == 0:
-                cn = np.where(A[i, j + 1:] & A[j, j + 1:])[0]
+                cn = np.where(A[i, j + 1 :] & A[j, j + 1 :])[0]
                 if len(cn) > 0:
                     return [i, j, int(cn[0]) + j + 1]
             else:
                 return [int(cn[0]), i, j]
         return None
     for i in range(d - k + 1):
-        fwd = np.where(A[i, i + 1:])[0] + (i + 1)
+        fwd = np.where(A[i, i + 1 :])[0] + (i + 1)
         if fwd.size >= k - 1:
             inner = _find_sub(A[np.ix_(fwd, fwd)], k - 1)
             if inner is not None:
@@ -131,7 +144,13 @@ def _find_sub(A, k):
     return None
 
 
-def _kClist_count_and_find(adj, k):
+def _kClist_count_and_find(adj: BoolArray, k: int) -> tuple[int, Sequence[int] | None]:
+    """General k-clique count plus one witness clique, via vertex ordering:
+    each vertex v owns the cliques in which it is the lowest-ranked member,
+    counted inside its forward neighbourhood (degeneracy rank in general,
+    plain degree rank at k = 4 where it measured faster). CS note: this is
+    the standard ordered-enumeration trick that makes clique counting
+    O(n * per-neighbourhood work) instead of naive C(n, k)."""
     n = adj.shape[0]
     if n < k:
         return 0, None
@@ -154,7 +173,12 @@ def _kClist_count_and_find(adj, k):
     return total, sample
 
 
-def _count_from_adj(adj, k):
+def _count_from_adj(adj: BoolArray, k: int) -> tuple[int, Sequence[int] | None]:
+    """(number of k-cliques, one sample clique or None) with hand-rolled fast
+    paths: k <= 0 counts the empty clique, k = 1 counts vertices, k = 2 edges,
+    k = 3 triangles via row intersections, and everything above delegates to
+    `_kClist_count_and_find`. The count is the hard-sphere partition number
+    Z_k of the pool -- the quantity the acceptance ratio consumes."""
     n = adj.shape[0]
     if k <= 0:
         return 1, None
@@ -176,28 +200,35 @@ def _count_from_adj(adj, k):
         if count == 0:
             return 0, None
         for i in range(n - 1):
-            row = M[i, i + 1:]
+            row = M[i, i + 1 :]
             j = int(np.argmax(row)) + i + 1
             if M[i, j] < 0.5:
                 continue
             cn = np.where(adj[i, :j] & adj[j, :j])[0]
             if len(cn) > 0:
                 return count, tuple(sorted((int(cn[0]), i, j)))
-            cn = np.where(adj[i, j + 1:] & adj[j, j + 1:])[0]
+            cn = np.where(adj[i, j + 1 :] & adj[j, j + 1 :])[0]
             if len(cn) > 0:
                 return count, tuple(sorted((i, j, int(cn[0]) + j + 1)))
         return count, None
     return _kClist_count_and_find(adj, k)
 
 
-def _parse_box(box_lengths, dim):
+def _parse_box(box_lengths: float | FloatArray, dim: int) -> FloatArray:
+    """Broadcast a scalar box length to a (dim,) array; pass arrays through."""
     box = np.atleast_1d(np.asarray(box_lengths, dtype=np.float64))
     if box.size == 1:
         box = np.full(dim, float(box[0]))
     return box
 
 
-def count_and_sample(centers, k, overlap_distance, *, box_lengths):
+def count_and_sample(
+    centers: FloatArray,
+    k: int,
+    overlap_distance: float,
+    *,
+    box_lengths: float | FloatArray,
+) -> tuple[int, Sequence[int] | None]:
     """Count non-overlapping k-disk configurations and return one example.
     Adjacency means a pair is closer than `overlap_distance` (the exclusion
     floor: the hard-core diameter, or the 0.85 LJ edge).
@@ -213,7 +244,13 @@ def count_and_sample(centers, k, overlap_distance, *, box_lengths):
     return _count_from_adj(adj, k)
 
 
-def count_and_sample_branch(centers, k, overlap_distance, *, box_lengths):
+def count_and_sample_branch(
+    centers: FloatArray,
+    k: int,
+    overlap_distance: float,
+    *,
+    box_lengths: float | FloatArray,
+) -> tuple[int, int, Sequence[int] | None, Sequence[int] | None]:
     """Count k- and (k+1)-cliques over the same centres with one adjacency build.
     Returns (count_k, count_k1, sample_k, sample_k1)."""
     centers = np.asarray(centers, dtype=np.float64)
@@ -247,7 +284,7 @@ def count_and_sample_branch(centers, k, overlap_distance, *, box_lengths):
 # ---------------------------------------------------------------------------
 
 
-def _enumerate_cliques(adj, k):
+def _enumerate_cliques(adj: BoolArray, k: int) -> Iterator[tuple[int, ...]]:
     """Yield every k-clique as a sorted tuple of vertex indices. Uses the same
     degeneracy-ordered recursion as the counter, but emits members at the leaf
     instead of incrementing. Streaming: a generator, nothing stored."""
@@ -260,16 +297,18 @@ def _enumerate_cliques(adj, k):
         return
     rank = _degeneracy_rank(adj, n)
 
-    def recurse(cand, need, prefix):
+    def recurse(
+        cand: list[int], need: int, prefix: Sequence[int]
+    ) -> Iterator[tuple[int, ...]]:
         if need == 0:
             yield tuple(sorted(prefix))
             return
         if len(cand) < need:
             return
         for ii, v in enumerate(cand):
-            nxt = [u for u in cand[ii + 1:] if adj[v, u]]
+            nxt = [u for u in cand[ii + 1 :] if adj[v, u]]
             if len(nxt) >= need - 1:
-                yield from recurse(nxt, need - 1, prefix + [v])
+                yield from recurse(nxt, need - 1, [*prefix, v])
 
     for v in range(n):
         fwd = [u for u in range(n) if adj[v, u] and rank[u] > rank[v]]
@@ -277,7 +316,9 @@ def _enumerate_cliques(adj, k):
             yield from recurse(fwd, k - 1, [v])
 
 
-def _intra_lj_factor(members, box, rc, beta):
+def _intra_lj_factor(
+    members: FloatArray, box: FloatArray, rc: float, beta: float
+) -> float:
     """exp(-beta * LJ energy among `members`): pairs within rc, minimum image.
     Returns 1.0 for fewer than two members (no pairs), so depth-0 weights are
     exactly the carried single-particle weight with nothing added."""
@@ -287,7 +328,7 @@ def _intra_lj_factor(members, box, rc, beta):
     ii, jj = np.triu_indices(m, k=1)
     dvec = members[ii] - members[jj]
     dvec -= np.round(dvec / box) * box
-    r = np.sqrt((dvec ** 2).sum(axis=1))
+    r = np.sqrt((dvec**2).sum(axis=1))
     r = r[(r < rc) & (r > 0)]
     if r.size == 0:
         return 1.0
@@ -295,8 +336,17 @@ def _intra_lj_factor(members, box, rc, beta):
     return float(np.exp(-beta * u))
 
 
-def ljbranch_weight_sum(centers, member_weights, k, lower, box, rc, beta,
-                        *, rng=None):
+def ljbranch_weight_sum(
+    centers: FloatArray,
+    member_weights: FloatArray,
+    k: int,
+    lower: float,
+    box: float | FloatArray,
+    rc: float,
+    beta: float,
+    *,
+    rng: _RNG | None = None,
+) -> tuple[float, int, FloatArray | None]:
     """Sum the Boltzmann weights of every non-overlapping k-clique.
 
     Adjacency is non-overlap at `lower` (the same graph the hard-core counter

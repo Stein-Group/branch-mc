@@ -14,12 +14,31 @@ generator's draw.
 """
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
+
+from .._types import FloatArray
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
+    from ..trials import TrialSet
+
 from ..trials import TrialSet
 
 
-def select_forward(pool, n_atoms, weigher, *, rand, side, r_squared,
-                   gamma_schedule):
+def select_forward(
+    pool: TrialSet,
+    n_atoms: int,
+    weigher: Any,
+    *,
+    rand: Callable[[], float],
+    side: float,
+    r_squared: float,
+    gamma_schedule: Mapping[int, float],
+) -> tuple[TrialSet, FloatArray] | tuple[None, None]:
     """Returns (chosen TrialSet, sum_weight array) or (None, None) if the pool
     is exhausted before n_atoms are chosen."""
     assert len(pool) > 0, "no non-overlapping trial molecules"
@@ -60,7 +79,7 @@ def select_forward(pool, n_atoms, weigher, *, rand, side, r_squared,
 
         delta = pool.coords - coord
         delta -= side * np.round(delta / side)
-        sq = np.sum(delta ** 2, axis=1)
+        sq = np.sum(delta**2, axis=1)
 
         mask = sq >= r_squared
         pool = pool.mask(mask)
@@ -69,13 +88,26 @@ def select_forward(pool, n_atoms, weigher, *, rand, side, r_squared,
 
         weigher.recompute(pool, coord, sq[mask], gamma)
 
-    chosen = TrialSet(np.array(c_coords), np.array(c_ew),
-                      np.array(c_cos), np.array(c_sin), np.array(c_ct))
+    chosen = TrialSet(
+        np.array(c_coords),
+        np.array(c_ew),
+        np.array(c_cos),
+        np.array(c_sin),
+        np.array(c_ct),
+    )
     return chosen, sum_arr
 
 
-def select_reverse(trial_set, mol_in_cav, n_atoms, weigher, *, side,
-                   r_squared, gamma_schedule):
+def select_reverse(
+    trial_set: TrialSet | None,
+    mol_in_cav: TrialSet,
+    n_atoms: int,
+    weigher: Any,
+    *,
+    side: float,
+    r_squared: float,
+    gamma_schedule: Mapping[int, float],
+) -> tuple[FloatArray, FloatArray]:
     """Reverse (deletion-direction) weight, reproducing the original
     `rosenbluth_weight_current`.
 
@@ -107,7 +139,7 @@ def select_reverse(trial_set, mol_in_cav, n_atoms, weigher, *, side,
             sum_arr[i] += weigher.trial_sum(trial_set)
             diff = trial_set.coords - chosen
             diff -= side * np.round(diff / side)
-            dist_sq = np.sum(diff ** 2, axis=1)
+            dist_sq = np.sum(diff**2, axis=1)
             mask_curr = dist_sq >= r_squared
             trial_set = trial_set.mask(mask_curr)
 
@@ -117,3 +149,5 @@ def select_reverse(trial_set, mol_in_cav, n_atoms, weigher, *, side,
         if len(trial_set) != 0:
             weigher.recompute_trial(trial_set, chosen, dist_sq[mask_curr], gamma)
         weigher.recompute_cav(mol_in_cav, i, chosen, gamma, side)
+
+    raise AssertionError("unreachable: the loop returns at i == n_atoms - 1")
