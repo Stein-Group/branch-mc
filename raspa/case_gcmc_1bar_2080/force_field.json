@@ -1,0 +1,124 @@
+{
+  "PseudoAtoms": [
+    {
+      "name": "Xe",
+      "framework": false,
+      "print_to_output": true,
+      "element": "Xe",
+      "print_as": "Xe",
+      "mass": 131.293,
+      "charge": 0.0,
+      "source": "Kancharlapalli 2019, Table S1. The paper attributes Xe to Hirschfelder & Curtiss, Molecular Theory of Gases and Liquids (Wiley 1965), their ref 79."
+    },
+    {
+      "name": "Kr",
+      "framework": false,
+      "print_to_output": true,
+      "element": "Kr",
+      "print_as": "Kr",
+      "mass": 83.798,
+      "charge": 0.0,
+      "source": "Kancharlapalli 2019, Table S1. The paper attributes Kr to Talu & Myers, Colloids Surf. A 2001, 187-188, 83-93, their ref 78."
+    },
+    {
+      "name": "In",
+      "framework": true,
+      "print_to_output": true,
+      "element": "In",
+      "print_as": "In",
+      "mass": 114.818,
+      "charge": 0.0,
+      "source": "Kancharlapalli 2019, Table S1 (UFF, Rappe 1992)."
+    },
+    {
+      "name": "C",
+      "framework": true,
+      "print_to_output": true,
+      "element": "C",
+      "print_as": "C",
+      "mass": 12.0107,
+      "charge": 0.0,
+      "source": "Kancharlapalli 2019, Table S1 (DREIDING C_, Mayo 1990; R0 = 3.8983 A, D0 = 0.0951 kcal/mol)."
+    },
+    {
+      "name": "O",
+      "framework": true,
+      "print_to_output": true,
+      "element": "O",
+      "print_as": "O",
+      "mass": 15.9994,
+      "charge": 0.0,
+      "source": "Kancharlapalli 2019, Table S1 (DREIDING O_, Mayo 1990; R0 = 3.4046 A, D0 = 0.0957 kcal/mol)."
+    },
+    {
+      "name": "H",
+      "framework": true,
+      "print_to_output": true,
+      "element": "H",
+      "print_as": "H",
+      "mass": 1.00794,
+      "charge": 0.0,
+      "source": "Kancharlapalli 2019, Table S1 (DREIDING H_, Mayo 1990; R0 = 3.1950 A, D0 = 0.0152 kcal/mol)."
+    }
+  ],
+  "SelfInteractions": [
+    {
+      "name": "Xe",
+      "type": "lennard-jones",
+      "parameters": [
+        221.0,
+        4.1
+      ],
+      "source": "Kancharlapalli 2019, Table S1. The paper attributes Xe to Hirschfelder & Curtiss, Molecular Theory of Gases and Liquids (Wiley 1965), their ref 79."
+    },
+    {
+      "name": "Kr",
+      "type": "lennard-jones",
+      "parameters": [
+        166.4,
+        3.636
+      ],
+      "source": "Kancharlapalli 2019, Table S1. The paper attributes Kr to Talu & Myers, Colloids Surf. A 2001, 187-188, 83-93, their ref 78."
+    },
+    {
+      "name": "In",
+      "type": "lennard-jones",
+      "parameters": [
+        301.428,
+        3.97608
+      ],
+      "source": "Kancharlapalli 2019, Table S1 (UFF, Rappe 1992)."
+    },
+    {
+      "name": "C",
+      "type": "lennard-jones",
+      "parameters": [
+        47.8562,
+        3.47299
+      ],
+      "source": "Kancharlapalli 2019, Table S1 (DREIDING C_, Mayo 1990; R0 = 3.8983 A, D0 = 0.0951 kcal/mol)."
+    },
+    {
+      "name": "O",
+      "type": "lennard-jones",
+      "parameters": [
+        48.1581,
+        3.03315
+      ],
+      "source": "Kancharlapalli 2019, Table S1 (DREIDING O_, Mayo 1990; R0 = 3.4046 A, D0 = 0.0957 kcal/mol)."
+    },
+    {
+      "name": "H",
+      "type": "lennard-jones",
+      "parameters": [
+        7.64893,
+        2.84642
+      ],
+      "source": "Kancharlapalli 2019, Table S1 (DREIDING H_, Mayo 1990; R0 = 3.1950 A, D0 = 0.0152 kcal/mol)."
+    }
+  ],
+  "MixingRule": "Lorentz-Berthelot",
+  "CutOff": 12.0,
+  "TruncationMethod": "truncated",
+  "TailCorrections": false
+}

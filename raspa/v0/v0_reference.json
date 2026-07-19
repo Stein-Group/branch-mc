@@ -1,0 +1,232 @@
+{
+  "rung": "V0",
+  "forcefield": {
+    "name": "FF-A",
+    "path": "ff/forcefield_A.yaml",
+    "sha256": "beefebbfbd67b0dcf282fe6f3f93b7d2b765d1a26aba5b67975a540d9523443a",
+    "status": {
+      "guests": "confirmed",
+      "framework": "confirmed"
+    }
+  },
+  "framework": "/tmp/mfm300in.extxyz",
+  "cell_angstrom": [
+    31.3222007752,
+    31.3222007752,
+    24.9939994812
+  ],
+  "core_floor_c": 0.7155,
+  "conventions": {
+    "cutoff_angstrom": 12.0,
+    "shifted": false,
+    "tail_correction": false,
+    "host_host": "excluded (rigid framework; RASPA reports it separately and never varies it)",
+    "units": "kelvin (U/kB); kJ/mol also given for reading against the paper"
+  },
+  "configurations": [
+    {
+      "name": "1_xe_deepest",
+      "n_guests": 1,
+      "types": [
+        "Xe"
+      ],
+      "positions": [
+        [
+          19.6,
+          17.2,
+          17.2
+        ]
+      ],
+      "ref_energy_kelvin": {
+        "guest_guest": 0.0,
+        "guest_framework": -3137.110718254725,
+        "total": -3137.110718254725
+      },
+      "ref_energy_kj_per_mol": {
+        "guest_guest": 0.0,
+        "guest_framework": -26.08338979593677,
+        "total": -26.08338979593677
+      }
+    },
+    {
+      "name": "2_kr_deepest",
+      "n_guests": 1,
+      "types": [
+        "Kr"
+      ],
+      "positions": [
+        [
+          19.6,
+          17.2,
+          17.2
+        ]
+      ],
+      "ref_energy_kelvin": {
+        "guest_guest": 0.0,
+        "guest_framework": -2052.356626754981,
+        "total": -2052.356626754981
+      },
+      "ref_energy_kj_per_mol": {
+        "guest_guest": 0.0,
+        "guest_framework": -17.064242452273373,
+        "total": -17.064242452273373
+      }
+    },
+    {
+      "name": "3_two_xe_two_channels",
+      "n_guests": 2,
+      "types": [
+        "Xe",
+        "Xe"
+      ],
+      "positions": [
+        [
+          19.6,
+          17.2,
+          17.2
+        ],
+        [
+          19.6,
+          1.6,
+          17.2
+        ]
+      ],
+      "ref_energy_kelvin": {
+        "guest_guest": 0.0,
+        "guest_framework": -6231.178383876469,
+        "total": -6231.178383876469
+      },
+      "ref_energy_kj_per_mol": {
+        "guest_guest": 0.0,
+        "guest_framework": -51.80889973978542,
+        "total": -51.80889973978542
+      }
+    },
+    {
+      "name": "4_two_xe_one_channel",
+      "n_guests": 2,
+      "types": [
+        "Xe",
+        "Xe"
+      ],
+      "positions": [
+        [
+          19.6,
+          17.2,
+          17.2
+        ],
+        [
+          19.6,
+          17.2,
+          21.799999999999997
+        ]
+      ],
+      "ref_energy_kelvin": {
+        "guest_guest": -220.99834694887375,
+        "guest_framework": -3520.8547452960634,
+        "total": -3741.853092244937
+      },
+      "ref_energy_kj_per_mol": {
+        "guest_guest": -1.837482494380071,
+        "guest_framework": -29.274015163711567,
+        "total": -31.11149765809164
+      }
+    },
+    {
+      "name": "5_xe_kr_one_channel",
+      "n_guests": 2,
+      "types": [
+        "Xe",
+        "Kr"
+      ],
+      "positions": [
+        [
+          19.6,
+          17.2,
+          17.2
+        ],
+        [
+          19.6,
+          17.2,
+          21.6
+        ]
+      ],
+      "ref_energy_kelvin": {
+        "guest_guest": -190.63148767670725,
+        "guest_framework": -4522.705313585292,
+        "total": -4713.336801261999
+      },
+      "ref_energy_kj_per_mol": {
+        "guest_guest": -1.5849983781309225,
+        "guest_framework": -37.60386426272794,
+        "total": -39.188862640858865
+      }
+    },
+    {
+      "name": "6_eight_xe_one_per_channel",
+      "n_guests": 8,
+      "types": [
+        "Xe",
+        "Xe",
+        "Xe",
+        "Xe",
+        "Xe",
+        "Xe",
+        "Xe",
+        "Xe"
+      ],
+      "positions": [
+        [
+          19.6,
+          17.2,
+          17.2
+        ],
+        [
+          19.6,
+          1.6,
+          17.2
+        ],
+        [
+          1.6,
+          19.6,
+          20.400000000000002
+        ],
+        [
+          4.0,
+          1.6,
+          17.2
+        ],
+        [
+          11.600000000000001,
+          14.0,
+          17.6
+        ],
+        [
+          14.0,
+          27.6,
+          20.8
+        ],
+        [
+          27.6,
+          14.0,
+          16.8
+        ],
+        [
+          27.6,
+          25.200000000000003,
+          24.0
+        ]
+      ],
+      "ref_energy_kelvin": {
+        "guest_guest": -55.648718872504425,
+        "guest_framework": -24537.558665246965,
+        "total": -24593.20738411947
+      },
+      "ref_energy_kj_per_mol": {
+        "guest_guest": -0.46268919281355675,
+        "guest_framework": -204.01661426293802,
+        "total": -204.47930345575156
+      }
+    }
+  ]
+}

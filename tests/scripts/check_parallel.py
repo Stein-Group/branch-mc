@@ -8,8 +8,11 @@ single-box serial run must converge to the same eta despite different box sizes,
 different cell counts and different starting densities. A bug in acceptance,
 cell-local wrapping or the cell-area volume term would shift that plateau.
 
-Also checks that the engine runs and stays populated, and that 3D parallel
-raises, matching the original.
+Also checks that the engine runs and stays populated, that 3D parallel runs for
+every supported sampler (the original's "parallel is 2D only" guard was dropped
+by decision: cell_unify_plan.md U0, GO 2026-07-14; 3D physics is validated on
+the cluster in U3), and that the mixes which stay serial-only are still
+rejected at config time.
 """
 
 import os
@@ -111,48 +114,113 @@ print(
 assert diff < 0.02, f"equilibrium densities disagree by {diff:.4f}"
 print("  ok  parallel and serial reach the same equilibrium density")
 
-# 3. 3D parallel is rejected up front by the schema (parallel is 2D only)
-p3 = {
-    "potential": {"main": "hard_core"},
-    "ensemble": {"mu": 1.0, "dimension": 3, "box": 50.0},
-    "sampler": {"type": "rosenbluth", "trials": 20, "trial_box_side": 3.0},
-    "run": {
-        "kind": "parallel",
-        "n_workers": 1,
-        "sampling_window": 100,
-        "target_cycles": 1e9,
-    },
-}
-try:
-    from_params(p3)
-    raise SystemExit("FAIL: 3D parallel did not raise")
-except ValueError as e:
-    assert "2D only" in str(e), str(e)
-    print("  ok  3D parallel rejected at config:", e)
 
-# 4. a non-rosenbluth sampler under parallel is rejected by the engine guard
-p4 = {
-    "potential": {"main": "hard_core"},
-    "ensemble": {"mu": MU, "dimension": 2, "box": 40.0},
-    "sampler": {"type": "branch", "trials": K, "trial_box_side": 2 * CAVR},
-    "run": {
-        "kind": "parallel",
-        "n_workers": 1,
-        "sampling_window": 50,
-        "target_cycles": 1e9,
-    },
-}
-cfg4 = from_params(p4)
-st4 = _state(40, 38)
-try:
-    parallel.advance_parallel(
-        st4,
-        cfg4,
-        cfg4.build_potential(),
-        parallel.make_weigher(cfg4, cfg4.build_potential()),
+# 3. 3D parallel is supported (2D-only constraint dropped: cell_unify_plan.md
+#    U0, Dipesh GO 2026-07-14). metropolis, rosenbluth, and branch all build
+#    in 3D and run a live window over several cells without depopulating.
+def _run3d(sampler_block, n_win=4):
+    p = {
+        "potential": {"main": "hard_core"},
+        "ensemble": {"mu": 2.0, "dimension": 3, "box": 24.0},
+        "sampler": sampler_block,
+        "run": {
+            "kind": "parallel",
+            "n_workers": 1,
+            "sampling_window": 60,
+            "target_cycles": 1e9,
+            "seed": 1,
+            "cell_length": 6.0,
+            "buffer": 2.0,
+        },
+    }
+    cfg = from_params(p)
+    pot = cfg.build_potential()
+    w = parallel.make_weigher(cfg, pot)
+    rng = np.random.default_rng(0)
+    st = ChainState(
+        positions=rng.uniform(1.0, 23.0, size=(120, 3)),
+        step=0,
+        rng=np.random.default_rng(7),
+        counters=zero_counters(),
     )
-    raise SystemExit("FAIL: parallel+branch did not raise")
-except NotImplementedError as e:
-    print("  ok  parallel+branch raises NotImplementedError:", str(e)[:60])
+    last = None
+    for _ in range(n_win):
+        last = parallel.advance_parallel(st, cfg, pot, w)
+    return last
+
+
+for name, blk in [
+    ("metropolis", {"type": "metropolis"}),
+    (
+        "rosenbluth",
+        {"type": "rosenbluth", "trials": K, "trial_box_side": 2 * CAVR, "depth": 0},
+    ),
+    ("branch", {"type": "branch", "trials": K, "trial_box_side": 2 * CAVR, "depth": 1}),
+]:
+    last = _run3d(blk)
+    assert last["n_cells"] > 1, f"{name}: box did not grid into several cells"
+    assert last["N"] > 0, f"{name}: 3D parallel depopulated"
+    print(f"  ok  3D parallel {name} runs over {last['n_cells']} cells, N={last['N']}")
+
+
+# 4. mixes that stay serial-only must still be rejected at config time.
+def _rejected(label, p):
+    try:
+        from_params(p)
+    except ValueError as e:
+        print(f"  ok  {label} rejected:", str(e)[:55])
+        return
+    raise SystemExit(f"FAIL: {label} was accepted under parallel")
+
+
+_rejected(
+    "reweight+parallel",
+    {
+        "potential": {"main": "hard_core"},
+        "ensemble": {"mu": MU, "dimension": 2, "box": 40.0},
+        "sampler": {"type": "reweight"},
+        "run": {"kind": "parallel", "n_workers": 1, "sampling_window": 50},
+    },
+)
+_rejected(
+    "channel+parallel",
+    {
+        "potential": {"main": "hard_core"},
+        "ensemble": {"mu": 2.0, "dimension": 3, "box": 24.0},
+        "sampler": {
+            "type": "channel",
+            "trial_density": 2.0,
+            "depth": 1,
+            "channel_length": 6.0,
+            "channel_width": 1.5,
+        },
+        "run": {
+            "kind": "parallel",
+            "n_workers": 1,
+            "sampling_window": 50,
+            "buffer": 2.0,
+        },
+    },
+)
+_rejected(
+    "confined+parallel",
+    {
+        "potential": {"main": "hard_core"},
+        "ensemble": {
+            "type": "confined",
+            "mu": MU,
+            "dimension": 3,
+            "box": 24.0,
+            "pore": {"geometry": "slit", "H": 6.0},
+        },
+        "sampler": {"type": "metropolis"},
+        "run": {
+            "kind": "parallel",
+            "n_workers": 1,
+            "sampling_window": 50,
+            "buffer": 2.0,
+        },
+    },
+)
 
 print("\nALL PARALLEL TESTS PASSED")

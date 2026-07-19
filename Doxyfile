@@ -1,0 +1,60 @@
+# Doxygen configuration for branch_mc.
+#
+# Build the HTML reference with:
+#     doxygen Doxyfile
+# Output lands in docs/html/index.html.
+#
+# The sources are documented through ordinary Python docstrings.
+# PYTHON_DOCSTRING = YES (the doxygen >= 1.9 default) renders each docstring
+# verbatim, so the docstrings stay plain readable Python text with no doxygen
+# markup inside them; EXTRACT_ALL guarantees every module, class, and function
+# appears even where a signature is self-explanatory.
+
+# ---------------------------------------------------------------- project
+PROJECT_NAME           = "branch_mc"
+PROJECT_BRIEF          = "Grand-canonical Monte Carlo with multi-trial exchange moves and the transfer-matrix channel sweep"
+PROJECT_NUMBER         =
+OUTPUT_DIRECTORY       = docs
+OUTPUT_LANGUAGE        = English
+
+# ---------------------------------------------------------------- input
+INPUT                  = gcmc
+FILE_PATTERNS          = *.py
+RECURSIVE              = YES
+# legacy reference scripts are kept in the tree for archaeology, not as API
+EXCLUDE_PATTERNS       = */__pycache__/* */orig/*
+
+# ---------------------------------------------------------------- extraction
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = YES
+EXTRACT_STATIC         = YES
+PYTHON_DOCSTRING       = YES
+OPTIMIZE_OUTPUT_JAVA   = YES
+JAVADOC_AUTOBRIEF      = NO
+QT_AUTOBRIEF           = NO
+MARKDOWN_SUPPORT       = YES
+HIDE_UNDOC_MEMBERS     = NO
+SORT_MEMBER_DOCS       = NO
+SHOW_INCLUDE_FILES     = NO
+
+# ---------------------------------------------------------------- output
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+GENERATE_LATEX         = NO
+GENERATE_MAN           = NO
+GENERATE_XML           = NO
+GENERATE_TREEVIEW      = YES
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+
+# ---------------------------------------------------------------- diagrams
+HAVE_DOT               = NO
+CLASS_GRAPH            = YES
+
+# ---------------------------------------------------------------- noise
+QUIET                  = YES
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_DOC_ERROR      = YES

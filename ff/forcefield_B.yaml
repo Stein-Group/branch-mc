@@ -1,0 +1,95 @@
+# FF-B: the generic screening set (D1, mof_raspa_plan.md). Plain UFF for every
+# framework atom, guests identical to FF-A. Used only for the force-field
+# sensitivity result (V1 plus one V2 point); no primary number rests on it.
+#
+# UFF: Rappe, Casewit, Colwell, Goddard, Skiff, J. Am. Chem. Soc. 1992, 114,
+# 10024-10035, Table 1 (x_i in angstrom, D_i in kcal/mol). Conversion is
+# sigma = x_i / 2^(1/6), epsilon/kB = D_i / kB.
+#
+# STATUS: framework `provisional`. In and Cu below match RASPA's own UFF
+# transcription exactly (forcefield/ExampleMOFsForceField), which is what makes
+# the conversion convention trustworthy; C, H, O, N are the community-standard
+# UFF numbers but are not independently cross-checked here, so they need a read
+# of Table 1 before the status flips. Guests carry FF-A's provisional status for
+# the same reason FF-A's do.
+#
+# Units: sigma in angstrom, epsilon as epsilon/kB in kelvin.
+
+schema: 1
+name: FF-B
+
+mixing: lorentz-berthelot
+
+interaction:
+  form: lennard-jones-12-6
+  rc: 12.0
+  shifted: false
+  tail_correction: false
+
+core_floor:
+  c: null
+  measured_at_T: null
+
+# Critical constants for the Peng-Robinson fugacity (G1). The anchor relates
+# chemical potential to pressure through PR (p. 27533) and plots against
+# pressure, so reproducing its state points means reproducing its fugacities.
+#
+# These are NOT in the anchor's SI: RASPA ships no Xe or Kr definition (checked
+# in the RASPA2 tree), so its authors supplied their own constants and did not
+# report them. The values below are the standard NIST/CRC criticals. The acentric
+# factor is the soft one -- noble gases sit near zero and published values differ
+# in the third decimal (RASPA's own argon.def just uses 0.0) -- so the sensitivity
+# of phi to w is measured rather than argued: see
+# test_fugacity_is_insensitive_to_the_acentric_factor and the ledger.
+eos:
+  form: peng-robinson
+  mixing: van-der-waals
+  binary_interaction_parameter: 0.0   # RASPA3 hard-codes kij = 0 (equation_of_states.cpp)
+  Xe:
+    critical_temperature: 289.733     # K
+    critical_pressure: 5842000.0      # Pa
+    acentric_factor: 0.002
+    source: NIST/CRC critical constants; not reported by the anchor, see note above.
+  Kr:
+    critical_temperature: 209.48      # K
+    critical_pressure: 5525000.0      # Pa
+    acentric_factor: -0.002
+    source: NIST/CRC critical constants; not reported by the anchor, see note above.
+
+guests:
+  status: confirmed
+  Xe:
+    sigma: 4.1
+    epsilon: 221.0
+    source: Kancharlapalli 2019, Table S1 (identical to FF-A; only the framework differs).
+  Kr:
+    sigma: 3.636
+    epsilon: 166.4
+    source: Kancharlapalli 2019, Table S1 (identical to FF-A; only the framework differs).
+
+framework:
+  status: provisional
+  In:
+    sigma: 3.97608
+    epsilon: 301.428
+    source: UFF x = 3.976 A, D = 0.599 kcal/mol. Matches RASPA's In_ transcription.
+  C:
+    sigma: 3.43085
+    epsilon: 52.8384
+    source: UFF x = 3.851 A, D = 0.105 kcal/mol. CONFIRM against Table 1.
+  H:
+    sigma: 2.57113
+    epsilon: 22.1418
+    source: UFF x = 2.886 A, D = 0.044 kcal/mol. CONFIRM against Table 1.
+  O:
+    sigma: 3.11815
+    epsilon: 30.1932
+    source: UFF x = 3.500 A, D = 0.060 kcal/mol. CONFIRM against Table 1.
+  N:
+    sigma: 3.26069
+    epsilon: 34.7221
+    source: UFF x = 3.660 A, D = 0.069 kcal/mol. CONFIRM against Table 1.
+  Cu:
+    sigma: 3.11369
+    epsilon: 2.5161
+    source: UFF x = 3.495 A, D = 0.005 kcal/mol. Matches RASPA's Cu_ transcription.

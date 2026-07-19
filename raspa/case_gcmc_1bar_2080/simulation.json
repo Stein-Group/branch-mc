@@ -1,0 +1,40 @@
+{
+  "SimulationType": "MonteCarlo",
+  "NumberOfCycles": 100000,
+  "NumberOfInitializationCycles": 10000,
+  "PrintEvery": 1000,
+  "Systems": [
+    {
+      "Type": "Framework",
+      "Name": "MFM-300-In",
+      "NumberOfUnitCells": [
+        2,
+        2,
+        3
+      ],
+      "ExternalTemperature": 298.0,
+      "ExternalPressure": 100000.0,
+      "ChargeMethod": "None"
+    }
+  ],
+  "Components": [
+    {
+      "Name": "Xe",
+      "MoleFraction": 0.2,
+      "FugacityCoefficient": 0.9944261042725265,
+      "TranslationProbability": 0.5,
+      "SwapProbability": 1.0,
+      "WidomProbability": 1.0,
+      "CreateNumberOfMolecules": 0
+    },
+    {
+      "Name": "Kr",
+      "MoleFraction": 0.8,
+      "FugacityCoefficient": 0.9974966131474546,
+      "TranslationProbability": 0.5,
+      "SwapProbability": 1.0,
+      "WidomProbability": 1.0,
+      "CreateNumberOfMolecules": 0
+    }
+  ]
+}

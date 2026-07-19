@@ -1,0 +1,16 @@
+{
+  "CriticalTemperature": 209.48,
+  "CriticalPressure": 5525000.0,
+  "AcentricFactor": -0.002,
+  "Type": "rigid",
+  "pseudoAtoms": [
+    [
+      "Kr",
+      [
+        0.0,
+        0.0,
+        0.0
+      ]
+    ]
+  ]
+}

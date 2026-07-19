@@ -1,0 +1,44 @@
+{
+  "generated_by": "scripts/mof/raspa_input.py",
+  "forcefield": {
+    "name": "FF-A",
+    "path": "ff/forcefield_A.yaml",
+    "sha256": "beefebbfbd67b0dcf282fe6f3f93b7d2b765d1a26aba5b67975a540d9523443a"
+  },
+  "status": {
+    "guests": "confirmed",
+    "framework": "confirmed"
+  },
+  "cif": "structures/MFM-300-In.cif",
+  "state_point": {
+    "T_kelvin": 298.0,
+    "pressure_pa": 100000.0,
+    "mol_fractions": {
+      "Xe": 0.2,
+      "Kr": 0.8
+    },
+    "fugacity_coefficient": {
+      "Xe": 0.9944261042725265,
+      "Kr": 0.9974966131474546
+    },
+    "fugacity_pa": {
+      "Xe": 19888.52208545053,
+      "Kr": 79799.72905179637
+    },
+    "compressibility": 0.9968769497865491,
+    "T_star": 1.3484162895927603,
+    "rc_star": 2.9268292682926833,
+    "z_star": {
+      "Xe": 0.00033316129025696745,
+      "Kr": 0.0013367599954801084
+    }
+  },
+  "conventions": {
+    "mixing": "Lorentz-Berthelot",
+    "cutoff_angstrom": 12.0,
+    "shifted": false,
+    "tail_correction": false,
+    "charges": "all zero, ChargeMethod None (exact for Xe/Kr in a rigid framework)",
+    "equation_of_state": "Peng-Robinson, van der Waals mixing, kij = 0 (RASPA3 convention)"
+  }
+}

@@ -35,12 +35,11 @@ _KNOWN_FAIL = {
         "expands ensemble.sweep and launch_sweep's core budget is now an int, "
         "not a value list. check_cli still drives the old API."
     ),
-    "check_parallel.py": (
-        "from_params now accepts metropolis+3D+parallel; the frozen original "
-        "rejected it ('parallel is 2D only'). Lost guard or intended relaxation "
-        "-- test_item29's parallel case is masked by the channel-serial rule, so "
-        "the unit tier does not catch this divergence."
-    ),
+    # check_parallel's 2D-only divergence was resolved by decision, not by
+    # restoring the guard: the parallel engine now supports 3D deliberately
+    # (cell_unify_plan.md U0, Dipesh GO 2026-07-14). The script and
+    # test_item29_support_matrix now encode the new matrix, so it is no longer
+    # a known failure.
 }
 
 

@@ -125,6 +125,84 @@ def test_confined_constraints():
     )
 
 
+def _parallel_run(dim):
+    # cell_length + buffer must fit the box; 8 + 2 <= 30 grids into 27/9 cells.
+    return {
+        "kind": "parallel",
+        "n_workers": 1,
+        "sampling_window": 50,
+        "cell_length": 8.0,
+        "buffer": 2.0,
+    }
+
+
+def test_parallel_support_matrix():
+    # The 2D-only parallel constraint was dropped by decision (cell_unify_plan.md
+    # U0, GO 2026-07-14). metropolis, rosenbluth, and branch now build under
+    # parallel in both 2D and 3D; from_params must accept every one of those
+    # six. This is the case the old test_item29 never probed directly, so the
+    # relaxation slipped past the unit tier and only check_parallel caught it.
+    samplers = {
+        "metropolis": {"type": "metropolis"},
+        "rosenbluth": {
+            "type": "rosenbluth",
+            "trials": 20,
+            "trial_box_side": 3.0,
+            "depth": 0,
+        },
+        "branch": {"type": "branch", "trials": 20, "trial_box_side": 3.0, "depth": 1},
+    }
+    for dim in (2, 3):
+        for smp in samplers.values():
+            p = {
+                "potential": {"main": "hard_core"},
+                "ensemble": {"mu": 1.0, "dimension": dim, "box": 30.0},
+                "sampler": smp,
+                "run": _parallel_run(dim),
+            }
+            from_params(p)  # must not raise
+
+    # Still serial-only under parallel: reweight (no psi6 field in the
+    # decomposition), channel (serial only), confined (walls dropped by the
+    # decomposition).
+    _raises(
+        {
+            "potential": {"main": "hard_core"},
+            "ensemble": {"mu": 1.0, "dimension": 2, "box": 30.0},
+            "sampler": {"type": "reweight"},
+            "run": _parallel_run(2),
+        }
+    )
+    _raises(
+        {
+            "potential": {"main": "hard_core"},
+            "ensemble": {"mu": 2.0, "dimension": 3, "box": 30.0},
+            "sampler": {
+                "type": "channel",
+                "trial_density": 2.0,
+                "depth": 1,
+                "channel_length": 6.0,
+                "channel_width": 1.5,
+            },
+            "run": _parallel_run(3),
+        }
+    )
+    _raises(
+        {
+            "potential": {"main": "hard_core"},
+            "ensemble": {
+                "type": "confined",
+                "mu": 1.0,
+                "dimension": 3,
+                "box": 30.0,
+                "pore": {"geometry": "slit", "H": 6.0},
+            },
+            "sampler": {"type": "metropolis"},
+            "run": _parallel_run(3),
+        }
+    )
+
+
 def test_supported_combinations_build():
     ok = [
         {
