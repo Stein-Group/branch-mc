@@ -38,6 +38,8 @@ adsorbed in a frozen disordered matrix.
 Requires Python 3.10+, NumPy, SciPy, and ASE.
 
 ```bash
+pip install -e .          # installs the gcmc package + deps
+# or, for a bare dependency install without the package:
 pip install numpy scipy ase
 ```
 

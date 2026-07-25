@@ -158,6 +158,11 @@ def migrate(
     io.ensure_run_dir(paths, params)
 
     gen = np.random.default_rng(seed)
+    # A legacy run is single-species, so no species column is written; the
+    # checkpoint stamps the current schema (3) but carries the same content a
+    # schema-2 file would, and load reads species back as None. The 2 -> 3 bump
+    # (Phase 4, A4.4) added only the optional species array, so migration needs
+    # no special handling.
     io.save_checkpoint(
         paths,
         positions=positions,

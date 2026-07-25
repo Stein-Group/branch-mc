@@ -37,6 +37,7 @@ _IDENTITY_FIELDS = (
     "dimension",
     "chem_pot",
     "box",
+    "box_sides",
     "cavity_radius",
     "trial_density",
     "depth",
@@ -82,6 +83,11 @@ def identity_dict(cfg: Config) -> dict[str, object]:
     # from before the channel sampler existed.
     active_channel = getattr(cfg, "channel", False)
     skip = () if active_channel else ("channel", "channel_length", "channel_width")
+    # box_sides is part of the physics identity only for an orthorhombic box;
+    # cubic runs (box_sides None) omit it so the fingerprint is byte-identical to
+    # before per-axis boxes existed.
+    if getattr(cfg, "box_sides", None) is None:
+        skip = (*skip, "box_sides")
     return {k: _canon(getattr(cfg, k)) for k in _IDENTITY_FIELDS if k not in skip}
 
 

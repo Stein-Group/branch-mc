@@ -70,6 +70,61 @@ class FrameworkField:
         self.rc = float(upper_cutoff)
         if len(self.pos) != len(self.types):
             raise ValueError("framework positions and type ids differ in length")
+        # One reduced-units potential per table type, built once. energy() used to
+        # construct a fresh LennardJonesTable on every call (millions per run); the
+        # object is a few references, so caching it is a pure hot-path win with no
+        # behaviour change (beta is folded in by the caller, so beta=1.0 here).
+        self._pots = {
+            t: LennardJonesTable(
+                beta=1.0, table=table, trial_type=t, upper_cutoff=self.rc
+            )
+            for t in range(len(table.types))
+        }
+
+    def energy_many(
+        self, points: FloatArray, guest_type: int, chunk: int = 4096
+    ) -> FloatArray:
+        """Guest-framework energy of many guests of one type, reduced units, as a
+        vectorised batch (chunked to bound the P x N_frame distance matrix). Same
+        result as calling `energy` point by point; this is what makes batched
+        Widom (Q5) and the grid build fast."""
+        pts = np.ascontiguousarray(points, float)
+        pot = self._pots[int(guest_type)]
+        out = np.zeros(len(pts))
+        box = self.box
+        for c0 in range(0, len(pts), chunk):
+            cp = pts[c0 : c0 + chunk]
+            dr = cp[:, None, :] - self.pos[None, :, :]
+            dr -= box * np.round(dr / box)
+            d = np.sqrt(np.einsum("cij,cij->ci", dr, dr))
+            inside = (d < self.rc) & (d > 0.0)
+            rows, cols = np.nonzero(inside)
+            if rows.size:
+                uu = pot._pair_u(d[rows, cols], self.types[cols])
+                local = np.zeros(len(cp))
+                np.add.at(local, rows, uu)
+                out[c0 : c0 + len(cp)] = local
+        return out
+
+    def overlaps_many(
+        self, points: FloatArray, guest_type: int, chunk: int = 4096
+    ) -> np.ndarray:
+        """Per-point framework overlap of many guests of one type (batched). A
+        point overlaps if any framework atom is within the per-pair floor
+        c*sigma. Same decision as `overlaps`, vectorised for Widom (Q5)."""
+        pts = np.ascontiguousarray(points, float)
+        floor = self.table.core_floor
+        gt = int(guest_type)
+        out = np.zeros(len(pts), dtype=bool)
+        box = self.box
+        for c0 in range(0, len(pts), chunk):
+            cp = pts[c0 : c0 + chunk]
+            dr = cp[:, None, :] - self.pos[None, :, :]
+            dr -= box * np.round(dr / box)
+            d2 = np.einsum("cij,cij->ci", dr, dr)
+            thr = floor[gt, self.types] - 1e-12
+            out[c0 : c0 + len(cp)] = (d2 <= (thr * thr)[None, :]).any(axis=1)
+        return out
 
     def energy(self, point: FloatArray, guest_type: int) -> float:
         """Guest-framework energy of one guest at `point`, reduced units.
@@ -82,10 +137,9 @@ class FrameworkField:
         inside = (d < self.rc) & (d > 0.0)
         if not inside.any():
             return 0.0
-        pot = LennardJonesTable(
-            beta=1.0, table=self.table, trial_type=int(guest_type), upper_cutoff=self.rc
+        return self._pots[int(guest_type)].total_energy(
+            d[inside], neighbour_types=self.types[inside]
         )
-        return pot.total_energy(d[inside], neighbour_types=self.types[inside])
 
     def overlaps(self, point: FloatArray, guest_type: int) -> bool:
         """Does a guest of this type at `point` sit inside any framework atom?
@@ -142,15 +196,17 @@ def widom_henry(
     while done < n_samples:
         m = min(chunk, n_samples - done)
         pts = rng.uniform(0.0, 1.0, size=(m, dim)) * box
-        for p in pts:
-            if field.overlaps(p, guest_type):
-                # exp(-beta * +inf) = 0; contributes nothing but counts in V
-                continue
-            u = field.energy(p, guest_type)
-            w = math.exp(-beta * u) if beta * u < 700 else 0.0
-            acc += w
-            acc_sq += w * w
-            n_accessible += 1
+        # batched (Q5): overlaps contribute 0; the rest get exp(-beta u) from the
+        # vectorised framework energy. Points are drawn exactly as the per-point
+        # loop did, so this agrees with it to float noise.
+        ov = field.overlaps_many(pts, guest_type)
+        free = pts[~ov]
+        if len(free):
+            u = field.energy_many(free, guest_type)
+            w = np.where(beta * u < 700, np.exp(-beta * u), 0.0)
+            acc += float(w.sum())
+            acc_sq += float((w * w).sum())
+            n_accessible += int(len(free))
         done += m
     mean = acc / n_samples
     var = max(acc_sq / n_samples - mean * mean, 0.0)

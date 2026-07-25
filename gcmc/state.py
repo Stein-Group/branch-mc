@@ -54,6 +54,13 @@ class ChainState:
     step: int
     rng: np.random.Generator
     counters: dict[str, int] = field(default_factory=zero_counters)
+    # D2 (Phase 4): a per-particle integer TYPE id parallel to `positions`, drawn
+    # from the same type table framework atoms use, so molecules later reuse it as
+    # a per-site type id without a second mechanism. `None` means single-species:
+    # every particle is guest type 0 and no species stream is consumed, which is
+    # how a Phase 0-3 run stays bit-identical (the main muVT engine never sets it).
+    # `species_of` materialises the zeros when a caller needs a concrete array.
+    species: np.ndarray | None = None
     # target-mu control (muVT only): `mu` is the live, adjusted chemical
     # potential (None => use the fixed cfg.chem_pot, the default fixed-mu run);
     # `n_history` is the rolling window of per-window N used for the running mean
@@ -76,3 +83,13 @@ class ChainState:
     def n(self) -> int:
         """Current particle number N (fluid particles only)."""
         return len(self.positions)
+
+    @property
+    def species_of(self) -> np.ndarray:
+        """The species column as a concrete int array of length N: the stored
+        column when a multi-species run set one, otherwise all-zeros (the single
+        guest type). Callers read this rather than `species` directly so the
+        single-species case needs no None handling downstream."""
+        if self.species is None:
+            return np.zeros(self.n, dtype=np.int64)
+        return self.species

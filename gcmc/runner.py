@@ -320,7 +320,7 @@ def _init_config(cfg: Config, rng: RNG) -> FloatArray:
     return pos
 
 
-def acquire_lock(paths: RunPaths, timeout: float = 3600) -> None:
+def acquire_lock(paths: RunPaths, timeout: float = 1) -> None:
     """Take the run-directory lock (pid, host, time written into the lock
     file) or raise if a lock younger than `timeout` seconds exists. Prevents
     two jobs resuming the same run id and interleaving one Markov chain; a
@@ -560,7 +560,7 @@ def run(
                     paths,
                     state.positions,
                     two_dim=cfg.two_dim,
-                    box=cfg.box,
+                    box=cfg.box_sides if cfg.box_sides is not None else cfg.box,
                     info=info,
                     append=True,
                 )
@@ -574,7 +574,7 @@ def run(
                 paths,
                 state.positions,
                 two_dim=cfg.two_dim,
-                box=cfg.box,
+                box=cfg.box_sides if cfg.box_sides is not None else cfg.box,
                 info=info,
                 append=False,
             )
@@ -585,7 +585,7 @@ def run(
                 paths,
                 state.positions,
                 two_dim=cfg.two_dim,
-                box=cfg.box,
+                box=cfg.box_sides if cfg.box_sides is not None else cfg.box,
                 info=info,
                 append=True,
             )

@@ -19,12 +19,13 @@ monotonic after a mid-window kill.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from ._types import RNG, FloatArray
+from ._types import RNG, FloatArray, IntArray
 
 if TYPE_CHECKING:
     from .hash_fingerprint import RunPaths
@@ -37,7 +38,15 @@ from ase.io import write as ase_write
 # a step consumes, so a schema-1 checkpoint replayed under schema 2 continues as a
 # valid but different Markov chain; the run id and stored schema make that visible
 # rather than silently mixing two streams.
-SCHEMA = 2
+#
+# Bumped 2 -> 3 (Phase 4, A4.4) when the checkpoint grew an optional per-particle
+# species column (D2). Unlike 1 -> 2 this is a pure format extension, not a change
+# to how the main engine consumes randomness: a single-species run writes no
+# species array and its stream is unchanged, so a schema-2 checkpoint replays
+# bit-identically under schema-3 code and load accepts both. The species stream
+# lives in the multi-species MOF loop, which is a separate sampler from the main
+# muVT engine; the schema records that the on-disk format can now carry species.
+SCHEMA = 3
 
 
 # ---------------------------------------------------------------- run dir
@@ -74,12 +83,16 @@ def save_checkpoint(
     params: dict[str, Any],
     mu: float | None = None,
     n_history: list[float] | None = None,
+    species: IntArray | None = None,
     schema: int = SCHEMA,
 ) -> None:
     """Atomic write: positions array plus a JSON metadata blob. Keeps the
     previous checkpoint as .bak. `rng` is the generator state dict. `mu` and
     `n_history` carry the target-mu controller state so a resume continues the
-    search rather than restarting it."""
+    search rather than restarting it. `species` (D2) is the optional per-particle
+    type column for a multi-species run; a single-species run leaves it None and
+    the file carries no species array, which is what makes a schema-2 checkpoint
+    and a schema-3 single-species checkpoint identical in content."""
     meta = json.dumps(
         {
             "schema": int(schema),
@@ -98,7 +111,17 @@ def save_checkpoint(
         stale = paths.checkpoint.with_name(paths.checkpoint.name + stale_name)
         stale.unlink(missing_ok=True)
     tmp = paths.checkpoint.with_name(paths.checkpoint.name + ".tmp.npz")
-    np.savez(tmp, positions=np.asarray(positions, dtype=float), meta=np.array(meta))
+    pos_arr = np.asarray(positions, dtype=float)
+    meta_arr = np.array(meta)
+    if species is None:
+        np.savez(tmp, positions=pos_arr, meta=meta_arr)
+    else:
+        np.savez(
+            tmp,
+            positions=pos_arr,
+            meta=meta_arr,
+            species=np.asarray(species, dtype=np.int64),
+        )
     if paths.checkpoint.exists():
         paths.checkpoint.replace(paths.checkpoint_bak)
     tmp.replace(paths.checkpoint)
@@ -111,6 +134,9 @@ def _read_npz(path: str | Path) -> dict[str, Any]:
     with np.load(path, allow_pickle=False) as data:
         positions = data["positions"]
         meta = json.loads(str(data["meta"]))
+        # schema-2 checkpoints have no species array; absence reads as None, i.e.
+        # single-species. allow_pickle stays False, so this is a plain int array.
+        species = data["species"] if "species" in data.files else None
     return {
         "positions": positions,
         "step": meta["step"],
@@ -121,6 +147,7 @@ def _read_npz(path: str | Path) -> dict[str, Any]:
         "schema": meta["schema"],
         "mu": meta.get("mu"),
         "n_history": meta.get("n_history", []),
+        "species": species,
     }
 
 
@@ -142,7 +169,7 @@ def write_frame(
     positions: FloatArray,
     *,
     two_dim: bool,
-    box: float,
+    box: float | Sequence[float],
     info: dict[str, Any],
     append: bool,
 ) -> None:
@@ -156,7 +183,17 @@ def write_frame(
     pos = np.asarray(positions, dtype=float)
     if two_dim:
         pos = np.column_stack([pos, np.zeros(len(pos))])
-    atoms = Atoms("H" * len(pos), positions=pos, cell=[box] * 3, pbc=True)
+    # box is a scalar for a cubic cell (unchanged) or a per-axis sequence for an
+    # orthorhombic cell (Phase 2). ASE wants three axis lengths; in 2D the padded
+    # z axis reuses the first side as a dummy so the cell stays non-degenerate.
+    b = np.atleast_1d(np.asarray(box, dtype=float))
+    if b.size == 1:
+        cell = [float(b[0])] * 3
+    elif two_dim:
+        cell = [float(b[0]), float(b[1]), float(b[0])]
+    else:
+        cell = [float(x) for x in b]
+    atoms = Atoms("H" * len(pos), positions=pos, cell=cell, pbc=True)
     for k, v in info.items():
         atoms.info[k] = v
     ase_write(paths.trajectory, atoms, format="extxyz", append=append)

@@ -242,8 +242,12 @@ def _advance_metropolis(
     rng = state.rng
     pos = np.asarray(state.positions, float)
     c = zero_counters()
-    side = cfg.box
     box = np.asarray(cfg.box_dims, dtype=np.float64)
+    # per-axis side (A2.2): for a cubic box this is [L, L, L], so `% side` and
+    # rng.uniform(0, side, dim) are bit-identical to the old scalar side (numpy
+    # broadcasts the standard-uniform draws the same way); for an orthorhombic
+    # box it is the correct per-axis wrap and insertion range.
+    side = box
     dim = cfg.dimension
     lower = cfg.lower_cutoff  # exclusion floor (= diameter for hard cores)
     uc = cfg.upper_cutoff

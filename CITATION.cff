@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "BRANCH-MC: Grand-Canonical Monte Carlo with the transfer-matrix channel sweep"
+version: 3.0.0
+date-released: 2026-07-19
+license: MIT
+authors:
+  - family-names: "Dipesh"
+    given-names: ""
+# TODO(Dipesh): set full legal name/affiliation/ORCID and the paper DOI once assigned.

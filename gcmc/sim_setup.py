@@ -340,14 +340,23 @@ class Config:
     channel_length: float = 0.0  # cuboid length along the sweep axis
     channel_width: float = 0.0  # cuboid cross-section (square side)
     channel_full_span: bool = False  # channel_length == "full": wall-to-wall
+    # Per-axis orthorhombic box (A2.1). None means cubic: every axis is `box`,
+    # and the scalar path runs exactly as before, so cubic fingerprints, RNG
+    # streams and characterisation trajectories are unchanged. When set it is a
+    # length-`dimension` tuple (Lx, Ly, Lz); `box` then holds min(sides) for the
+    # legacy scalar guards, and volume/wrap/draws route through `box_dims`.
+    box_sides: tuple[float, ...] | None = None
     # oriented rod, any orientation, exact PBC
     # (the periodic guard is lifted; the sweep
     # uses minimum-image distances + retention)
 
     @property
     def box_dims(self) -> list[float]:
-        """Per-axis box lengths (cubic: the side replicated `dimension`
-        times), the form scipy and the cell list expect."""
+        """Per-axis box lengths (Lx, Ly, Lz), the A2.1 accessor. Cubic
+        (box_sides is None): the scalar side replicated `dimension` times,
+        bit-identical to the old behaviour. Orthorhombic: the stored tuple."""
+        if self.box_sides is not None:
+            return list(self.box_sides)
         return [self.box] * self.dimension
 
     @property
@@ -741,7 +750,31 @@ def from_params(p: dict[str, Any]) -> Config:
     # ---- derived constants ----
     temp = float(pot["T"]) if lj else 1.0
     beta = 1.0 / temp
-    box = float(ens["box"]) if "box" in ens else default_side(two_dim, parallel)
+    # box may be a scalar (cubic, the legacy path) or a per-axis list/tuple of
+    # `dim` lengths (A2.1, orthorhombic). Cubic keeps box_sides None so the
+    # scalar path is untouched; per-axis stores the tuple and sets the scalar
+    # `box` to min(sides) for the legacy 2*r_int minimum-image guard.
+    box_sides: tuple[float, ...] | None = None
+    if "box" in ens:
+        _raw_box = ens["box"]
+        if isinstance(_raw_box, (list, tuple)):
+            if len(_raw_box) != dim:
+                raise ValueError(
+                    f"ensemble.box as a list must give one length per axis "
+                    f"(dimension={dim}, got {len(_raw_box)})"
+                )
+            box_sides = tuple(float(v) for v in _raw_box)
+            if len(set(box_sides)) == 1:
+                # an isotropic list is just the cube; collapse so fingerprints
+                # and the RNG path stay identical to a scalar box
+                box_sides = None
+                box = float(_raw_box[0])
+            else:
+                box = min(box_sides)
+        else:
+            box = float(_raw_box)
+    else:
+        box = default_side(two_dim, parallel)
 
     radius = float(run.get("radius", 0.5))
     diameter = 2.0 * radius  # physical particle size / LJ sigma
@@ -848,12 +881,15 @@ def from_params(p: dict[str, Any]) -> Config:
     else:
         uc = 3.7545 if two_dim else 2.0
 
+    # volume is the product of the per-axis sides; cubic (box_sides None) gives
+    # box**dim exactly, so the scalar path is bit-identical
+    _sides = box_sides if box_sides is not None else (box,) * dim
     if two_dim:
         vol_mol = math.pi * radius**2
-        total_vol = box**2
+        total_vol = float(_sides[0] * _sides[1])
     else:
         vol_mol = (4.0 / 3.0) * math.pi * radius**3
-        total_vol = box**3
+        total_vol = float(_sides[0] * _sides[1] * _sides[2])
 
     # NVT target as an exact integer N
     target_n = None
@@ -1033,6 +1069,25 @@ def from_params(p: dict[str, Any]) -> Config:
             )
 
     assert mu is not None  # finalized above (explicit, target seed, or NVT 0.0)
+    # A2.2: per-axis boxes are threaded through the serial metropolis fluid path
+    # (wrap, minimum image, uniform draws, volume). The sweep samplers place
+    # trial bodies against a scalar side (Phase 5 territory), the confined pore
+    # geometry is defined inside a cubic cell, and the parallel decomposition is
+    # scalar throughout. Rather than half-convert those, refuse a non-cubic box
+    # there with a specific message; cubic runs are unaffected.
+    if box_sides is not None:
+        if sampler != "metropolis":
+            raise ValueError(
+                f"an orthorhombic ensemble.box is supported only for the "
+                f"metropolis sampler so far, not '{sampler}'"
+            )
+        if parallel:
+            raise ValueError("an orthorhombic ensemble.box is serial only")
+        if confined:
+            raise ValueError(
+                "confined pores are defined inside a cubic cell; give a scalar "
+                "ensemble.box"
+            )
     return Config(
         potential=potential,
         bias=bias,
@@ -1042,6 +1097,7 @@ def from_params(p: dict[str, Any]) -> Config:
         ensemble_type=ens_type,
         target_n=target_n,
         box=box,
+        box_sides=box_sides,
         target_count=target_count,
         control_gain=float(run.get("control_gain", 0.5)),
         control_gain_tau=float(run.get("control_gain_tau", 20.0)),

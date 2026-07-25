@@ -5,9 +5,113 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gcmc"
 version = "3.0.0"
-description = "Modular Grand Canonical Monte Carlo (BRANCH-MC)"
-requires-python = ">=3.9"
-dependencies = ["numpy", "scipy", "ase"]
+description = "Modular Grand Canonical Monte Carlo (BRANCH-MC): multi-trial exchange moves and the transfer-matrix channel sweep"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Dipesh" }]
+keywords = ["monte-carlo", "gcmc", "adsorption", "mof", "molecular-simulation"]
+# Floor set by the runtime stack actually in use, not by the code alone:
+# numpy 2.4 and scipy 1.17 both require >=3.11 (ase 3.29 requires >=3.10).
+requires-python = ">=3.11"
+dependencies = ["numpy>=2.0", "scipy>=1.14", "ase>=3.23"]
+
+[project.urls]
+# TODO(Dipesh): set the public repository URL before release.
+Homepage = "https://example.com/branch-mc"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-timeout", "ruff", "mypy", "pyyaml", "types-PyYAML"]
 
 [tool.setuptools.packages.find]
 include = ["gcmc*"]
+
+# ------------------------------------------------------------------- ruff
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+# orig/ is the frozen characterisation oracle; equilibrated/ and run-files are data
+extend-exclude = ["orig", "equilibrated", "tests/ref", "tests/run-files"]
+
+[tool.ruff.lint]
+# E/F/W  pycodestyle + pyflakes        UP  pyupgrade (3.11 syntax)
+# B      bugbear (real bug patterns)   SIM simplify
+# I      import sorting                RUF ruff-native checks
+# NPY    numpy-specific                C4  comprehension hygiene
+select = ["E", "F", "W", "UP", "B", "SIM", "I", "RUF", "NPY", "C4"]
+ignore = [
+    # One-letter and short physics names (mu, rc, uc, N, Z) are the domain
+    # vocabulary here; renaming them would hurt, not help.
+    "E741",
+    # Long lines in comments (references, derivations) are deliberate; code
+    # line length is enforced by the formatter.
+    "E501",
+    # zip(strict=...) everywhere is churn without a bug class here: every zip
+    # runs over arrays sliced to a common length lines earlier.
+    "B905",
+    # `if cond: x = a else: x = b` reads better than a ternary in hot loops
+    # where the branches carry comments.
+    "SIM108",
+    # int(round(x)) / int(ceil(x)) stay: with numpy scalars round() returns
+    # np.float64, so the cast is load-bearing at several sites and a cheap,
+    # future-proof no-op at the rest. Ruff cannot see the numpy types.
+    "RUF046",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# characterisation scripts mutate sys.argv/sys.path before imports, on purpose
+"tests/**" = ["E402"]
+"gcmc/potentials/__init__.py" = ["F401"]
+# Legacy parallel path, transcribed from the original scripts: its module-level
+# np.random stream is pinned by check_parallel/check_decomposition against
+# orig/, so converting to np.random.Generator would change the sampled chain.
+# New code must not add NPY002 sites; this ignore is scoped to the transcript.
+"gcmc/decomposition.py" = ["NPY002"]
+# These characterisation scripts seed np.random because the ORIGINAL code they
+# drive consumes the legacy global stream; a Generator would break the parity.
+"tests/scripts/check_decomposition.py" = ["NPY002"]
+"tests/scripts/check_rosenbluth.py" = ["NPY002"]
+# user-editable config dict sits above the imports; Agg backend must be pinned
+# before pyplot is imported
+"visualize_channel_moves.py" = ["E402"]
+
+# ------------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.11"
+files = ["gcmc"]
+exclude = ["orig/"]
+# Pragmatic profile: every signature is annotated and checked, but numpy's
+# gradual typing (ndarray generics) is not fought where it adds no safety.
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[[tool.mypy.overrides]]
+# scipy.spatial and ase ship incomplete stubs
+module = ["scipy.*", "ase.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Legacy transcripts of the original parallel scripts: type-checked where
+# mypy can infer, but full signature annotation is not forced on code whose
+# job is to stay recognisably identical to the original.
+module = ["gcmc.decomposition", "gcmc.parallel"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+# ------------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+# Default run = fast tier only: finishes in about a minute and can never hang.
+# Heavy tiers are explicit opt-ins:
+#   pytest -m slow               statistical / EOS validation (minutes)
+#   pytest -m characterisation   transcription checks vs the frozen orig/ code
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-m 'not slow and not characterisation' --timeout=300"
+timeout_method = "thread"
+markers = [
+    "slow: long statistical validation (equilibration windows, EOS checks)",
+    "characterisation: parity against the frozen original code in orig/",
+]
