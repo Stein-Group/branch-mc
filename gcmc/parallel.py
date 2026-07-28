@@ -269,8 +269,14 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng, n_
             idx_cav = np.flatnonzero(np.all(np.abs(d) <= cav, axis=1))
             n_cav = len(idx_cav)
             if n_cav == 0:
-                continue
-            if n_cav < n_remove:
+                # empty cavity: an add bootstraps with a single insertion (as the
+                # serial engine does), a remove has nothing to do. Without this an
+                # empty cell can never gain its first particle -> N stuck at 0.
+                if choice == "add":
+                    n_add, n_remove = 1, 0
+                else:
+                    continue
+            elif n_cav < n_remove:
                 if choice == "add":
                     n_add, n_remove = n_cav, n_cav - 1
                 else:

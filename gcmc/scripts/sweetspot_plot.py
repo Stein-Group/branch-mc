@@ -109,12 +109,15 @@ def collect_runs(root, skip=SKIP_WINDOWS):
             continue
         if s['type'] == 'channel':
             L = float(s.get('channel_length', np.nan))      # axis IS the channel length
+            third = int(round(float(s.get('channel_width', 1.0)) * 1000))  # width_key
+            third_lbl = f"w{float(s.get('channel_width',1.0)):g}"
         else:
             L = float(s.get('trial_box_side', 1.5))   # axis IS the side; no x2
+            third = int(s.get('depth', 0))
+            third_lbl = int_to_depth(third)
         st.update(method=key, rhok=float(s.get('trial_density', np.nan)),
                   L=L, k_actual=int(s.get('trials', 0)),
-                  depth=int_to_depth(int(s.get('depth', 0))),
-                  depth_int=int(s.get('depth', 0)))
+                  depth=third_lbl, depth_int=third)
         records.append(st)
     return records, baseline
 
@@ -139,7 +142,9 @@ def draw_method_panel(outer_spec, fig, df_method, metric, method, vmin, vmax,
     if opt is None:
         return None
     opt_rk, opt_r, opt_d = opt
-    opt_depth_label = int_to_depth(opt_d)
+    # the label the collector stored for this third-axis value (depth_N or w<width>)
+    _match = df_method[df_method['depth_int'] == opt_d]
+    opt_depth_label = _match['depth'].iloc[0] if not _match.empty else int_to_depth(opt_d)
 
     inner = gridspec.GridSpecFromSubplotSpec(
         3, 2, subplot_spec=outer_spec, width_ratios=[4, 1.35],
@@ -153,6 +158,9 @@ def draw_method_panel(outer_spec, fig, df_method, metric, method, vmin, vmax,
     pivot = (sub_heat.pivot_table(index='rhok', columns='L', values=metric)
              .sort_index().sort_index(axis=1))
     rk_vals = list(pivot.index); L_vals = list(pivot.columns)
+    if pivot.values.size == 0:
+        print(f"  WARNING: {method} has no heatmap cells at the optimum "
+              f"({opt_depth_label}); skipping panel"); return None
     im = ax_heat.imshow(pivot.values, aspect='auto', cmap=cmap, origin='lower',
                         vmin=vmin, vmax=vmax, interpolation='bilinear')
     opt_ri = L_vals.index(opt_r) if opt_r in L_vals else 0
@@ -169,7 +177,9 @@ def draw_method_panel(outer_spec, fig, df_method, metric, method, vmin, vmax,
     ax_heat.set_ylabel(r'$\rho_k$', fontsize=FS, labelpad=6)
     peak_val = pivot.values[opt_rki, opt_ri]
     ax_heat.text(0.02, 0.97, METHOD_LABELS.get(method, method)
-                 + '\ndepth = ' + opt_depth_label.replace('depth_', '')
+                 + (('\nwidth = ' + opt_depth_label.replace('w', ''))
+                    if opt_depth_label.startswith('w')
+                    else ('\ndepth = ' + opt_depth_label.replace('depth_', '')))
                  + '   peak = ' + f'{peak_val:.3g}',
                  transform=ax_heat.transAxes, fontsize=FS, va='top', ha='left',
                  color='white', fontweight='bold', linespacing=1.4,
@@ -201,17 +211,22 @@ def draw_method_panel(outer_spec, fig, df_method, metric, method, vmin, vmax,
     ax_bot.set_ylabel(label, fontsize=FS, labelpad=6)
     ax_bot.set_title('vary L  (' + r'$\rho_k$' + f' = {opt_rk:.0f})', fontsize=FS, pad=6)
 
+    is_chan = method.startswith('channel') or method.startswith('ljchannel')
+    third_name = 'channel width' if is_chan else 'depth'
+    fmt3 = (lambda v: f'{v/1000.0:g}') if is_chan else (lambda v: 'full' if v == 99 else str(int(v)))
     cs_d = df_method[(np.isclose(df_method['L'], opt_r, atol=1e-6))
                      & (np.isclose(df_method['rhok'], opt_rk, atol=1e-6))].sort_values('depth_int')
-    ax_top.plot(cs_d['depth_int'].values, cs_d[metric].values, color=color, lw=2,
-                marker='o', ms=5, markeredgewidth=0)
+    xs = cs_d['depth_int'].values
+    ax_top.plot(xs, cs_d[metric].values, color=color, lw=2, marker='o', ms=5, markeredgewidth=0)
     ax_top.axvline(opt_d, color='gold', lw=1.2, ls='--', alpha=0.85)
-    ax_top.set_xticks(cs_d['depth_int'].values)
-    ax_top.set_xticklabels([str(v) if v != 99 else 'full' for v in cs_d['depth_int'].values], fontsize=FS)
+    ax_top.set_xticks(xs)
+    ax_top.set_xticklabels([fmt3(v) for v in xs], fontsize=FS, rotation=(45 if is_chan else 0),
+                           ha=('right' if is_chan else 'center'))
     ax_top.tick_params(axis='y', labelsize=FS); ax_top.spines[['top', 'right']].set_visible(False)
-    ax_top.set_xlabel('depth', fontsize=FS, labelpad=4)
+    ax_top.set_xlabel(third_name, fontsize=FS, labelpad=4)
     ax_top.set_ylabel(label, fontsize=FS, labelpad=6)
-    ax_top.set_title('vary depth  (' + r'$\rho_k$' + f' = {opt_rk:.0f}, L = {opt_r:.3g})', fontsize=FS, pad=6)
+    ax_top.set_title(f'vary {third_name}  (' + r'$\rho_k$' + f' = {opt_rk:.0f}, L = {opt_r:.3g})',
+                     fontsize=FS, pad=6)
     if metric == 'time_per_step' and method.startswith('branch'):
         ax_right.set_xscale('log'); ax_bot.set_yscale('log'); ax_top.set_yscale('log')
     return im

@@ -763,22 +763,28 @@ def advance(
             anchor = -1
             # channel: draw the orientation now so removal membership and the
             # trial cloud share the same oriented body (required for reversibility).
-            chan_R = random_rotation_matrix(rng) if channel else None
-            chan_chord: tuple[FloatArray, FloatArray, FloatArray, float, float] | None
+            chan_R = random_rotation_matrix(rng, dim) if channel else None
+            chan_chord: tuple[
+                FloatArray, FloatArray, FloatArray | None, float, float
+            ] | None
             chan_chord = None  # full-span: (axis, e1, e2, s_min, s_max)
             if channel and channel_full:
                 assert chan_R is not None  # channel implies a drawn rotation
                 # wall-to-wall rod along a freely chosen orientation. The length
                 # is set by where the line meets the box (box for an axis line,
-                # up to box*sqrt(3) for the body diagonal). Membership and the
+                # up to box*sqrt(dim) for the body diagonal). Membership and the
                 # trial count both follow from that chord, so the two directions
-                # act on one body and the linear trial density stays fixed.
-                axis, e1, e2 = chan_R[:, 0], chan_R[:, 1], chan_R[:, 2]
+                # act on one body and the linear trial density stays fixed. In 2D
+                # the cross-section has one perpendicular axis e1 (e2 is None).
+                axis, e1 = chan_R[:, 0], chan_R[:, 1]
+                e2 = chan_R[:, 2] if dim == 3 else None
                 s_min, s_max = ray_box_chord(center, axis, box)
                 chan_chord = (axis, e1, e2, s_min, s_max)
                 chord_len = s_max - s_min
                 w = cfg.channel_width
-                n_trials = max(2, int(round(cfg.trial_density * chord_len * w * w)))
+                n_trials = max(
+                    2, int(round(cfg.trial_density * chord_len * w ** (dim - 1)))
+                )
                 idx_cav, _ = rod_members_full_cl(
                     cl, center, axis, e1, e2, s_min, s_max, 0.5 * w, box
                 )
@@ -868,30 +874,29 @@ def advance(
         # trial molecules in the cavity
         if channel and channel_full:
             # trials uniform along the wall-to-wall chord: axial s in [s_min,
-            # s_max], square cross-section w x w. Same chord as the membership
-            # test, so insertion and removal act on one body.
+            # s_max], cross-section w per perpendicular axis. Same chord as the
+            # membership test, so insertion and removal act on one body. In 2D
+            # there is a single perpendicular axis e1 (e2 is None).
             assert chan_chord is not None  # full-span channel drew the chord
             axis, e1, e2, s_min, s_max = chan_chord
             b_loc = 0.5 * cfg.channel_width
             s_t = rng.uniform(s_min, s_max, n_trials)
             u_t = rng.uniform(-b_loc, b_loc, n_trials)
-            v_t = rng.uniform(-b_loc, b_loc, n_trials)
-            trials = np.mod(
-                center + s_t[:, None] * axis + u_t[:, None] * e1 + v_t[:, None] * e2,
-                side,
-            )
+            pts = center + s_t[:, None] * axis + u_t[:, None] * e1
+            if e2 is not None:
+                v_t = rng.uniform(-b_loc, b_loc, n_trials)
+                pts = pts + v_t[:, None] * e2
+            trials = np.mod(pts, side)
         elif channel:
             # oriented thin cuboid around the same centre, using the SAME R drawn
             # for the removal-membership test, so insertion and removal act on one
             # body. R is kept so the sweep can recover local coordinates.
             a_loc, b_loc = 0.5 * cfg.channel_length, 0.5 * cfg.channel_width
-            U_loc = np.column_stack(
-                (
-                    rng.uniform(-a_loc, a_loc, n_trials),
-                    rng.uniform(-b_loc, b_loc, n_trials),
-                    rng.uniform(-b_loc, b_loc, n_trials),
-                )
-            )
+            # long axis plus (dim-1) cross-section widths: a cuboid w x w in 3D,
+            # a rectangle with a single width w in 2D.
+            cols = [rng.uniform(-a_loc, a_loc, n_trials)]
+            cols += [rng.uniform(-b_loc, b_loc, n_trials) for _ in range(dim - 1)]
+            U_loc = np.column_stack(cols)
             assert chan_R is not None  # channel implies a drawn rotation
             trials = np.mod(center + U_loc @ chan_R.T, side)
         else:

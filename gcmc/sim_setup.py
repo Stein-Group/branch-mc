@@ -839,9 +839,13 @@ def from_params(p: dict[str, Any]) -> Config:
             trial_density = float(smp.get("trial_density", 0.0))
             if trial_density <= 0.0:
                 raise ValueError("full-span channel needs trial_density > 0")
-            _maxchord = box * (3.0**0.5)
+            # longest possible chord is the box body diagonal: box*sqrt(dim).
+            # The cross-section carries (dim-1) widths, so the swept measure is
+            # chord * w**(dim-1) -- an area in 2D, a volume in 3D.
+            _maxchord = box * (float(dim) ** 0.5)
             n_trials = max(
-                2, int(round(trial_density * _maxchord * channel_width * channel_width))
+                2,
+                int(round(trial_density * _maxchord * channel_width ** (dim - 1))),
             )
         else:
             channel_length = float(_clen)
@@ -851,7 +855,10 @@ def from_params(p: dict[str, Any]) -> Config:
                     '(or the string "full" for a wall-to-wall '
                     "rod), and channel_width > 0"
                 )
-            chan_vol = channel_length * channel_width * channel_width
+            # 3D body is a cuboid L x w x w (a volume); 2D body is a rectangle
+            # L x w (an area). trial_density is spheres per unit measure in the
+            # run's dimension, so the count is density x measure in both cases.
+            chan_vol = channel_length * channel_width ** (dim - 1)
             if "trials" in smp:
                 n_trials = int(smp["trials"])
                 trial_density = round(n_trials / chan_vol, 6)
@@ -1013,8 +1020,6 @@ def from_params(p: dict[str, Any]) -> Config:
 
         if parallel:
             raise ValueError("channel sampler is serial only")
-        if two_dim:
-            raise ValueError("channel sampler is 3D only")
         if not full_repacking and int(smp.get("depth", 0)) < 1:
             raise ValueError(
                 "channel sampler needs depth >= 1 (depth 0 has no "
@@ -1028,7 +1033,9 @@ def from_params(p: dict[str, Any]) -> Config:
         # minimum-image distances in the sweep, so the guard does not apply.
         if not channel_full_span:
             guard_cut = uc if lj else diameter
-            diag = _m.sqrt(channel_length**2 + 2.0 * channel_width**2)
+            # body diagonal: cuboid sqrt(L^2 + 2 w^2) in 3D, rectangle
+            # sqrt(L^2 + w^2) in 2D. The cross-section carries (dim-1) widths.
+            diag = _m.sqrt(channel_length**2 + (dim - 1) * channel_width**2)
             if diag > box - guard_cut:
                 raise ValueError(
                     f"channel geometry violates the periodic guard: cuboid diagonal "
