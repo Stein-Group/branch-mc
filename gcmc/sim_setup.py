@@ -307,6 +307,11 @@ class Config:
     mode: str
     n_workers: int
     cell_length: float
+    # Per-axis parallel cell length. None means cubic cells (every axis is
+    # `cell_length`, bit-identical to the scalar path). When set it is a
+    # length-`dimension` tuple, letting the box tile n_x x n_y x n_z with
+    # independent counts (e.g. 4 x 4 x 5 = 80 cells in a cubic box).
+    cell_length_sides: tuple[float, ...] | None
     buffer: float
     x_spacing: float | None
     y_spacing: float | None
@@ -358,6 +363,15 @@ class Config:
         if self.box_sides is not None:
             return list(self.box_sides)
         return [self.box] * self.dimension
+
+    @property
+    def cell_dims(self) -> list[float]:
+        """Per-axis parallel cell lengths. Cubic (cell_length_sides is None):
+        the scalar `cell_length` replicated `dimension` times, bit-identical to
+        the old behaviour. Anisotropic: the stored tuple."""
+        if self.cell_length_sides is not None:
+            return list(self.cell_length_sides)
+        return [self.cell_length] * self.dimension
 
     @property
     def potential_type(self) -> str:
@@ -551,6 +565,11 @@ def from_params(p: dict[str, Any]) -> Config:
         # forbidden margin >= 1 sigma so periodic images never interact across
         # the wall (then the existing cubic-periodic neighbour tree is exact and
         # no per-axis box change is needed).
+        if isinstance(ens["box"], (list, tuple)):
+            raise ValueError(
+                "confined pores are defined inside a cubic cell; give a scalar "
+                "ensemble.box"
+            )
         L = float(ens["box"])
         if _pore_geometry == "slit":
             assert _pore_H is not None  # slit requires H, checked above
@@ -810,6 +829,14 @@ def from_params(p: dict[str, Any]) -> Config:
         trial_box_side = 0.0
         cav = 0.0
         _clen = smp.get("channel_length", 0.0)
+        if isinstance(_clen, (list, tuple)):
+            raise ValueError(
+                f"sampler.channel_length must be a single number (the cuboid "
+                f"length along the sweep axis) or the string 'full' for a "
+                f"wall-to-wall rod; got a list of {len(_clen)}. The channel body "
+                f"is one oriented cuboid, so it has one length; per-axis lists "
+                f"apply to run.cell_length (parallel decomposition), not here."
+            )
         channel_full_span = isinstance(_clen, str) and _clen.strip().lower() in (
             "full",
             "box",
@@ -1082,19 +1109,36 @@ def from_params(p: dict[str, Any]) -> Config:
     # geometry is defined inside a cubic cell, and the parallel decomposition is
     # scalar throughout. Rather than half-convert those, refuse a non-cubic box
     # there with a specific message; cubic runs are unaffected.
-    if box_sides is not None:
-        if sampler != "metropolis":
+    # An orthorhombic (per-axis) ensemble.box is a general feature: every sampler
+    # and the parallel decomposition route wrap, insertion range and volume
+    # through box_dims. The one genuine exception is a confined pore, whose slab/
+    # cylinder geometry is defined inside a cubic cell; refuse that specific mix.
+    if box_sides is not None and confined:
+        raise ValueError(
+            "confined pores are defined inside a cubic cell; give a scalar "
+            "ensemble.box"
+        )
+    # cell_length may be a scalar (cubic cells) or a per-axis list (anisotropic
+    # tiling, e.g. [10.5, 10.5, 8.0] -> 4 x 4 x 5 cells in a cubic box). The
+    # scalar `cell_length` field keeps min(sides) for guards and messages; the
+    # per-axis tuple, when given, drives the decomposition.
+    _raw_cl = run.get("cell_length", 30.0)
+    cell_length_sides: tuple[float, ...] | None = None
+    if isinstance(_raw_cl, (list, tuple)):
+        if len(_raw_cl) != dim:
             raise ValueError(
-                f"an orthorhombic ensemble.box is supported only for the "
-                f"metropolis sampler so far, not '{sampler}'"
+                f"run.cell_length as a list must give one length per axis "
+                f"(dimension={dim}, got {len(_raw_cl)})"
             )
-        if parallel:
-            raise ValueError("an orthorhombic ensemble.box is serial only")
-        if confined:
-            raise ValueError(
-                "confined pores are defined inside a cubic cell; give a scalar "
-                "ensemble.box"
-            )
+        _cl_tuple = tuple(float(v) for v in _raw_cl)
+        if len(set(_cl_tuple)) == 1:
+            cell_length = float(_cl_tuple[0])  # isotropic list collapses to scalar
+        else:
+            cell_length_sides = _cl_tuple
+            cell_length = min(_cl_tuple)
+    else:
+        cell_length = float(_raw_cl)
+
     return Config(
         potential=potential,
         bias=bias,
@@ -1158,7 +1202,8 @@ def from_params(p: dict[str, Any]) -> Config:
         gamma_dict=_gamma_dict(pmf, reweight, two_dim),
         mode=kind,
         n_workers=int(run.get("n_workers", 1)),
-        cell_length=float(run.get("cell_length", 30.0)),
+        cell_length=cell_length,
+        cell_length_sides=cell_length_sides,
         buffer=float(run.get("buffer", 2.0)),
         x_spacing=(float(run["x_spacing"]) if "x_spacing" in run else None),
         y_spacing=(float(run["y_spacing"]) if "y_spacing" in run else None),

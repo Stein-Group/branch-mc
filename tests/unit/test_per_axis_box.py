@@ -12,9 +12,13 @@ tests cover the engine path Phase 2 actually threaded:
                own per-axis extent, and honours hard-core overlap under the
                per-axis minimum image. Volume is the product of the sides.
 
-  guards       the modes Phase 2 did not convert (sweep samplers, parallel,
-               confined pores) refuse an orthorhombic box with a specific
-               message rather than silently using the wrong scalar side.
+  general      the orthorhombic box is now general: every sampler and the
+               parallel decomposition wrap, insertion range and volume through
+               box_dims. Only a confined pore (slab/cylinder in a cubic cell)
+               still refuses an orthorhombic box. The parallel grid tiles per
+               axis, so a box can be split into n_x x n_y x n_z cells with
+               independent counts (a per-axis cell_length does the same in a
+               cubic box).
 """
 
 from __future__ import annotations
@@ -106,15 +110,128 @@ def _branch_params(box):
     }
 
 
-def test_orthorhombic_rejected_for_sweep_sampler():
-    # the scalar-box branch config is valid; only the orthorhombic box is refused
-    from_params(_branch_params(10.0))
-    with pytest.raises(ValueError, match="orthorhombic"):
-        from_params(_branch_params([10.0, 10.0, 6.0]))
+def test_orthorhombic_supported_for_branch_sampler():
+    # orthorhombic is now general: the branch sampler must build and expose the
+    # per-axis box (only a confined pore stays cubic-only).
+    cfg = from_params(_branch_params([10.0, 10.0, 6.0]))
+    assert cfg.box_dims == [10.0, 10.0, 6.0]
+    assert cfg.box == 6.0  # scalar guard side is the minimum
 
 
-def test_orthorhombic_rejected_for_parallel():
+def test_orthorhombic_supported_for_parallel():
     base = _p([10.0, 10.0, 6.0])
     base["run"]["kind"] = "parallel"
-    with pytest.raises(ValueError, match=r"orthorhombic|parallel"):
-        from_params(base)
+    cfg = from_params(base)
+    assert cfg.mode == "parallel"
+    assert cfg.box_dims == [10.0, 10.0, 6.0]
+
+
+def test_confined_pore_still_refuses_orthorhombic():
+    p = {
+        "potential": {"main": "hard_core"},
+        "sampler": {"type": "metropolis"},
+        "ensemble": {
+            "type": "confined",
+            "mu": -3.0,
+            "dimension": 3,
+            "box": [10.0, 10.0, 6.0],
+            "pore": {"geometry": "slit", "H": 4.0},
+        },
+        "run": {"seed": 1, "sampling_window": 60},
+    }
+    with pytest.raises(ValueError, match=r"confined|cubic"):
+        from_params(p)
+
+
+def _partition_ok(box, cell, buffer, dim, seed):
+    """Every main atom belongs to exactly one cell and main+rest covers all: the
+    structural guarantee that cells never double-count or drop a molecule."""
+    from gcmc import decomposition
+
+    box = np.asarray(box, float)
+    rng = np.random.default_rng(seed)
+    pos = rng.uniform(0, box, (1500, dim))
+    cells, rest = decomposition.grid_up_nd(pos, box, cell, buffer, rng, dim)
+    seen: set[tuple] = set()
+    n_main = 0
+    for main, _border, _origin in cells:
+        for row in main:
+            key = tuple(np.round(row, 9))
+            assert key not in seen, "a main atom was claimed by two cells"
+            seen.add(key)
+            n_main += 1
+    assert n_main + len(rest) == len(pos), "main + rest must cover every atom"
+    return len(cells)
+
+
+def test_anisotropic_decomposition_tiles_per_axis():
+    # per-axis cell_length in a cubic box: 4 x 4 x 5 = 80
+    assert _partition_ok([50.0, 50.0, 50.0], [10.5, 10.5, 8.0], 2.0, 3, 0) == 80
+    # anisotropic box with a scalar cell: also 4 x 4 x 5 = 80
+    assert _partition_ok([45.0, 45.0, 56.25], 9.25, 2.0, 3, 1) == 80
+    # fully general counts, and the cubic default still tiles as a cube
+    assert _partition_ok([30.0, 50.0, 40.0], [8.0, 10.0, 8.0], 2.0, 3, 2) == 48
+    assert _partition_ok([50.0, 50.0, 50.0], 12.5, 2.0, 3, 3) == 27
+
+
+def test_cell_length_list_matches_scalar_when_isotropic():
+    # an isotropic cell_length list collapses to the scalar path (no drift)
+    cfg = from_params(
+        {
+            "potential": {"main": "hard_core"},
+            "sampler": {"type": "branch", "depth": 1, "trials": 30, "trial_box_side": 3.0},
+            "ensemble": {"mu": 3.0, "dimension": 3, "box": 50.0, "type": "muVT"},
+            "run": {"kind": "parallel", "cell_length": [12.5, 12.5, 12.5], "n_workers": 27},
+        }
+    )
+    assert cfg.cell_length_sides is None
+    assert cfg.cell_dims == [12.5, 12.5, 12.5]
+
+
+@pytest.mark.parametrize(
+    "sampler",
+    [
+        {"type": "metropolis"},
+        {"type": "branch", "depth": 1, "trials": 30, "trial_box_side": 2.0},
+        {"type": "rosenbluth", "depth": 0, "trials": 30, "trial_box_side": 2.0},
+        {"type": "channel", "depth": 1, "channel_length": 5.0,
+         "channel_width": 1.2, "trial_density": 2.0},
+        {"type": "channel", "depth": 1, "channel_length": "full",
+         "channel_width": 1.2, "trial_density": 2.0},
+    ],
+    ids=["metropolis", "branch", "rosenbluth", "channel_fixed", "channel_full"],
+)
+@pytest.mark.parametrize("box", [40.0, [30.0, 40.0]], ids=["box_float", "box_list"])
+def test_every_sampler_accepts_scalar_or_list_box(sampler, box):
+    """box works as a float (cubic) or a per-axis list (orthorhombic) for every
+    sampler; the run builds and the per-axis extent is exposed via box_dims."""
+    cfg = from_params(
+        {
+            "potential": {"main": "hard_core"},
+            "sampler": sampler,
+            "ensemble": {"type": "muVT", "mu": 2.0, "dimension": 2, "box": box},
+            "run": {"kind": "single", "seed": 1, "sampling_window": 1},
+        }
+    )
+    want = [float(box)] * 2 if not isinstance(box, list) else box
+    assert cfg.box_dims == want
+
+
+@pytest.mark.parametrize("box", [30.0, [24.0, 30.0]], ids=["box_float", "box_list"])
+@pytest.mark.parametrize(
+    "cell", [7.0, [7.0, 6.0]], ids=["cell_float", "cell_list"]
+)
+def test_parallel_accepts_scalar_or_list_box_and_cell(box, cell):
+    """The parallel decomposition accepts every combination of scalar/list box
+    and scalar/list cell_length, and tiles per axis accordingly."""
+    cfg = from_params(
+        {
+            "potential": {"main": "hard_core"},
+            "sampler": {"type": "branch", "depth": 1, "trials": 30, "trial_box_side": 2.0},
+            "ensemble": {"type": "muVT", "mu": 2.0, "dimension": 2, "box": box},
+            "run": {"kind": "parallel", "n_workers": 8, "cell_length": cell, "buffer": 2.0},
+        }
+    )
+    want_box = [float(box)] * 2 if not isinstance(box, list) else box
+    want_cell = [float(cell)] * 2 if not isinstance(cell, list) else cell
+    assert cfg.box_dims == want_box and cfg.cell_dims == want_cell

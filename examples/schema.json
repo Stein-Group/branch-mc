@@ -195,9 +195,16 @@
           ]
         },
         "box": {
-          "type": "number",
-          "exclusiveMinimum": 0,
-          "description": "Box side; volume = box^dimension."
+          "oneOf": [
+            {"type": "number", "exclusiveMinimum": 0},
+            {
+              "type": "array",
+              "items": {"type": "number", "exclusiveMinimum": 0},
+              "minItems": 2,
+              "maxItems": 3
+            }
+          ],
+          "description": "Box side. A number gives a cubic box (volume = box^dimension). A FLAT list of one length per axis (Lx, Ly[, Lz]) gives a single orthorhombic box (volume = product of the sides); an isotropic list collapses to the scalar. A NESTED list (list of box-specs) is SWEEPABLE: the launcher runs one job per element, each a number (cubic) or per-axis list (orthorhombic), e.g. [[45,45,56],[50,50,60]]. Supported by every sampler and the parallel decomposition; only a confined pore requires a scalar box."
         },
         "type": {
           "enum": [
@@ -349,8 +356,16 @@
           "description": "Worker processes for a parallel run; this is the per-run core cost. Required iff kind == parallel."
         },
         "cell_length": {
-          "type": "number",
-          "description": "Parallel cell side; must exceed 2 x cavity radius. >= 10 cavity widths recommended for depth >= 1 (approximate mode)."
+          "oneOf": [
+            {"type": "number", "exclusiveMinimum": 0},
+            {
+              "type": "array",
+              "items": {"type": "number", "exclusiveMinimum": 0},
+              "minItems": 2,
+              "maxItems": 3
+            }
+          ],
+          "description": "Parallel cell side; must exceed 2 x cavity radius on every axis. >= 10 cavity widths recommended for depth >= 1 (approximate mode). A number gives cubic cells; a FLAT per-axis list tiles the box n_x x n_y x n_z with independent counts (e.g. [10.5, 10.5, 8.0] -> 4 x 4 x 5 = 80 cells in a cubic box). A NESTED list is SWEEPABLE (one run per element, each scalar or per-axis)."
         },
         "buffer": {
           "type": "number",
@@ -427,6 +442,10 @@
           "minimum": 1,
           "default": 20,
           "description": "Number of windows in the running mean of N that the target controller steers (and reports as avgN)."
+        },
+        "sweep_label": {
+          "type": "string",
+          "description": "Written BY gcmc.launcher into each expanded run, naming the swept axes and their values (e.g. 'mu2.0_seed3'); it names the run directory and is not normally set by hand. It is declared here because run.additionalProperties is false, so without it every launcher-expanded config would fail validation against this schema."
         }
       }
     }

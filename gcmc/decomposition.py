@@ -1096,39 +1096,44 @@ def apply_PBC_single(moved_disk_x, moved_disk_y, cell_dims, box_dims):
 
 
 def grid_up_nd(positions, side, cell_length, buffer, rng, dim):
-    """Random-origin cubic decomposition.
+    """Random-origin box decomposition, per-axis (anisotropic) capable.
 
-    The box is tiled with n_ax = floor(side / (cell_length + buffer)) cells
-    per axis at pitch = side / n_ax, so the gap between neighbouring cells is
-    always >= buffer. Each cell owns the molecules inside its cube (main) and
-    sees a frozen read-only ring of width `buffer` around it (border). Because
-    gap >= buffer, no cell's border overlaps another cell's main, so cells can
-    run concurrently without touching each other's live molecules.
+    Each axis a is tiled with n_ax[a] = floor(side[a] / (cell_length[a] +
+    buffer)) cells at pitch[a] = side[a] / n_ax[a], so the gap between
+    neighbouring cells is always >= buffer on every axis. `side` and
+    `cell_length` may each be a scalar (replicated over all axes -- the old
+    cubic behaviour, bit-identical) or a length-`dim` array, so a box can be
+    tiled n_x x n_y x n_z with independent counts (e.g. 4 x 4 x 5 = 80). Each
+    cell owns the molecules inside its box (main) and sees a frozen read-only
+    ring of width `buffer` around it (border); because gap >= buffer per axis,
+    no cell's border overlaps another cell's main, so cells run concurrently
+    without touching each other's live molecules.
 
     Returns (cells, rest): cells is a list of (main_coords, border_coords,
-    origin) with origin the global lower corner of the cell cube; rest is the
+    origin) with origin the global lower corner of the cell box; rest is the
     coordinates owned by no cell (gap regions, a superset of all borders).
     """
     positions = np.asarray(positions, float).reshape(-1, dim)
-    n_ax = int(side // (cell_length + buffer))
-    if n_ax < 1:
+    side = np.broadcast_to(np.asarray(side, float), (dim,))
+    cl = np.broadcast_to(np.asarray(cell_length, float), (dim,))
+    n_ax = np.floor(side / (cl + buffer)).astype(int)
+    if np.any(n_ax < 1):
         raise ValueError(
-            f"cell_length + buffer = {cell_length + buffer} does not fit in "
-            f"box side {side}; shrink the cell or the buffer"
+            f"cell_length + buffer = {(cl + buffer).tolist()} does not fit in "
+            f"box side {side.tolist()} on every axis; shrink the cell or buffer"
         )
     pitch = side / n_ax
     origin0 = rng.uniform(0.0, side, size=dim)
 
     u = (positions - origin0) % side
-    slot = np.clip(np.floor(u / pitch).astype(int), 0, n_ax - 1)
-    in_main = np.all(u - slot * pitch < cell_length, axis=1)
+    in_main = np.all(u - np.floor(u / pitch) * pitch < cl, axis=1)
 
     cells = []
-    for idx in _itertools.product(range(n_ax), repeat=dim):
+    for idx in _itertools.product(*(range(int(n)) for n in n_ax)):
         lo = np.asarray(idx, float) * pitch
         d = (u - lo) % side
-        main_mask = np.all(d < cell_length, axis=1)
-        ext_mask = np.all((d < cell_length + buffer) | (d > side - buffer), axis=1)
+        main_mask = np.all(d < cl, axis=1)
+        ext_mask = np.all((d < cl + buffer) | (d > side - buffer), axis=1)
         border_mask = ext_mask & ~main_mask
         origin = (origin0 + lo) % side
         cells.append(

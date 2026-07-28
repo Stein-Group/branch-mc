@@ -505,8 +505,12 @@ def advance(
     pos = np.asarray(state.positions, float)
     c = zero_counters()
 
-    side = cfg.box
     box = np.asarray(cfg.box_dims, dtype=np.float64)
+    # per-axis side: for a cubic box this is [L, L, L], so every `% side`,
+    # minimum-image and insertion draw below is bit-identical to the old scalar
+    # `cfg.box` (numpy broadcasts the standard-uniform draws the same way); for
+    # an orthorhombic box it is the correct per-axis wrap and insertion range.
+    side = box
     two_d = cfg.two_dim
     dim = cfg.dimension
     lower = cfg.lower_cutoff  # the single exclusion floor (diameter, or 0.85 for LJ)
@@ -644,8 +648,8 @@ def advance(
             old = cl.coords[slot].copy()
             if two_d:
                 ranf1, ranf2 = rng.uniform(0, 1, 2)
-                mx = (old[0] + mf * (ranf1 - 0.5)) % side
-                my = (old[1] + mf * (ranf2 - 0.5)) % side
+                mx = (old[0] + mf * (ranf1 - 0.5)) % side[0]
+                my = (old[1] + mf * (ranf2 - 0.5)) % side[1]
                 moved = np.array([mx, my])
             else:
                 # three independent displacement components. The old code set the
@@ -654,9 +658,9 @@ def advance(
                 # frees it. This consumes one extra RNG value per 3D translation,
                 # so old checkpoints resume as a valid but different chain.
                 ranf1, ranf2, ranf3 = rng.uniform(0, 1, 3)
-                mx = (old[0] + mf * (ranf1 - 0.5)) % side
-                my = (old[1] + mf * (ranf2 - 0.5)) % side
-                mz = (old[2] + mf * (ranf3 - 0.5)) % side
+                mx = (old[0] + mf * (ranf1 - 0.5)) % side[0]
+                my = (old[1] + mf * (ranf2 - 0.5)) % side[1]
+                mz = (old[2] + mf * (ranf3 - 0.5)) % side[2]
                 moved = np.array([mx, my, mz])
             if cfg.pore_geometry is not None and not _inside_pore(moved, cfg):
                 continue  # move into the wall: rejected
@@ -737,7 +741,7 @@ def advance(
         # which, and the sort keeps `rng.choice` over it reproducible.
         if depth == 0 and not full_repacking:
             if choice == "add":
-                center = rng.uniform(0, side, size=3)[:dim]
+                center = rng.uniform(0.0, 1.0, size=3)[:dim] * side
                 anchor = -1
             else:  # remove or repack: local, anchored on an existing particle
                 anchor = int(alive[rng.choice(N)])
@@ -757,7 +761,7 @@ def advance(
             _ncav_count += 1
         else:
             if choice == "add":
-                center = rng.uniform(0, side, size=3)[:dim]
+                center = rng.uniform(0.0, 1.0, size=3)[:dim] * side
             else:  # remove or repack: centre on an existing particle so the
                 center = cl.coords[int(alive[rng.choice(N)])]  # cavity nonempty
             anchor = -1
@@ -903,12 +907,12 @@ def advance(
             trial_nums = rng.uniform(
                 -cfg.cavity_radius, cfg.cavity_radius, size=(dim, n_trials)
             )
-            tx = (trial_nums[0] + center[0]) % side
-            ty = (trial_nums[1] + center[1]) % side
+            tx = (trial_nums[0] + center[0]) % side[0]
+            ty = (trial_nums[1] + center[1]) % side[1]
             if two_d:
                 trials = np.column_stack((tx, ty))
             else:
-                tz = (trial_nums[2] + center[2]) % side
+                tz = (trial_nums[2] + center[2]) % side[2]
                 trials = np.column_stack((tx, ty, tz))
 
         keep_mask = np.ones(n_trials, dtype=bool)

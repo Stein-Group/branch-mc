@@ -267,23 +267,30 @@ def find_neighbors(
 
 
 def indices_in_cavity_cl(
-    cl: CellList, center: FloatArray, radius: float, side: float, two_dim: bool
+    cl: CellList,
+    center: FloatArray,
+    radius: float,
+    side: float | FloatArray,
+    two_dim: bool,
 ) -> IntArray:
     """`indices_in_cavity` restricted to the cells the cube cavity touches.
 
     Returns SLOT IDS, sorted ascending. The gather is a superset; the per-axis
     wrap-aware test below is the same one the full scan uses, so the cavity is
-    exactly the cavity it always was.
+    exactly the cavity it always was. `side` may be a scalar (cubic) or a
+    per-axis length array (orthorhombic); the wrap on each axis uses its own
+    length.
     """
     center = np.asarray(center, float)[: cl.dim]
+    sides = np.broadcast_to(np.asarray(side, float), (cl.dim,))
     cand = cl.gather_aabb(center - radius, center + radius, sort=False)
     if cand.size and cl.n_matrix:
         cand = cand[~cl.is_matrix[cand]]
     if cand.size == 0:
         return np.empty(0, dtype=np.int64)
     coords = cl.coords[cand]
-    mask = _axis_in_cavity(coords[:, 0], center[0], radius, side)
-    mask &= _axis_in_cavity(coords[:, 1], center[1], radius, side)
+    mask = _axis_in_cavity(coords[:, 0], center[0], radius, float(sides[0]))
+    mask &= _axis_in_cavity(coords[:, 1], center[1], radius, float(sides[1]))
     if not two_dim:
-        mask &= _axis_in_cavity(coords[:, 2], center[2], radius, side)
+        mask &= _axis_in_cavity(coords[:, 2], center[2], radius, float(sides[2]))
     return np.sort(cand[mask])

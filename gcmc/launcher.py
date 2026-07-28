@@ -78,6 +78,43 @@ def _as_list(v: Any) -> list[Any]:
     return list(v) if isinstance(v, (list, tuple)) else [v]
 
 
+# box and cell_length are "shaped": a value may itself be a per-axis list (an
+# orthorhombic box / anisotropic cell), which collides with the list = sweep
+# convention. Disambiguate by nesting: a FLAT numeric list is one shaped value
+# (anisotropic), a list that CONTAINS a list is a sweep over box-specs.
+#   box: 50                       -> one cubic box
+#   box: [45, 45, 56.25]          -> one anisotropic box (NOT swept)
+#   box: [[45,45,56],[50,50,60]]  -> sweep over two anisotropic boxes
+#   box: [[40,40,40],[50,50,50]]  -> sweep over two cubic boxes
+_SHAPED_AXES = (
+    ("box", "ensemble", "box"),
+    ("cell_length", "run", "cell_length"),
+)
+
+
+def _shaped_grid(v: Any) -> list[Any]:
+    """Sweep grid for a shaped axis (box / cell_length). A nested list sweeps
+    over its elements; a flat numeric list is a single anisotropic value."""
+    if isinstance(v, (list, tuple)):
+        if any(isinstance(x, (list, tuple)) for x in v):
+            return list(v)  # sweep over box-specs (each scalar or per-axis list)
+        return [list(v)]  # one anisotropic value, not a sweep
+    return [v]  # one scalar (cubic) value
+
+
+def _shaped_label(val: Any) -> str:
+    """Short id fragment for one shaped value: 50 -> '50', [45,45,56.25] ->
+    '45x45x56.25'."""
+    if isinstance(val, (list, tuple)):
+        return "x".join(_fmt_num(x) for x in val)
+    return _fmt_num(val)
+
+
+def _fmt_num(x: Any) -> str:
+    f = float(x)
+    return str(int(f)) if f.is_integer() else str(f)
+
+
 def _matrix_files_in(folder: str) -> list[str]:
     """A matrix folder (e.g. an NVT runs root) holds one subdirectory per
     realization, each with a trajectory.extxyz (the frozen matrix; its last
@@ -114,6 +151,11 @@ def expand_sweep(
         if key in sec:
             present.append((label, section, key))
             grids.append(_as_list(sec[key]))
+    for label, section, key in _SHAPED_AXES:
+        sec = base.get(section, {})
+        if key in sec:
+            present.append((label, section, key))
+            grids.append(_shaped_grid(sec[key]))
     pore = base.get("ensemble", {}).get("pore", {})
     for label, key in _PORE_AXES:
         if key in pore:
@@ -135,7 +177,9 @@ def expand_sweep(
             else:
                 p.setdefault(section, {})[key] = val
             if i in varying and section != "ensemble.pore":
-                parts.append(f"{label}{val}")  # pore size is in the dir prefix
+                shaped = (label, section, key) in _SHAPED_AXES
+                shown = _shaped_label(val) if shaped else val
+                parts.append(f"{label}{shown}")  # pore size is in the dir prefix
         lbl = "_".join(parts)
         if lbl:
             p.setdefault("run", {})["sweep_label"] = lbl

@@ -124,15 +124,18 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng, n_
     exits.
     """
     dim = 2 if cfg.two_dim else 3
-    side = cfg.box
-    L_c = cfg.cell_length
+    box = np.asarray(cfg.box_dims, dtype=np.float64)
+    # per-axis box and cell length: cubic gives [L, L, L] / [Lc, Lc, Lc], so
+    # every `% side`, min-image and insertion draw stays bit-identical to the old
+    # scalar path; anisotropic wraps and tiles per axis.
+    side = box
+    L_c = np.broadcast_to(np.asarray(cfg.cell_dims, dtype=np.float64), (dim,))
     cav = cfg.cavity_radius
     depth = cfg.depth
     lower, uc, nn = cfg.lower_cutoff, cfg.upper_cutoff, cfg.no_neigh
-    box = cfg.box_dims
     beta, mu, mf = cfg.beta, cfg.chem_pot, cfg.move_factor
     n_trials = cfg.no_of_trial_molecules
-    v_cell = L_c**dim
+    v_cell = float(np.prod(L_c))
     ljaux = cfg.potential_type == "ljaux"
     lj = cfg.potential_type == "lj" or ljaux
     branch = cfg.sampler == "branch"
@@ -269,14 +272,8 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng, n_
             idx_cav = np.flatnonzero(np.all(np.abs(d) <= cav, axis=1))
             n_cav = len(idx_cav)
             if n_cav == 0:
-                # empty cavity: an add bootstraps with a single insertion (as the
-                # serial engine does), a remove has nothing to do. Without this an
-                # empty cell can never gain its first particle -> N stuck at 0.
-                if choice == "add":
-                    n_add, n_remove = 1, 0
-                else:
-                    continue
-            elif n_cav < n_remove:
+                continue
+            if n_cav < n_remove:
                 if choice == "add":
                     n_add, n_remove = n_cav, n_cav - 1
                 else:
@@ -544,10 +541,12 @@ def advance_parallel(state, cfg, potential, weigher):
         raise NotImplementedError(
             f"parallel supports metropolis, rosenbluth, and branch; got {cfg.sampler!r}"
         )
-    if cfg.cell_length <= 2.0 * cfg.cavity_radius:
+    _cell_min = min(cfg.cell_dims)
+    if _cell_min <= 2.0 * cfg.cavity_radius:
         raise ValueError(
-            f"cell_length ({cfg.cell_length}) must exceed twice the cavity "
-            f"radius ({2 * cfg.cavity_radius}) for the cell-torus geometry"
+            f"cell_length ({_cell_min}) must exceed twice the cavity "
+            f"radius ({2 * cfg.cavity_radius}) on every axis for the "
+            f"cell-torus geometry"
         )
 
     dim = 2 if cfg.two_dim else 3
@@ -556,7 +555,7 @@ def advance_parallel(state, cfg, potential, weigher):
     n_global = len(pos)
 
     cells, rest = decomposition.grid_up_nd(
-        pos, cfg.box, cfg.cell_length, cfg.buffer, rng, dim
+        pos, cfg.box_dims, cfg.cell_dims, cfg.buffer, rng, dim
     )
     n_steps = cfg.sampling_window
     seeds = rng.integers(0, 2**31 - 1, size=len(cells))

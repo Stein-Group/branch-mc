@@ -128,7 +128,7 @@ class EnergyWeigher:
         i: int,
         chosen: FloatArray,
         gamma: float,
-        side: float,
+        side: float | FloatArray,
     ) -> None:
         """Fold the re-selected member i's pair factors into the LATER members
         (rows i+1..) of the removed set, minimum-imaging in the box; the
@@ -203,7 +203,7 @@ class UniformWeigher:
         i: int,
         chosen: FloatArray,
         gamma: float,
-        side: float,
+        side: float | FloatArray,
     ) -> None:
         """No-op: unit weights never change."""
         pass
@@ -278,7 +278,7 @@ class ReweightWeigher:
         i: int,
         chosen: FloatArray,
         gamma: float,
-        side: float,
+        side: float | FloatArray,
     ) -> None:
         """No-op: see `recompute`."""
         pass

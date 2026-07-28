@@ -35,7 +35,7 @@ def select_forward(
     weigher: Any,
     *,
     rand: Callable[[], float],
-    side: float,
+    side: float | FloatArray,
     r_squared: float,
     gamma_schedule: Mapping[int, float],
 ) -> tuple[TrialSet, FloatArray] | tuple[None, None]:
@@ -104,7 +104,7 @@ def select_reverse(
     n_atoms: int,
     weigher: Any,
     *,
-    side: float,
+    side: float | FloatArray,
     r_squared: float,
     gamma_schedule: Mapping[int, float],
 ) -> tuple[FloatArray, FloatArray]:
