@@ -1,4 +1,4 @@
-"""Rung V2: the single-component Xe isotherm in MFM-300(In), engine vs RASPA2.
+"""Rung V2: a single-component isotherm (default Xe in MFM-300(In)), engine vs RASPA2.
 
 Sweeps pressure, turns each pressure into a reduced activity through Peng-Robinson
 (so both codes sit on the same state point, G1), runs the MOF metropolis loop
@@ -27,8 +27,8 @@ import numpy as np
 
 from gcmc.mof_field import FrameworkField
 from gcmc.potentials.pair_table import PairTable
-from scripts.mof.build_framework import build, write_extxyz
-from scripts.mof.units import load_forcefield, peng_robinson, reduce_tables
+from scripts.mof.system_setup import setup_system
+from scripts.mof.units import peng_robinson
 from scripts.mof.v1v2_units import loading_mol_per_kg, z_star_per_pa
 
 
@@ -52,7 +52,7 @@ def run_point(
     rng = np.random.default_rng(seed)
     pos = np.empty((0, box.shape[0]))
     ns = []
-    for w in range(windows):
+    for _w in range(windows):
         res = advance_metropolis_mof(
             pos,
             rng,
@@ -86,46 +86,34 @@ def _main(argv: list[str] | None = None) -> int:
     p.add_argument("--pressures", default="1e4,1e5,1e6", help="Pa, comma-separated")
     p.add_argument("--windows", type=int, default=400)
     p.add_argument("--window-cycles", type=int, default=200)
+    p.add_argument("--guest", default="Xe", help="species name from the forcefield")
+    p.add_argument(
+        "--reference",
+        default="Xe",
+        help="species whose self-pair sets the reduction scale (P0.4)",
+    )
     p.add_argument("--seed", type=int, default=1)
     a = p.parse_args(argv)
 
-    from gcmc.io_framework import load_framework_typed
+    sysm = setup_system(a.forcefield, a.T, cif=a.cif, reference=a.reference)
+    ff, table, field = sysm.ff, sysm.table, sysm.field
+    mass_amu = sysm.mass_amu
+    beta = sysm.beta
+    box = sysm.box
+    volume = sysm.volume
+    n_cells = sysm.n_cells
+    guest = table.index(a.guest)
+    sr = sysm.sigma_ref
 
-    ff = load_forcefield(a.forcefield)
-    red = reduce_tables(ff, a.T)
-    assert ff.core_floor_c is not None, "core floor not measured; run P0.6"
-    table = PairTable.from_reduced(
-        red.types, red.n_guests, red.sigma_star, red.eps_star, ff.core_floor_c
-    )
-    atoms, meta = build(a.cif, ff)
-    mass_amu = float(atoms.get_masses().sum())
-
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as td:
-        ex = Path(td) / "framework.extxyz"
-        write_extxyz(atoms, ex)
-        pos, tids = load_framework_typed(ex, table)
-        box = np.asarray(meta["supercell_angstrom"]) / red.sigma_ref
-        field = FrameworkField(
-            pos / red.sigma_ref, tids, table, box, ff.rc / red.sigma_ref
-        )
-
-    beta = 1.0 / red.T_star
-    volume = float(np.prod(box))
-    n_cells = float(np.prod(meta["replication"]))
-    xe = table.index("Xe")
-    sr = red.sigma_ref
-
-    print(f"Rung V2: Xe isotherm in {a.cif.stem} at {a.T:g} K")
+    print(f"Rung V2: {a.guest} isotherm in {a.cif.stem} at {a.T:g} K")
     print(f"{'P [bar]':>9} {'phi':>8} {'z*':>12} {'<N>':>10} {'loading [mol/kg]':>18}")
     for P in [float(x) for x in a.pressures.split(",")]:
-        phi = peng_robinson(ff, a.T, P, {"Xe": 1.0}).phi["Xe"]
+        phi = peng_robinson(ff, a.T, P, {a.guest: 1.0}).phi[a.guest]
         z_star = phi * P * z_star_per_pa(sr, a.T)
         r = run_point(
             field,
             table,
-            xe,
+            guest,
             beta,
             z_star,
             box,

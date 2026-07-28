@@ -313,6 +313,10 @@ class Config:
     # independent counts (e.g. 4 x 4 x 5 = 80 cells in a cubic box).
     cell_length_sides: tuple[float, ...] | None
     buffer: float
+    # RNG seed: part of the physics identity, so each seed is a distinct run
+    # with its own directory (two seeds are two independent chains, never the
+    # same experiment). None means an unseeded (nondeterministic) chain.
+    seed: int | None
     x_spacing: float | None
     y_spacing: float | None
     sampling_window: int
@@ -1139,6 +1143,15 @@ def from_params(p: dict[str, Any]) -> Config:
     else:
         cell_length = float(_raw_cl)
 
+    _raw_seed = run.get("seed")
+    if isinstance(_raw_seed, (list, tuple)):
+        raise ValueError(
+            "run.seed is a list (a sweep) but a single run got it unexpanded. "
+            "Launch sweeps with `python -m gcmc.launcher`; if you did, "
+            "gcmc/launcher.py on this machine is outdated."
+        )
+    seed_val = int(_raw_seed) if _raw_seed is not None else None
+
     return Config(
         potential=potential,
         bias=bias,
@@ -1205,6 +1218,7 @@ def from_params(p: dict[str, Any]) -> Config:
         cell_length=cell_length,
         cell_length_sides=cell_length_sides,
         buffer=float(run.get("buffer", 2.0)),
+        seed=seed_val,
         x_spacing=(float(run["x_spacing"]) if "x_spacing" in run else None),
         y_spacing=(float(run["y_spacing"]) if "y_spacing" in run else None),
         sampling_window=sampling_window,

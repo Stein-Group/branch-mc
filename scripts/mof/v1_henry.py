@@ -30,14 +30,20 @@ from scripts.mof.v1v2_units import henry_mol_per_kg_per_pa
 
 
 def engine_henry(
-    cif: Path, ff_path: Path, T: float, samples: int, seed: int = 1
+    cif: Path,
+    ff_path: Path,
+    T: float,
+    samples: int,
+    guests: tuple[str, ...] = ("Xe", "Kr"),
+    reference: str = "Xe",
+    seed: int = 1,
 ) -> dict:
     from gcmc.io_framework import load_framework_typed
     from gcmc.mof_field import FrameworkField, widom_henry
     from gcmc.potentials.pair_table import PairTable
 
     ff = load_forcefield(ff_path)
-    red = reduce_tables(ff, T)
+    red = reduce_tables(ff, T, reference=reference)
     assert ff.core_floor_c is not None, "core floor not measured; run P0.6"
     table = PairTable.from_reduced(
         red.types, red.n_guests, red.sigma_star, red.eps_star, ff.core_floor_c
@@ -59,7 +65,7 @@ def engine_henry(
         )
         beta = 1.0 / red.T_star
         out = {}
-        for g in ("Xe", "Kr"):
+        for g in guests:
             w = widom_henry(
                 field,
                 table.index(g),
@@ -133,22 +139,34 @@ def _main(argv: list[str] | None = None) -> int:
     p.add_argument("--raspa-dir", default="/opt/raspa2")
     p.add_argument("--raspa-cycles", type=int, default=5000)
     p.add_argument("--no-raspa", action="store_true")
+    p.add_argument("--guests", default="Xe,Kr", help="species names, comma-separated")
+    p.add_argument(
+        "--reference",
+        default="Xe",
+        help="species whose self-pair sets the reduction scale (P0.4)",
+    )
     a = p.parse_args(argv)
 
-    eng = engine_henry(a.cif, a.forcefield, a.T, a.samples)
+    guests = tuple(g.strip() for g in a.guests.split(",") if g.strip())
+    eng = engine_henry(
+        a.cif, a.forcefield, a.T, a.samples, guests=guests, reference=a.reference
+    )
     print(f"Rung V1: Henry coefficients in {a.cif.stem} at {a.T:g} K\n")
     print(f"{'guest':<6} {'K* (engine)':>16} {'K_H [mol/kg/Pa]':>18}")
-    for g in ("Xe", "Kr"):
+    for g in guests:
         e = eng[g]
         print(
             f"{g:<6} {e['k_star']:>10.2f} +/-{e['k_star_stderr']:<4.1f} {e['k_henry']:>18.4e}"
         )
-    sel = eng["Xe"]["k_henry"] / eng["Kr"]["k_henry"]
-    print(f"\nHenry selectivity K_H(Xe)/K_H(Kr) = {sel:.2f}   (anchor Table S4: 9.94)")
+    if len(guests) >= 2:
+        g0, g1 = guests[0], guests[1]
+        sel = eng[g0]["k_henry"] / eng[g1]["k_henry"]
+        anchor = "   (anchor Table S4: 9.94)" if (g0, g1) == ("Xe", "Kr") else ""
+        print(f"\nHenry selectivity K_H({g0})/K_H({g1}) = {sel:.2f}{anchor}")
 
     if not a.no_raspa:
         print("\nRASPA2 cross-check (same yaml, same structure):")
-        for g in ("Xe", "Kr"):
+        for g in guests:
             w = raspa2_widom(a.cif, a.forcefield, a.T, g, a.raspa_cycles, a.raspa_dir)
             if w is None:
                 print(f"  {g}: RASPA2 not available at {a.raspa_dir}")

@@ -4,9 +4,10 @@ A run is addressed by a deterministic hash of the parameters that make it a
 distinct experiment, never by parsing a name. Identity-bearing parameters are
 the physics and the algorithm: potential type and its physics constants, mu,
 temperature, box, dimension, cavity radius, trial density, depth, the BRANCH and
-use-depth switches, and the move factor. Execution controls (target length,
-worker count, IO cadence, parallel mode) are excluded, which is what lets a
-finished run resume as a no-op and a longer target reuse the same directory.
+use-depth switches, the move factor, and the RNG seed (each seed is a distinct
+independent chain, so it gets its own run directory). Execution controls (target
+length, worker count, IO cadence, parallel mode) are excluded, which is what lets
+a finished run resume as a no-op and a longer target reuse the same directory.
 
 The g3 table path is treated as data, not a physics parameter, so it is left out
 of the hash; pointing at a different table is the caller's responsibility.
@@ -36,6 +37,7 @@ _IDENTITY_FIELDS = (
     "sampler",
     "dimension",
     "chem_pot",
+    "seed",
     "box",
     "box_sides",
     "cavity_radius",
