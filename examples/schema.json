@@ -196,10 +196,16 @@
         },
         "box": {
           "oneOf": [
-            {"type": "number", "exclusiveMinimum": 0},
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
             {
               "type": "array",
-              "items": {"type": "number", "exclusiveMinimum": 0},
+              "items": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
               "minItems": 2,
               "maxItems": 3
             }
@@ -345,31 +351,55 @@
           ],
           "description": "single: one serial chain (1 core). parallel: cell-decomposed (uses n_workers cores)."
         },
-        "n_cores": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "REQUIRED. Total cores available this job. The launcher refuses to start if (number of sweep combinations) x (cores per run) exceeds this. cores-per-run = n_workers if parallel else 1. Can be overridden on the CLI with --cores."
-        },
-        "n_workers": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Worker processes for a parallel run; this is the per-run core cost. Required iff kind == parallel."
-        },
-        "cell_length": {
+        "n_cell": {
           "oneOf": [
-            {"type": "number", "exclusiveMinimum": 0},
+            {
+              "type": "integer",
+              "minimum": 1
+            },
             {
               "type": "array",
-              "items": {"type": "number", "exclusiveMinimum": 0},
+              "items": {
+                "type": "integer",
+                "minimum": 1
+              },
               "minItems": 2,
               "maxItems": 3
             }
           ],
-          "description": "Parallel cell side; must exceed 2 x cavity radius on every axis. >= 10 cavity widths recommended for depth >= 1 (approximate mode). A number gives cubic cells; a FLAT per-axis list tiles the box n_x x n_y x n_z with independent counts (e.g. [10.5, 10.5, 8.0] -> 4 x 4 x 5 = 80 cells in a cubic box). A NESTED list is SWEEPABLE (one run per element, each scalar or per-axis)."
+          "description": "PARALLEL, RECOMMENDED FORM. Number of cells the box is cut into. One cell is one core, so this IS the core count for the run and no core count is stated separately. An integer is factored across the axes to give the most cubic cells possible; a per-axis list [nx, ny, nz] is honoured verbatim. Everything else (per-axis cell lengths, buffer) is derived, so cell_length / buffer / x_spacing / y_spacing must NOT be given alongside it. Either submit n_cell, or state the full geometry yourself; there is nothing in between. A count the box cannot take is an error listing the nearest usable counts, never a silent reduction to fewer cells than cores."
+        },
+        "n_cores": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Launcher only: the TOTAL core budget for a sweep (= --cores N). The launcher refuses to start if (sweep combinations) x (cores per run) exceeds it, where cores-per-run is the cell count for a parallel run and 1 for a serial one. Not accepted on a parallel base, where the per-run core count is the cell count and cannot be restated."
+        },
+        "n_workers": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "DEPRECATED, accepted and warned for one release, then removed. Cores are implied, never stated: one cell is one core, so the worker count is the cell count. Use run.n_cell."
+        },
+        "cell_length": {
+          "oneOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "minItems": 2,
+              "maxItems": 3
+            }
+          ],
+          "description": "MANUAL parallel geometry. Per-cell side, scalar or per-axis list. REQUIRED together with buffer when run.n_cell is absent (there is no default: the historical 30 was unusable for any box <= 32). Must not be given alongside run.n_cell. The cell count then falls out as floor(box / (cell_length + buffer)) per axis."
         },
         "buffer": {
           "type": "number",
-          "description": "Frozen-border width; must be >= interaction range (rc for LJ, diameter for hard core)."
+          "description": "MANUAL parallel geometry. Width of the frozen border ring; REQUIRED together with cell_length when run.n_cell is absent. Must be >= the interaction range (rc for LJ, 2*radius for hard core) so a border ring holds every molecule that can interact with a live one. In n_cell mode this is derived as exactly the interaction range, which makes the cells as large as the physics allows."
         },
         "sampling_window": {
           "type": "integer",
@@ -418,10 +448,12 @@
           "type": "integer"
         },
         "x_spacing": {
-          "type": "number"
+          "type": "number",
+          "description": "DEPRECATED and INERT, accepted and warned for one release. Fed only the verbatim 2D grid_up_the_system, which the engine no longer calls. Must not be given alongside run.n_cell."
         },
         "y_spacing": {
-          "type": "number"
+          "type": "number",
+          "description": "DEPRECATED and INERT, accepted and warned for one release. Fed only the verbatim 2D grid_up_the_system, which the engine no longer calls. Must not be given alongside run.n_cell."
         },
         "matrix_config": {
           "type": "string",

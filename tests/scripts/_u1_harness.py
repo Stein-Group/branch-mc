@@ -19,6 +19,10 @@ import numpy as np
 from gcmc import parallel
 from gcmc.sim_setup import from_params
 
+# One cell is one core, so cfg.n_workers is the cell count; without this
+# hook a 9- or 27-cell case would spawn that many processes inside a test.
+parallel.IN_PROCESS = True
+
 # A fixed set of (label, params) cells covering the 2D matrix U1 must preserve.
 _CASES = {
     "hs_rosenbluth_d0": {
@@ -32,7 +36,6 @@ _CASES = {
         },
         "run": {
             "kind": "parallel",
-            "n_workers": 1,
             "sampling_window": 300,
             "cell_length": 8.0,
             "buffer": 2.0,
@@ -45,7 +48,6 @@ _CASES = {
         "sampler": {"type": "branch", "trials": 20, "trial_box_side": 3.0, "depth": 1},
         "run": {
             "kind": "parallel",
-            "n_workers": 1,
             "sampling_window": 300,
             "cell_length": 8.0,
             "buffer": 2.0,
@@ -58,7 +60,6 @@ _CASES = {
         "sampler": {"type": "metropolis"},
         "run": {
             "kind": "parallel",
-            "n_workers": 1,
             "sampling_window": 300,
             "cell_length": 8.0,
             "buffer": 2.0,
@@ -76,7 +77,6 @@ _CASES = {
         },
         "run": {
             "kind": "parallel",
-            "n_workers": 1,
             "sampling_window": 300,
             "cell_length": 8.0,
             "buffer": 2.6,
@@ -89,7 +89,6 @@ _CASES = {
         "sampler": {"type": "branch", "trials": 20, "trial_box_side": 3.0, "depth": 1},
         "run": {
             "kind": "parallel",
-            "n_workers": 1,
             "sampling_window": 300,
             "cell_length": 8.0,
             "buffer": 2.6,
@@ -102,7 +101,6 @@ _CASES = {
         "sampler": {"type": "metropolis"},
         "run": {
             "kind": "parallel",
-            "n_workers": 1,
             "sampling_window": 300,
             "cell_length": 8.0,
             "buffer": 2.6,

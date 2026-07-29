@@ -216,15 +216,26 @@ def expand_sweep(
 
 
 def cores_per_run(base: dict[str, Any]) -> int:
-    """Cores one run of this params file consumes: run.n_workers for the
-    parallel (domain-decomposed) kind, else 1."""
+    """Cores one run of this params file consumes.
+
+    One cell is one core, so for a parallel run this is the CELL COUNT and is
+    never stated separately (parallel_input_plan.md D4/D6). The count is asked
+    of the config layer rather than reconstructed here, so the launcher and the
+    engine can never disagree about how many cores a run needs.
+    """
     run = base.get("run", {})
-    if run.get("kind") == "parallel":
-        nw = run.get("n_workers")
-        if not isinstance(nw, int) or nw < 1:
-            raise ValueError("parallel runs require integer run.n_workers >= 1")
-        return nw
-    return 1
+    if run.get("kind") != "parallel":
+        return 1
+    if "n_cores" in run:
+        raise ValueError(
+            "run.n_cores does not apply to a parallel run: one cell is one "
+            "core, so the core count per run IS the cell count. Set run.n_cell "
+            "(or the full cell geometry) and pass the total budget for the "
+            "sweep with --cores."
+        )
+    from .sim_setup import from_params
+
+    return from_params(base).n_workers
 
 
 def plan(
@@ -238,7 +249,7 @@ def plan(
         raise ValueError(
             f"core budget exceeded: {len(combos)} run(s) x {per} core(s) each "
             f"= {total} cores needed, but only {cores} available. Reduce the "
-            f"sweep, lower run.n_workers, or request more cores."
+            f"sweep, use fewer cells per run, or request more cores."
         )
     return combos, labels, per, max(1, cores // per)
 

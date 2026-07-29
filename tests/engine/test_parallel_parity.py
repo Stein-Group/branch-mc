@@ -26,6 +26,10 @@ from gcmc import parallel
 from gcmc.sim_setup import from_params
 from gcmc.state import ChainState, zero_counters
 
+# One cell is one core, so cfg.n_workers is the cell count; without this
+# hook a 9- or 27-cell case would spawn that many processes inside a test.
+parallel.IN_PROCESS = True
+
 MU = 1.0
 
 
@@ -41,7 +45,6 @@ def _cfg(dim, kind, box, window):
         },
         "run": {
             "kind": kind,
-            "n_workers": 1,
             "sampling_window": window,
             "target_cycles": 1e9,
             "seed": 1,
@@ -146,7 +149,6 @@ def test_cell_list_invariants_hold(dim, sampler, monkeypatch):
         "sampler": sampler,
         "run": {
             "kind": "parallel",
-            "n_workers": 1,
             "sampling_window": 60,
             "target_cycles": 1e9,
             "seed": 1,
@@ -178,7 +180,6 @@ def test_lj_cell_list_invariants_hold(monkeypatch):
         },
         "run": {
             "kind": "parallel",
-            "n_workers": 1,
             "sampling_window": 50,
             "target_cycles": 1e9,
             "seed": 1,

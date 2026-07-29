@@ -47,8 +47,17 @@ of this block is examples/schema.json, which validation uses.
                                                      #   is not a sweep axis), so it reaches here unexpanded
                                                      #   and raises. Sweep with a LIST on an axis instead.
 
-  "run":        {"kind": "single" | "parallel", "n_workers": int,   # n_workers default 1
-                 "n_cores": int,                     # launcher only: core budget (= --cores N); ignored here
+  "run":        {"kind": "single" | "parallel",
+                 "n_cell": int | [int, ...],         # PARALLEL, recommended: cells the box is cut into. One
+                                                     #   cell is one core, so this IS the run's core count.
+                                                     #   int is factored into the most cubic per-axis split;
+                                                     #   a list is honoured verbatim. cell_length/buffer/
+                                                     #   x_spacing/y_spacing are then DERIVED and must not
+                                                     #   be given alongside it (either/or, nothing between).
+                 "n_workers": int,                   # DEPRECATED (accepted + warned): cores are implied by
+                                                     #   the cell count and cannot be set independently
+                 "n_cores": int,                     # launcher only: TOTAL sweep core budget (= --cores N);
+                                                     #   rejected on a parallel base (cores = cells there)
                  "sampling_window": int,             # default 1000
                  "target_cycles": float,             # default 1.0025e9 -- set it for real runs
                  "burn_in": int,                     # default 0
@@ -62,12 +71,15 @@ of this block is examples/schema.json, which validation uses.
                                                      #   2.5 (LJ), 3*radius (reweight)
                  "lower_cutoff": float,              # default 0.9 (any LJ mode) | 2*radius (hard core)
                  "no_neigh": int,                    # default 40 (2D) / 75 (3D)
-                 "cell_length": float, "buffer": float,   # parallel; defaults 30 and 2. buffer must be >= the
+                 "cell_length": float, "buffer": float,   # MANUAL parallel geometry; both REQUIRED when
+                                                     #   n_cell is absent (no defaults: the historical 30
+                                                     #   could not fit any box <= 32). buffer must be >= the
                                                      #   interaction reach and cell_length+buffer must fit box
                  "control_gain": float, "control_gain_tau": float, "control_window": int,
                                                      # muVT target controller; defaults 0.5 / 20.0 / 20
-                 "x_spacing": float, "y_spacing": float,  # INERT: they feed only the verbatim 2D
-                                                     #   grid_up_the_system, which the engine no longer calls
+                 "x_spacing": float, "y_spacing": float,  # DEPRECATED and INERT (accepted + warned): they
+                                                     #   feed only the verbatim 2D grid_up_the_system, which
+                                                     #   the engine no longer calls
                  "sweep_label": str}                 # written BY the launcher into each expanded run
 }
 
@@ -125,6 +137,13 @@ Dimension:
   LJ + pmf    3D only
 
 Parallelism (run.kind='parallel'):
+  A parallel run is submitted in ONE of two ways, never a mixture:
+    n_cell     -> the cell counts are the submission; per-axis cell lengths and
+                  the buffer are derived, and one cell is one core.
+    full geometry -> cell_length AND buffer are stated and the cell count falls
+                  out as floor(box / (cell_length + buffer)) per axis.
+  The counts are what the decomposition acts on: recovering them from a cell
+  length by floor() is not exact in float64 and silently loses cells.
   supports metropolis, rosenbluth, and branch in both 2D and 3D. The 3D case
   is validated physics (cell_unify_plan.md U3), not just an accepted config.
   Rejected: reweight and QA (decomposition drops the psi6 field / frozen
@@ -142,6 +161,8 @@ if TYPE_CHECKING:
 import logging
 import math
 from dataclasses import dataclass
+
+from . import cell_plan
 
 log = logging.getLogger(__name__)
 
@@ -305,7 +326,16 @@ class Config:
     gamma_dict: dict
     # execution (not identity-bearing)
     mode: str
+    # Cores are implied, never stated: one cell is one core, so `n_workers` is
+    # DERIVED (= the cell count) and is not part of the submission surface.
     n_workers: int
+    # The submission as written (int total or per-axis list), kept for the log
+    # and provenance only; `cell_counts` is what the decomposition acts on.
+    n_cell: int | list[int] | None
+    # Authoritative per-axis cell counts, None for a serial run. Handed to
+    # decomposition.grid_up_nd directly: recovering them from a cell length by
+    # floor() is not exact in float64 and silently loses cells (D7).
+    cell_counts: tuple[int, ...] | None
     cell_length: float
     # Per-axis parallel cell length. None means cubic cells (every axis is
     # `cell_length`, bit-identical to the scalar path). When set it is a
@@ -313,10 +343,6 @@ class Config:
     # independent counts (e.g. 4 x 4 x 5 = 80 cells in a cubic box).
     cell_length_sides: tuple[float, ...] | None
     buffer: float
-    # RNG seed: part of the physics identity, so each seed is a distinct run
-    # with its own directory (two seeds are two independent chains, never the
-    # same experiment). None means an unseeded (nondeterministic) chain.
-    seed: int | None
     x_spacing: float | None
     y_spacing: float | None
     sampling_window: int
@@ -677,6 +703,7 @@ def from_params(p: dict[str, Any]) -> Config:
         run,
         {
             "kind",
+            "n_cell",
             "n_workers",
             "n_cores",
             "sampling_window",
@@ -702,6 +729,27 @@ def from_params(p: dict[str, Any]) -> Config:
             "sweep_label",
         },
     )
+
+    # Deprecated run keys: accepted and warned for one release, then removed
+    # (parallel_input_plan.md D5). They are IGNORED, not honoured -- keeping them
+    # working would be the "something in between" the two submission modes that
+    # D5 rules out.
+    for _dep, _why in (
+        (
+            "n_workers",
+            "cores are implied by the cell count (one cell is one core); "
+            "set run.n_cell instead",
+        ),
+        ("x_spacing", "it fed only the retired verbatim 2D grid, and is inert"),
+        ("y_spacing", "it fed only the retired verbatim 2D grid, and is inert"),
+    ):
+        if _dep in run:
+            log.warning(
+                "run.%s is deprecated and IGNORED: %s. It will be removed in a "
+                "future release.",
+                _dep,
+                _why,
+            )
     if int(run.get("traj_every", 0)) < 0:
         raise ValueError(
             "run.traj_every must be >= 0 (0 = save only the last "
@@ -738,17 +786,6 @@ def from_params(p: dict[str, Any]) -> Config:
         )
     if aux_block is not None and not two_dim and "g3_csv" not in aux_block:
         raise ValueError("3D pmf auxiliary requires auxiliary.g3_csv")
-    if parallel:
-        buffer_v = float(run.get("buffer", 2.0))
-        reach = float(pot["rc"]) if (lj and "rc" in pot) else (2.5 if lj else None)
-        if reach is None:
-            reach = 2.0 * float(ens.get("radius", 0.5))
-        if buffer_v < reach - 1e-9:
-            raise ValueError(
-                f"parallel buffer ({buffer_v}) must be >= the interaction "
-                f"range ({reach}): border rings must contain every molecule "
-                f"that can interact with a live one"
-            )
     if int(smp.get("depth", 0)) < 0:
         raise ValueError("depth must be >= 0")
     if metropolis:
@@ -1119,38 +1156,118 @@ def from_params(p: dict[str, Any]) -> Config:
     # cylinder geometry is defined inside a cubic cell; refuse that specific mix.
     if box_sides is not None and confined:
         raise ValueError(
-            "confined pores are defined inside a cubic cell; give a scalar "
-            "ensemble.box"
+            "confined pores are defined inside a cubic cell; give a scalar ensemble.box"
         )
-    # cell_length may be a scalar (cubic cells) or a per-axis list (anisotropic
-    # tiling, e.g. [10.5, 10.5, 8.0] -> 4 x 4 x 5 cells in a cubic box). The
-    # scalar `cell_length` field keeps min(sides) for guards and messages; the
-    # per-axis tuple, when given, drives the decomposition.
-    _raw_cl = run.get("cell_length", 30.0)
+    # ---- parallel cell geometry: two mutually exclusive submission modes ----
+    # AUTO   (run.n_cell given): the cell COUNTS are the submission. Lengths and
+    #        the buffer are derived here; one cell is one core, so no core count
+    #        is ever stated twice (decisions D1-D6).
+    # MANUAL (no run.n_cell): the user states the whole geometry and the count
+    #        falls out of it, exactly as it always has. cell_length and buffer
+    #        are then REQUIRED: the historical defaults (30 and 2) are unusable
+    #        for any box <= 32 and were the landmine behind two broken examples.
+    # Nothing in between: mixing the two is an error, not a merge (D5).
+    _MANUAL_GEOM = ("cell_length", "buffer", "x_spacing", "y_spacing")
+    cell_counts: tuple[int, ...] | None = None
     cell_length_sides: tuple[float, ...] | None = None
-    if isinstance(_raw_cl, (list, tuple)):
-        if len(_raw_cl) != dim:
-            raise ValueError(
-                f"run.cell_length as a list must give one length per axis "
-                f"(dimension={dim}, got {len(_raw_cl)})"
-            )
-        _cl_tuple = tuple(float(v) for v in _raw_cl)
-        if len(set(_cl_tuple)) == 1:
-            cell_length = float(_cl_tuple[0])  # isotropic list collapses to scalar
-        else:
-            cell_length_sides = _cl_tuple
-            cell_length = min(_cl_tuple)
-    else:
-        cell_length = float(_raw_cl)
+    n_cell_submitted: int | list[int] | None = None
+    cell_length = 30.0
+    buffer_v = 2.0
 
-    _raw_seed = run.get("seed")
-    if isinstance(_raw_seed, (list, tuple)):
-        raise ValueError(
-            "run.seed is a list (a sweep) but a single run got it unexpanded. "
-            "Launch sweeps with `python -m gcmc.launcher`; if you did, "
-            "gcmc/launcher.py on this machine is outdated."
-        )
-    seed_val = int(_raw_seed) if _raw_seed is not None else None
+    if parallel:
+        # the interaction reach a border ring has to contain; `radius` is a RUN
+        # key, so reading it off `ens` (as this guard used to) always yielded the
+        # 0.5 default and left the guard under-strict above it.
+        # The reach a border ring must contain. For LJ that is the truncation
+        # radius actually in force (`uc`, i.e. run.upper_cutoff or its default);
+        # for hard core it is the exclusion diameter. Both of the old lookups
+        # here were dead: `pot["rc"]` can never fire because "rc" is not in the
+        # potential allowlist, and `ens.get("radius", 0.5)` always returned the
+        # default because `radius` is a RUN key -- so the guard checked a fixed
+        # LJ reach of 2.5 and a fixed hard-core reach of 1.0 whatever the config
+        # said (recorded in cell_unify_plan.md's schema audit).
+        _reach = float(uc) if lj else 2.0 * radius
+        _sides_for_cells = list(box_sides) if box_sides is not None else [box] * dim
+
+        if "n_cell" in run:
+            _clash = [k for k in _MANUAL_GEOM if k in run]
+            if _clash:
+                raise ValueError(
+                    f"run.n_cell sets the decomposition on its own, so "
+                    f"{', '.join('run.' + k for k in _clash)} cannot be given "
+                    f"alongside it. Either submit run.n_cell and let the cell "
+                    f"lengths and buffer be derived, or omit run.n_cell and "
+                    f"state run.cell_length and run.buffer yourself."
+                )
+            n_cell_submitted = (
+                [int(v) for v in run["n_cell"]]
+                if isinstance(run["n_cell"], (list, tuple))
+                else int(run["n_cell"])
+            )
+            buffer_v = _reach
+            _plan = cell_plan.plan_auto(
+                n_cell_submitted,
+                _sides_for_cells,
+                buffer_v,
+                min_cell=max(2.0 * cav, _reach),
+                min_cell_desc=(
+                    f"the larger of twice the cavity radius ({2.0 * cav:g}) and "
+                    f"the interaction reach ({_reach:g})"
+                ),
+            )
+        else:
+            _missing = [k for k in ("cell_length", "buffer") if k not in run]
+            if _missing:
+                raise ValueError(
+                    f"a parallel run needs either run.n_cell (and everything "
+                    f"else is derived) or the full geometry; "
+                    f"{', '.join('run.' + k for k in _missing)} "
+                    f"{'is' if len(_missing) == 1 else 'are'} missing. "
+                    f"run.n_cell is the recommended form: one cell is one core."
+                )
+            buffer_v = float(run["buffer"])
+            if buffer_v < _reach - 1e-9:
+                raise ValueError(
+                    f"parallel buffer ({buffer_v}) must be >= the interaction "
+                    f"range ({_reach}): border rings must contain every molecule "
+                    f"that can interact with a live one"
+                )
+            _plan = cell_plan.plan_manual(
+                run["cell_length"],
+                buffer_v,
+                _sides_for_cells,
+                min_cell=max(2.0 * cav, _reach),
+                min_cell_desc=(
+                    f"the larger of twice the cavity radius ({2.0 * cav:g}) and "
+                    f"the interaction reach ({_reach:g})"
+                ),
+            )
+
+        cell_counts = _plan.n_ax
+        # An isotropic set of lengths collapses to the scalar field so the cubic
+        # path stays bit-identical (cell_length_sides None is the legacy route).
+        if len(set(_plan.cell_length)) == 1:
+            cell_length = float(_plan.cell_length[0])
+        else:
+            cell_length_sides = _plan.cell_length
+            cell_length = min(_plan.cell_length)
+
+        # Accuracy, not correctness: the depth>=1 cell proposal carries a bias
+        # set by the cell/cavity ratio (+19% at 2.7 cavity widths, +0.9 +/- 0.6%
+        # at 10; cell_unify_plan.md U3). Warn with the number so an operator can
+        # price it; never refuse, because the ratio is a choice, not an error.
+        if int(smp.get("depth", 0)) >= 1 and cav > 0.0:
+            _ratio = min(_plan.cell_length) / (2.0 * cav)
+            if _ratio < 10.0:
+                log.warning(
+                    "parallel depth>=1: shortest cell edge is %.3g = %.1f cavity "
+                    "widths. The cell proposal satisfies global but not detailed "
+                    "balance, and the residual density bias grows as this ratio "
+                    "falls (+19%% at 2.7 widths, +0.9%% at 10). Read this run "
+                    "against a serial curve, not against an equation of state.",
+                    min(_plan.cell_length),
+                    _ratio,
+                )
 
     return Config(
         potential=potential,
@@ -1214,11 +1331,12 @@ def from_params(p: dict[str, Any]) -> Config:
         lj_tail_pref=lj_tail_pref,
         gamma_dict=_gamma_dict(pmf, reweight, two_dim),
         mode=kind,
-        n_workers=int(run.get("n_workers", 1)),
+        n_workers=(_plan.n_cells if parallel else 1),
+        n_cell=n_cell_submitted,
+        cell_counts=cell_counts,
         cell_length=cell_length,
         cell_length_sides=cell_length_sides,
-        buffer=float(run.get("buffer", 2.0)),
-        seed=seed_val,
+        buffer=buffer_v,
         x_spacing=(float(run["x_spacing"]) if "x_spacing" in run else None),
         y_spacing=(float(run["y_spacing"]) if "y_spacing" in run else None),
         sampling_window=sampling_window,

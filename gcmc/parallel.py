@@ -50,6 +50,12 @@ from .trials import TrialSet
 # configuration. O(N) per move, so it is off in production and tests turn it on.
 DEBUG_CELL_LIST = False
 
+# Test/debug hook: run every cell in this process instead of a pool. One cell is
+# one core in production (parallel_input_plan.md D4/D6), so `cfg.n_workers` is
+# the cell count and a 27-cell config would otherwise spawn 27 processes inside
+# a unit test. Set by tests only; never read from a params file.
+IN_PROCESS = False
+
 
 def _check_cell_list_consistency(cl, main_slots, u_main, border, origin, side, dim):
     """Assert the cell list still describes exactly the live configuration.
@@ -541,21 +547,13 @@ def advance_parallel(state, cfg, potential, weigher):
         raise NotImplementedError(
             f"parallel supports metropolis, rosenbluth, and branch; got {cfg.sampler!r}"
         )
-    _cell_min = min(cfg.cell_dims)
-    if _cell_min <= 2.0 * cfg.cavity_radius:
-        raise ValueError(
-            f"cell_length ({_cell_min}) must exceed twice the cavity "
-            f"radius ({2 * cfg.cavity_radius}) on every axis for the "
-            f"cell-torus geometry"
-        )
-
     dim = 2 if cfg.two_dim else 3
     rng = state.rng
     pos = np.asarray(state.positions, float).reshape(-1, dim)
     n_global = len(pos)
 
     cells, rest = decomposition.grid_up_nd(
-        pos, cfg.box_dims, cfg.cell_dims, cfg.buffer, rng, dim
+        pos, cfg.box_dims, cfg.cell_dims, cfg.buffer, rng, dim, n_ax=cfg.cell_counts
     )
     n_steps = cfg.sampling_window
     seeds = rng.integers(0, 2**31 - 1, size=len(cells))
@@ -575,7 +573,7 @@ def advance_parallel(state, cfg, potential, weigher):
 
     total = zero_counters()
     new_mains = []
-    if cfg.n_workers > 1 and len(tasks) > 1:
+    if cfg.n_workers > 1 and len(tasks) > 1 and not IN_PROCESS:
         with concurrent.futures.ProcessPoolExecutor(max_workers=cfg.n_workers) as ex:
             results = list(ex.map(_run_cell, tasks))
     else:

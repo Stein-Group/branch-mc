@@ -121,6 +121,8 @@ def test_orthorhombic_supported_for_branch_sampler():
 def test_orthorhombic_supported_for_parallel():
     base = _p([10.0, 10.0, 6.0])
     base["run"]["kind"] = "parallel"
+    # a parallel run states its decomposition: n_cell, and the rest is derived
+    base["run"]["n_cell"] = 8
     cfg = from_params(base)
     assert cfg.mode == "parallel"
     assert cfg.box_dims == [10.0, 10.0, 6.0]
@@ -179,9 +181,18 @@ def test_cell_length_list_matches_scalar_when_isotropic():
     cfg = from_params(
         {
             "potential": {"main": "hard_core"},
-            "sampler": {"type": "branch", "depth": 1, "trials": 30, "trial_box_side": 3.0},
+            "sampler": {
+                "type": "branch",
+                "depth": 1,
+                "trials": 30,
+                "trial_box_side": 3.0,
+            },
             "ensemble": {"mu": 3.0, "dimension": 3, "box": 50.0, "type": "muVT"},
-            "run": {"kind": "parallel", "cell_length": [12.5, 12.5, 12.5], "n_workers": 27},
+            "run": {
+                "kind": "parallel",
+                "cell_length": [12.5, 12.5, 12.5],
+                "buffer": 2.0,
+            },
         }
     )
     assert cfg.cell_length_sides is None
@@ -194,10 +205,20 @@ def test_cell_length_list_matches_scalar_when_isotropic():
         {"type": "metropolis"},
         {"type": "branch", "depth": 1, "trials": 30, "trial_box_side": 2.0},
         {"type": "rosenbluth", "depth": 0, "trials": 30, "trial_box_side": 2.0},
-        {"type": "channel", "depth": 1, "channel_length": 5.0,
-         "channel_width": 1.2, "trial_density": 2.0},
-        {"type": "channel", "depth": 1, "channel_length": "full",
-         "channel_width": 1.2, "trial_density": 2.0},
+        {
+            "type": "channel",
+            "depth": 1,
+            "channel_length": 5.0,
+            "channel_width": 1.2,
+            "trial_density": 2.0,
+        },
+        {
+            "type": "channel",
+            "depth": 1,
+            "channel_length": "full",
+            "channel_width": 1.2,
+            "trial_density": 2.0,
+        },
     ],
     ids=["metropolis", "branch", "rosenbluth", "channel_fixed", "channel_full"],
 )
@@ -218,18 +239,21 @@ def test_every_sampler_accepts_scalar_or_list_box(sampler, box):
 
 
 @pytest.mark.parametrize("box", [30.0, [24.0, 30.0]], ids=["box_float", "box_list"])
-@pytest.mark.parametrize(
-    "cell", [7.0, [7.0, 6.0]], ids=["cell_float", "cell_list"]
-)
+@pytest.mark.parametrize("cell", [7.0, [7.0, 6.0]], ids=["cell_float", "cell_list"])
 def test_parallel_accepts_scalar_or_list_box_and_cell(box, cell):
     """The parallel decomposition accepts every combination of scalar/list box
     and scalar/list cell_length, and tiles per axis accordingly."""
     cfg = from_params(
         {
             "potential": {"main": "hard_core"},
-            "sampler": {"type": "branch", "depth": 1, "trials": 30, "trial_box_side": 2.0},
+            "sampler": {
+                "type": "branch",
+                "depth": 1,
+                "trials": 30,
+                "trial_box_side": 2.0,
+            },
             "ensemble": {"type": "muVT", "mu": 2.0, "dimension": 2, "box": box},
-            "run": {"kind": "parallel", "n_workers": 8, "cell_length": cell, "buffer": 2.0},
+            "run": {"kind": "parallel", "cell_length": cell, "buffer": 2.0},
         }
     )
     want_box = [float(box)] * 2 if not isinstance(box, list) else box

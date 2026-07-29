@@ -14,6 +14,7 @@ modernize_report.md
 mof_raspa_plan.md
 raspa_validation_plan.md
 modernize_plan.md
+parallel_input_plan.md
 equilibrated/hard_disk_2d/box_200/cleanup.sh
 equilibrated/hard_disk_2d/box_75/cleanup.sh
 equilibrated/hard_disk_3d/box_20/cleanup.sh

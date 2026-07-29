@@ -70,7 +70,7 @@ print("  ok  id changes with potential.T (LJ)")
 # execution-only params must NOT change the id
 for path, val in [
     ("run.target_cycles", 9e9),
-    ("run.n_workers", 16),
+    ("run.n_cell", 16),
     ("run.kind", "parallel"),
 ]:
     import copy
@@ -78,6 +78,10 @@ for path, val in [
     p = copy.deepcopy(BASE)  # 2D base: parallel is valid, box pinned
     sec, key = path.split(".")
     p.setdefault(sec, {})[key] = val
+    if val == "parallel":
+        # a parallel run must state its decomposition; n_cell is the point of
+        # this case, which is that the decomposition does NOT move the run id
+        p["run"]["n_cell"] = 4
     p0 = copy.deepcopy(BASE)
     assert identity.run_id(config.from_params(p)) == identity.run_id(
         config.from_params(p0)

@@ -1095,19 +1095,27 @@ def apply_PBC_single(moved_disk_x, moved_disk_y, cell_dims, box_dims):
 # --------------------------------------------------------------------------
 
 
-def grid_up_nd(positions, side, cell_length, buffer, rng, dim):
+def grid_up_nd(positions, side, cell_length, buffer, rng, dim, n_ax=None):
     """Random-origin box decomposition, per-axis (anisotropic) capable.
 
-    Each axis a is tiled with n_ax[a] = floor(side[a] / (cell_length[a] +
-    buffer)) cells at pitch[a] = side[a] / n_ax[a], so the gap between
-    neighbouring cells is always >= buffer on every axis. `side` and
-    `cell_length` may each be a scalar (replicated over all axes -- the old
-    cubic behaviour, bit-identical) or a length-`dim` array, so a box can be
-    tiled n_x x n_y x n_z with independent counts (e.g. 4 x 4 x 5 = 80). Each
-    cell owns the molecules inside its box (main) and sees a frozen read-only
-    ring of width `buffer` around it (border); because gap >= buffer per axis,
-    no cell's border overlaps another cell's main, so cells run concurrently
-    without touching each other's live molecules.
+    Each axis a is tiled with n_ax[a] cells at pitch[a] = side[a] / n_ax[a], so
+    the gap between neighbouring cells is always >= buffer on every axis.
+    `side` and `cell_length` may each be a scalar (replicated over all axes --
+    the old cubic behaviour, bit-identical) or a length-`dim` array, so a box
+    can be tiled n_x x n_y x n_z with independent counts (e.g. 4 x 4 x 5 = 80).
+    Each cell owns the molecules inside its box (main) and sees a frozen
+    read-only ring of width `buffer` around it (border); because gap >= buffer
+    per axis, no cell's border overlaps another cell's main, so cells run
+    concurrently without touching each other's live molecules.
+
+    `n_ax` (optional): the per-axis cell counts, supplied by the caller. When
+    omitted they are derived here as floor(side / (cell_length + buffer)),
+    which is what this function has always done and what
+    tests/scripts/check_decomposition.py pins against orig/. Pass them
+    explicitly when the counts are the authoritative input: the derivation is
+    NOT exact in float64 and silently loses a cell in ordinary cases (e.g.
+    side 31.322, 4 cells, buffer 0.7155 -> cell 7.115 -> floor gives 3). See
+    parallel_input_plan.md, decision D7.
 
     Returns (cells, rest): cells is a list of (main_coords, border_coords,
     origin) with origin the global lower corner of the cell box; rest is the
@@ -1116,7 +1124,10 @@ def grid_up_nd(positions, side, cell_length, buffer, rng, dim):
     positions = np.asarray(positions, float).reshape(-1, dim)
     side = np.broadcast_to(np.asarray(side, float), (dim,))
     cl = np.broadcast_to(np.asarray(cell_length, float), (dim,))
-    n_ax = np.floor(side / (cl + buffer)).astype(int)
+    if n_ax is None:
+        n_ax = np.floor(side / (cl + buffer)).astype(int)
+    else:
+        n_ax = np.asarray(n_ax, dtype=int).reshape(dim)
     if np.any(n_ax < 1):
         raise ValueError(
             f"cell_length + buffer = {(cl + buffer).tolist()} does not fit in "

@@ -28,6 +28,10 @@ from gcmc import parallel
 from gcmc.sim_setup import from_params
 from gcmc.state import ChainState, zero_counters
 
+# One cell is one core, so cfg.n_workers is the cell count; without this
+# hook a 9- or 27-cell case would spawn that many processes inside a test.
+parallel.IN_PROCESS = True
+
 MU, K, CAVR, WIN, NW = 1.0, 20, 2.5, 400, 42
 
 
@@ -53,7 +57,11 @@ def run_parallel(n_win):
         },
         "run": {
             "kind": "parallel",
-            "n_workers": 1,
+            # manual geometry ON PURPOSE: this section's eta parity is pinned to
+            # measured numbers, so the decomposition must stay exactly what it
+            # was when they were measured (the old cell_length/buffer defaults).
+            "cell_length": 30.0,
+            "buffer": 2.0,
             "sampling_window": WIN,
             "target_cycles": 1e9,
             "seed": 1,
@@ -125,7 +133,6 @@ def _run3d(sampler_block, n_win=4):
         "sampler": sampler_block,
         "run": {
             "kind": "parallel",
-            "n_workers": 1,
             "sampling_window": 60,
             "target_cycles": 1e9,
             "seed": 1,
@@ -179,7 +186,7 @@ _rejected(
         "potential": {"main": "hard_core"},
         "ensemble": {"mu": MU, "dimension": 2, "box": 40.0},
         "sampler": {"type": "reweight"},
-        "run": {"kind": "parallel", "n_workers": 1, "sampling_window": 50},
+        "run": {"kind": "parallel", "n_cell": 9, "sampling_window": 50},
     },
 )
 _rejected(
@@ -196,8 +203,8 @@ _rejected(
         },
         "run": {
             "kind": "parallel",
-            "n_workers": 1,
             "sampling_window": 50,
+            "cell_length": 6.0,
             "buffer": 2.0,
         },
     },
@@ -216,8 +223,8 @@ _rejected(
         "sampler": {"type": "metropolis"},
         "run": {
             "kind": "parallel",
-            "n_workers": 1,
             "sampling_window": 50,
+            "cell_length": 6.0,
             "buffer": 2.0,
         },
     },

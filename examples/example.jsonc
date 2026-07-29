@@ -97,10 +97,21 @@
 
   "run": {                                   // OPTIONAL block; omit for all defaults
     "kind": "single" | "parallel",           // OPTIONAL, default "single"
-    "n_workers": int,                        // OPTIONAL (parallel), default 1
-    "n_cores": int,                          // OPTIONAL, launcher only: the core budget for a sweep
-                                             //   (same as --cores N). from_params accepts and ignores it,
-                                             //   so a launcher base config still validates.
+    "n_cell": int | [int, ...],              // PARALLEL, RECOMMENDED. Cells the box is cut into. ONE CELL
+                                             //   IS ONE CORE, so this IS the run's core count — 64 cells
+                                             //   means 64 cores must be available. An int is factored
+                                             //   across the axes into the most cubic cells possible; a
+                                             //   list [nx, ny, nz] is honoured verbatim. Per-axis cell
+                                             //   lengths and the buffer are DERIVED, so cell_length,
+                                             //   buffer, x_spacing and y_spacing must NOT appear with it.
+                                             //   A count the box cannot take is an error listing the
+                                             //   nearest usable counts, never a silent reduction.
+    "n_workers": int,                        // DEPRECATED, accepted + warned, then removed. Cores are
+                                             //   implied by the cell count and cannot be set apart from
+                                             //   it. Use n_cell.
+    "n_cores": int,                          // Launcher only: the TOTAL core budget for a sweep (same as
+                                             //   --cores N). REJECTED on a parallel base, where cores per
+                                             //   run are the cell count and cannot be restated.
     "sampling_window": int,                  // OPTIONAL, default 1000
     "target_cycles": float,                  // OPTIONAL, default 1.0025e9 — set for real runs
     "seed": int,                             // OPTIONAL
@@ -122,19 +133,26 @@
                                              //   same model. Every LJ run is therefore "truncated LJ plus
                                              //   a hard core at lower_cutoff", not pure LJ.
     "no_neigh": int,                         // OPTIONAL, default 40 (2D) / 75 (3D)
-    "cell_length": float,                    // OPTIONAL (parallel), default 30
-    "buffer": float,                         // OPTIONAL (parallel), default 2. Must be >= the interaction
-                                             //   reach (2.5 for LJ, the diameter for hard core): border
+    "cell_length": float,                    // MANUAL parallel geometry: per-cell side, scalar or per-axis
+                                             //   list. REQUIRED with buffer when n_cell is absent — there
+                                             //   is NO default any more (the old 30 could not fit any box
+                                             //   <= 32, which is why two shipped examples were broken).
+    "buffer": float,                         // MANUAL parallel geometry. REQUIRED with cell_length when
+                                             //   n_cell is absent. Must be >= the interaction reach
+                                             //   (upper_cutoff for LJ, the diameter for hard core): border
                                              //   rings must hold every molecule that can touch a live one.
-                                             //   cell_length + buffer must also fit inside box.
+                                             //   cell_length + buffer must also fit inside box. Under
+                                             //   n_cell this is DERIVED as exactly the reach, which makes
+                                             //   the cells as large as the physics allows.
     "control_gain": float,                   // OPTIONAL, default 0.5   } muVT target controller;
     "control_gain_tau": float,               // OPTIONAL, default 20.0  } inert unless a target_* key
     "control_window": int,                   // OPTIONAL, default 20    } is set
 
-    "x_spacing": float,                      // INERT. Accepted and stored, consumed by nothing: they feed
-    "y_spacing": float,                      //   only the verbatim 2D grid_up_the_system, which the engine
-                                             //   no longer calls (it uses grid_up_nd, which takes no
-                                             //   spacing). Setting them changes no run.
+    "x_spacing": float,                      // DEPRECATED and INERT, accepted + warned, then removed. They
+    "y_spacing": float,                      //   fed only the verbatim 2D grid_up_the_system, which the
+                                             //   engine no longer calls (it uses grid_up_nd, which takes
+                                             //   no spacing). Setting them changes no run, and they may
+                                             //   not appear alongside n_cell.
     "sweep_label": str                       // Written BY the launcher into each expanded run; you do not
                                              //   normally set it by hand.
   }
@@ -177,6 +195,13 @@
 //   Rejected: reweight and QA (the decomposition drops the psi6 field / frozen
 //   matrix), channel (serial only), confined (the decomposition drops the pore
 //   walls).
+//   A parallel run is submitted in ONE of two ways, never a mixture:
+//     n_cell        -> the cell counts ARE the submission; lengths, buffer and
+//                      the core count all follow from them.
+//     full geometry -> cell_length AND buffer stated, and the count falls out as
+//                      floor(box / (cell_length + buffer)) per axis.
+//   There is deliberately nothing in between: mixing the two is an error rather
+//   than a merge, so a submission always has exactly one author.
 //   Caveat, not a config rule: depth >= 1 under parallel is APPROXIMATE. The
 //   cell proposal satisfies global balance only under full translation
 //   invariance, which a cell cannot give. The bias is set by the cavity/cell

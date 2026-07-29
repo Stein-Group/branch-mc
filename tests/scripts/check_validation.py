@@ -106,7 +106,7 @@ good(
         "potential": HC,
         "sampler": ROSEN,
         "ensemble": {"mu": 1.0, "dimension": 2},
-        "run": {"kind": "parallel", "n_workers": 4},
+        "run": {"kind": "parallel", "n_cell": 4},
     },
 )
 
@@ -125,7 +125,7 @@ good(
         "potential": HC,
         "sampler": ROSEN,
         "ensemble": {"mu": 3.0, "dimension": 3},
-        "run": {"kind": "parallel"},
+        "run": {"kind": "parallel", "n_cell": 4},
     },
 )
 bad(
