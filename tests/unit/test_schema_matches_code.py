@@ -142,6 +142,7 @@ def test_docstring_schema_documents_every_key():
         "parallel",
         "slit",
         "cylinder",
+        "grid",  # literal initial_config token, like slit/cylinder for pore
         "geometry",
         "H",
         "R",

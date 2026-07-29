@@ -132,12 +132,244 @@ def _save_pore_geometry(cfg: Config, directory: str | Path) -> None:
             f.write(f"W {p[0]:.4f} {p[1]:.4f} {p[2]:.4f}\n")
 
 
+# ---------------------------------------------------------------- grid start
+# `initial_config: "grid"` is a LITERAL TOKEN, not a path: it means "bootstrap
+# from a commensurate lattice at a reasonable fluid density" instead of from an
+# empty box. It exists because the cavity-biased exchange move cannot grow a
+# depth>=1 chain out of N=0 in reasonable walltime at high mu, and warm-starting
+# from the equilibrated library is not always possible (a new box, a new T, a
+# fresh MOF). The token is checked BEFORE the file/directory dispatch, so a
+# directory that happens to be named "grid" is unreachable by that name; point
+# `initial_config` at "./grid" or an absolute path if you really have one.
+_GRID_TOKENS = ("grid",)
+
+# Default target packing fraction of the bootstrap lattice, per dimension.
+# Both sit in the dense-but-unambiguously-fluid range (hard-disk freezing
+# eta ~ 0.70, hard-sphere freezing eta ~ 0.494), so the lattice melts within a
+# few windows instead of being metastably stuck in a crystal, and neither is so
+# dense that the first removals are all rejected. 0.35 in 3D is the same working
+# density the neighbour benchmarks seed at (rho = 0.65 -> eta = 0.34).
+_GRID_DEFAULT_ETA = {2: 0.45, 3: 0.35}
+
+# Lattice spacing must EXCEED the contact distance, not merely equal it: the
+# hard-core test forbids r <= diameter (potentials/hard_sphere.weight_pair), so
+# a lattice sitting exactly at contact would start every pair overlapping, and
+# L/n in float64 can land a hair under the target anyway. 1% clearance costs
+# ~3% in density in 3D and removes both problems.
+_GRID_CLEARANCE = 1.01
+
+
+def _sphere_volume(diameter: float, dimension: int) -> float:
+    """Volume (3D) or area (2D) of one particle of the given diameter -- the
+    numerator of the packing fraction. Only the two dimensions the engine
+    supports are defined."""
+    r = diameter / 2.0
+    if dimension == 2:
+        return math.pi * r**2
+    if dimension == 3:
+        return 4.0 / 3.0 * math.pi * r**3
+    raise ValueError(f"grid bootstrap supports dimension 2 or 3, not {dimension}")
+
+
+def _parse_grid_spec(spec: str) -> tuple[bool, float | None]:
+    """Recognise the grid token and its optional explicit packing fraction.
+
+    Returns (is_grid, eta). `eta` is None for a bare "grid" (use the default for
+    the dimension, or the muVT target density when one is set). Accepted forms,
+    case- and whitespace-insensitive: "grid", "grid:0.3", "grid=0.3"."""
+    s = spec.strip().lower()
+    if s in _GRID_TOKENS:
+        return True, None
+    for sep in (":", "="):
+        head, _, tail = s.partition(sep)
+        if head.strip() in _GRID_TOKENS and tail.strip():
+            try:
+                eta = float(tail)
+            except ValueError:
+                raise ValueError(
+                    f"initial_config {spec!r}: the part after {sep!r} must be a "
+                    f"packing fraction, e.g. 'grid{sep}0.30'"
+                ) from None
+            if eta <= 0.0:
+                raise ValueError(
+                    f"initial_config {spec!r}: packing fraction must be positive"
+                )
+            return True, eta
+    return False, None
+
+
+def _grid_sites(
+    box_dims: list[float], dimension: int, diameter: float, target_eta: float
+) -> FloatArray:
+    """A periodic-commensurate simple-cubic lattice filling the box at the
+    density closest to `target_eta` that an integer number of lattice planes
+    allows -- which may be a little above it as well as below.
+
+    The per-axis site count is round(L_i / s) for the isotropic spacing s that
+    realises the target, then decremented until the ACTUAL spacing L_i / n_i
+    clears the contact distance. Rounding rather than flooring matters: a box
+    that is 6.99 ideal spacings wide would otherwise drop to 6 and start 30%
+    below the requested density. The spacing is recomputed from L_i / n_i so the
+    lattice is commensurate with the periodic box -- a lattice built on the ideal
+    spacing would leave a short seam at the wrap, and that seam is exactly where
+    overlaps appear."""
+    floor = diameter * _GRID_CLEARANCE
+    s = (_sphere_volume(diameter, dimension) / target_eta) ** (1.0 / dimension)
+    counts: list[int] = []
+    for length in box_dims:
+        n = max(1, int(round(length / s)))
+        while n > 1 and length / n < floor:
+            n -= 1
+        if length / n < floor:
+            raise ValueError(
+                f"cannot build a grid start: box side {length} is shorter than "
+                f"the contact clearance {floor:.4f} (diameter {diameter}), so not "
+                f"even one lattice plane fits"
+            )
+        counts.append(n)
+    axes = [
+        (np.arange(n) + 0.5) * (length / n)
+        for n, length in zip(counts, box_dims, strict=True)
+    ]
+    return np.array(list(itertools.product(*axes)), dtype=float).reshape(-1, dimension)
+
+
+def _grid_config(cfg: Config, spec: str) -> FloatArray:
+    """Build the `initial_config: "grid"` start.
+
+    Density precedence: an explicit "grid:<eta>" wins; otherwise a muVT target
+    density (run.target_N / target_eta / target_density) is honoured, so the
+    chain starts where the controller is trying to drive it; otherwise the
+    per-dimension default. NVT ignores all of this and delegates to the exact-N
+    lattice, because repacking conserves N and the starting count MUST be the
+    target, not a density that happens to be nearby.
+
+    Sites that are physically unavailable are then dropped -- overlapping a
+    frozen QA obstacle, or lying outside a hard pore -- so the token behaves
+    sensibly in a matrix or under confinement instead of starting inside a wall.
+
+    The achieved density is the closest an integer lattice can get, not the
+    target exactly; it is logged next to the target, and a gap wider than 15%
+    (a box only a few diameters across, or one where the next denser lattice
+    would overlap) is warned about rather than left for the reader to notice."""
+    if getattr(cfg, "target_n", None) is not None:
+        return _nvt_grid(cfg)
+
+    _, eta = _parse_grid_spec(spec)
+    dim = cfg.dimension
+    box_dims = cfg.box_dims
+    volume = float(np.prod(box_dims))
+    v_particle = _sphere_volume(cfg.diameter, dim)
+    source = "requested"
+    if eta is None:
+        target_count = getattr(cfg, "target_count", None)
+        if target_count is not None and target_count > 0:
+            eta = float(target_count) * v_particle / volume
+            source = "muVT target density"
+        else:
+            eta = _GRID_DEFAULT_ETA[dim]
+            source = f"default for {dim}D"
+
+    eta_max = v_particle / (cfg.diameter * _GRID_CLEARANCE) ** dim
+    if eta > eta_max:
+        raise ValueError(
+            f"initial_config {spec!r}: packing fraction {eta:.4f} is above the "
+            f"densest lattice this bootstrap can build without overlap "
+            f"({eta_max:.4f} in {dim}D at diameter {cfg.diameter}). Start lower "
+            f"and let GCMC compress, or warm-start from an equilibrated file."
+        )
+
+    pts = _grid_sites(box_dims, dim, cfg.diameter, eta)
+    n_lattice = len(pts)
+
+    mpos = getattr(cfg, "matrix_positions", None)
+    if mpos is not None and len(mpos) > 0:
+        # QA: a lattice site inside an obstacle is not a configuration, it is an
+        # instant overlap. Drop those sites; the pores keep the rest.
+        from scipy.spatial import cKDTree as _KD
+
+        tree_m = _KD(np.asarray(mpos, float) % np.asarray(box_dims), boxsize=box_dims)
+        clear = tree_m.query(pts % np.asarray(box_dims), k=1)[0] > (
+            cfg.diameter * _GRID_CLEARANCE
+        )
+        pts = pts[clear]
+
+    if getattr(cfg, "pore_geometry", None) is not None:
+        pts = np.array([p for p in pts if _inside_pore_seed(p, cfg)], dtype=float)
+        pts = pts.reshape(-1, dim)
+
+    if len(pts) == 0:
+        raise ValueError(
+            f"initial_config {spec!r}: every one of the {n_lattice} lattice sites "
+            f"was rejected (obstacle overlap or outside the pore). Lower the "
+            f"packing fraction, or warm-start from a file."
+        )
+
+    achieved = len(pts) * v_particle / volume
+    logger.info(
+        "grid initial config: %d molecules, packing fraction %.4f (target %.4f, %s%s)",
+        len(pts),
+        achieved,
+        eta,
+        source,
+        f"; {n_lattice - len(pts)} sites dropped as unavailable"
+        if len(pts) != n_lattice
+        else "",
+    )
+    # Warn only about LATTICE quantisation, measured before the filters: sites
+    # dropped for obstacle overlap or confinement are excluded volume doing its
+    # job, are already itemised in the line above, and blaming them on lattice
+    # planes would be a false explanation.
+    lattice_eta = n_lattice * v_particle / volume
+    if abs(lattice_eta - eta) > 0.15 * eta:
+        logger.warning(
+            "grid lattice packs at %.4f, %+.0f%% off the %.4f asked for: an "
+            "integer number of lattice planes cannot land closer in a box of %s "
+            "at diameter %g. GCMC will relax it either way; warm-start from a "
+            "file if the exact starting density matters.",
+            lattice_eta,
+            100.0 * (lattice_eta - eta) / eta,
+            eta,
+            "x".join(f"{length:g}" for length in box_dims),
+            cfg.diameter,
+        )
+    return pts
+
+
+def _nvt_grid(cfg: Config) -> FloatArray:
+    """NVT: EXACTLY target_n non-overlapping particles on a grid. Repacking
+    conserves N, so the starting count must be the target; the configuration
+    then equilibrates in place from this lattice."""
+    n = cfg.target_n
+    assert n is not None  # only called when target_n is set
+    if n == 0:
+        return np.empty((0, cfg.dimension))
+    # smallest cubic grid with at least n valid sites, spacing >= diameter
+    import math as _m
+
+    per = max(2, int(_m.ceil(n ** (1.0 / cfg.dimension))))
+    while True:
+        step = cfg.box / per
+        if step < cfg.diameter:  # too tight: would overlap
+            raise ValueError(
+                f"cannot place {n} particles in box {cfg.box} without "
+                f"overlap (grid spacing {step:.3f} < diameter "
+                f"{cfg.diameter}); reduce N/packing_fraction or enlarge box"
+            )
+        g = (np.arange(per) + 0.5) * step
+        pts = np.array(list(itertools.product(g, repeat=cfg.dimension)))
+        if len(pts) >= n:
+            return pts[:n]
+        per += 1
+
+
 def _init_config(cfg: Config, rng: RNG) -> FloatArray:
-    """Initial fluid configuration for a fresh run: a matching file from the
-    pre-equilibrated library when `initial_config` is given (matched on mu,
-    box, dimension, and temperature for LJ -- details in the comments below),
-    otherwise one seed molecule at a valid position, since the local exchange
-    move needs an occupied cavity and an empty system would never grow."""
+    """Initial fluid configuration for a fresh run: the literal token "grid"
+    builds a reasonable-density lattice (see `_grid_config`); any other
+    `initial_config` value is a path -- a single file, or the pre-equilibrated
+    library matched on mu, box, dimension, and temperature for LJ (details in
+    the comments below); with no `initial_config` at all, bulk muVT starts empty
+    and the constrained ensembles seed a valid start of their own."""
     # start from a pre-equilibrated configuration when one is given, else one
     # seed molecule, as the original starts (insertion needs an occupied
     # cavity, so an empty system never grows).
@@ -153,6 +385,11 @@ def _init_config(cfg: Config, rng: RNG) -> FloatArray:
     # and (for LJ) temperature, so every mu in a sweep loads its own start. Use an
     # absolute path to be safe across SLURM / subprocess working directories.
     spec = cfg.initial_config
+    # The grid token is resolved first: it is a keyword, so it must never reach
+    # the suffix test below (it has no extension and would be mistaken for the
+    # equilibrated-library directory, failing with a confusing "not found").
+    if spec and _parse_grid_spec(spec)[0]:
+        return _grid_config(cfg, spec)
     if not spec:
         if getattr(cfg, "pore_geometry", None) is not None:
             # confined pore: seed a few non-overlapping particles INSIDE the pore
@@ -202,36 +439,18 @@ def _init_config(cfg: Config, rng: RNG) -> FloatArray:
                 placed.append(pt)
             return np.array(placed) if placed else np.empty((0, cfg.dimension))
         if getattr(cfg, "target_n", None) is not None:
-            # NVT: seed EXACTLY target_n non-overlapping particles on a grid.
-            # Repacking conserves N, so the starting count must be the target;
-            # the configuration then equilibrates in place from this lattice.
-            n = cfg.target_n
-            assert n is not None  # guarded by the branch condition above
-            if n == 0:
-                return np.empty((0, cfg.dimension))
-            # smallest cubic grid with at least n valid sites, spacing >= diameter
-            import math as _m
-
-            per = max(2, int(_m.ceil(n ** (1.0 / cfg.dimension))))
-            while True:
-                step = cfg.box / per
-                if step < cfg.diameter:  # too tight: would overlap
-                    raise ValueError(
-                        f"cannot place {n} particles in box {cfg.box} without "
-                        f"overlap (grid spacing {step:.3f} < diameter "
-                        f"{cfg.diameter}); reduce N/packing_fraction or enlarge box"
-                    )
-                g = (np.arange(per) + 0.5) * step
-                pts = np.array(list(itertools.product(g, repeat=cfg.dimension)))
-                if len(pts) >= n:
-                    return pts[:n]
-                per += 1
+            # NVT: exactly target_n particles on a lattice (verbatim, extracted
+            # to _nvt_grid so the "grid" token can reach the same code).
+            return _nvt_grid(cfg)
         # Bulk muVT with no initial_config: start EMPTY. Insertion centres on a
         # uniform random point and needs nothing present, so N=0 -> 1 grows on
         # its own; removal and displacement only ever act on existing particles.
-        # No lattice: this method places trials at uniform random points, so a
-        # gridded start would be foreign to it. Provide initial_config only to
-        # start from a pre-equilibrated structure (e.g. the metastable liquid).
+        # No lattice by DEFAULT: this method places trials at uniform random
+        # points, so a gridded start is foreign to it and an empty box is the
+        # honest zero. Set initial_config to a pre-equilibrated file (e.g. the
+        # metastable liquid) or to the token "grid" when growing from empty is
+        # too slow -- at high mu with depth >= 1 the cavity proposal needs
+        # something to nucleate around, so an empty box can crawl.
         return np.empty((0, cfg.dimension))
 
     if Path(spec).suffix:  # has an extension -> file

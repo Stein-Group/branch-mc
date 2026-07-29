@@ -70,6 +70,10 @@ of this block is examples/schema.json, which validation uses.
                                                      #   setting for tiny sampling_window; measured, the log
                                                      #   is 0.02% of runtime at the default cadence
                  "seed": int, "initial_config": str,
+                                                     #   a path (file or equilibrated library), or the
+                                                     #   literal token "grid" / "grid:<eta>" to bootstrap
+                                                     #   from a lattice at a reasonable fluid density
+                                                     #   (0.35 in 3D, 0.45 in 2D) instead of an empty box
                  "matrix_config": str,               # QA only (required by it); file or folder-of-realizations
                  "radius": float,                    # default 0.5; diameter 2*radius is the hard-core floor
                  "move_factor": float,               # default 0.25
