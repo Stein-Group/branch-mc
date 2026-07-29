@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from gcmc.launcher import cores_per_run, expand_sweep
+from gcmc.launcher import cores_per_run, expand_sweep, plan
 
 _BASE = {
     "potential": {"main": "hard_core"},
@@ -60,7 +60,41 @@ def test_cores_per_run_serial_vs_parallel():
     assert cores_per_run(_parallel_base(cell_length=8.0, buffer=2.0)) == 27
 
 
-def test_cores_per_run_refuses_n_cores_on_a_parallel_base():
-    """One cell is one core, so a per-run core count cannot be stated (D4)."""
-    with pytest.raises(ValueError, match="n_cores does not apply"):
-        cores_per_run(_parallel_base(n_cell=4, n_cores=64))
+def test_cores_per_run_works_on_a_swept_base():
+    """REGRESSION: cores_per_run asks the config layer for the cell count, and a
+    swept base still holds lists (run.seed: [1, 2, ...]) which from_params
+    rightly refuses as an unexpanded sweep. It must ask an expanded combo, or
+    every swept parallel launch dies at the budget check."""
+    base = _parallel_base(n_cell=8)
+    base["run"]["seed"] = [1, 2, 3]
+    assert cores_per_run(base) == 8
+
+
+def test_a_per_axis_n_cell_is_not_mistaken_for_a_sweep_axis():
+    """n_cell accepts a per-axis list, and expand_sweep expands list-valued axes.
+    n_cell is deliberately not among them, so [2, 2, 2] stays one run of 8 cells
+    rather than three runs of 2."""
+    base = _parallel_base(n_cell=[2, 2, 2])
+    combos, labels = expand_sweep(base)
+    assert len(combos) == 1 and labels == ["single"]
+    assert combos[0]["run"]["n_cell"] == [2, 2, 2]
+    assert cores_per_run(base) == 8
+
+
+def test_n_cores_is_the_sweep_budget_and_is_allowed_on_a_parallel_base():
+    """REGRESSION: the two checks used to contradict each other. Omitting the
+    budget made main() say "pass --cores N or set run.n_cores", and supplying
+    run.n_cores made cores_per_run refuse it -- impossible advice for a parallel
+    base. run.n_cores is the sweep budget (combinations x cores-per-run), a
+    different quantity from cores-per-run, which is the cell count."""
+    base = _parallel_base(n_cell=8, n_cores=64)
+    assert cores_per_run(base) == 8
+    _, _, per, conc = plan(base, 64)
+    assert per == 8 and conc == 8
+
+
+def test_the_budget_error_names_the_cell_count():
+    base = _parallel_base(n_cell=27)
+    base["run"]["seed"] = [1, 2, 3, 4]
+    with pytest.raises(ValueError, match="One cell is one core"):
+        plan(base, 8)

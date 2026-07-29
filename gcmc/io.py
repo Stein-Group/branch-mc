@@ -19,7 +19,8 @@ monotonic after a mid-window kill.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -183,17 +184,32 @@ def write_frame(
     pos = np.asarray(positions, dtype=float)
     if two_dim:
         pos = np.column_stack([pos, np.zeros(len(pos))])
-    # box is a scalar for a cubic cell (unchanged) or a per-axis sequence for an
-    # orthorhombic cell (Phase 2). ASE wants three axis lengths; in 2D the padded
-    # z axis reuses the first side as a dummy so the cell stays non-degenerate.
+    # box is a scalar for a cubic cell or a per-axis sequence for an orthorhombic
+    # one. ASE always wants three axis lengths, so 2D pads a third.
+    #
+    # In 2D that third axis is ZERO and its boundary is OPEN (pbc "T T F"). The
+    # padded axis is not a physical direction: there is no periodicity along it
+    # and no length to be periodic over, so writing a real side there (this used
+    # to repeat the x side "so the cell stays non-degenerate") describes a cubic
+    # 3D box that was never simulated. Any viewer or analysis tool reading the
+    # header would wrap along z, compute a volume from it, or count spurious
+    # periodic images. A zero vector with pbc False is the honest statement, and
+    # it is what extxyz uses for a genuinely 2D system.
+    #
+    # Safe for the readers: both load paths take get_positions()[:, :dimension]
+    # and never consult the cell or pbc, so the equilibrated warm-start library
+    # keeps loading either way.
     b = np.atleast_1d(np.asarray(box, dtype=float))
-    if b.size == 1:
+    pbc: bool | tuple[bool, bool, bool] = True
+    if two_dim:
+        y = float(b[1]) if b.size > 1 else float(b[0])
+        cell = [float(b[0]), y, 0.0]
+        pbc = (True, True, False)
+    elif b.size == 1:
         cell = [float(b[0])] * 3
-    elif two_dim:
-        cell = [float(b[0]), float(b[1]), float(b[0])]
     else:
         cell = [float(x) for x in b]
-    atoms = Atoms("H" * len(pos), positions=pos, cell=cell, pbc=True)
+    atoms = Atoms("H" * len(pos), positions=pos, cell=cell, pbc=pbc)
     for k, v in info.items():
         atoms.info[k] = v
     ase_write(paths.trajectory, atoms, format="extxyz", append=append)
@@ -201,17 +217,65 @@ def write_frame(
 
 # ---------------------------------------------------------------- log
 class Log:
-    """Append-only CSV log with buffered writes: the header is written once
-    per file lifetime, rows are flushed every `flush_every` writes so an HPC
-    kill loses at most one buffer, and reopening appends (a resumed run
-    continues the same file)."""
+    """Append-only CSV log with buffered writes: the header is written once per
+    file lifetime, rows are flushed on the triggers below, and reopening appends
+    (a resumed run continues the same file).
 
-    def __init__(self, path: str | Path, header: str, flush_every: int = 1) -> None:
+    THE FLUSH TRIGGERS, and why there are two.
+
+    `flush_every` is a COUNT: flush once this many rows have accumulated. This is
+    what the original had (`LOG_FLUSH_EVERY`, "tune this; bigger = fewer
+    syscalls") and it shipped at 1, i.e. never batching. A count is an awkward
+    knob because the right value depends on how fast rows arrive, which depends
+    on `sampling_window`, the system size and the sampler -- so it has to be
+    re-tuned per run, and in practice never was. It survives here as a MEMORY
+    CAP, not as the primary control.
+
+    `min_interval` is a TIME FLOOR in seconds: never flush more often than this.
+    It is the primary control because it is self-tuning in exactly the way the
+    problem demands. A slow producer (the production case: one row per window,
+    hundreds of milliseconds apart) exceeds the floor on every row and so flushes
+    on every row -- byte-for-byte today's behaviour, no durability lost. A fast
+    producer (a small `sampling_window`, where rows arrive every millisecond and
+    the writes really are too frequent) batches automatically, and the batch size
+    is whatever the observed row rate implies rather than a number someone
+    guessed. Crucially the thing bounded is the WINDOW OF LOSS IN TIME: a kill
+    costs at most `min_interval` seconds of log, whatever the row rate. That is
+    how production logging systems handle this (logback's non-immediate flush
+    plus a periodic flusher, journald, Postgres `wal_writer_delay`, MySQL
+    `innodb_flush_log_at_trx_commit=2`); bounding a count instead bounds memory
+    while leaving the loss window free to grow, which is the wrong invariant for
+    log data.
+
+    Default `min_interval=0.0` means flush every row: unchanged from before, so
+    turning this on is a decision, not a side effect.
+
+    MEASURED, so the knob is used for the right reason: at
+    `sampling_window=1000` the log costs 0.02% of runtime, and batching it saves
+    nothing worth having. The write amplification at that cadence is
+    `checkpoint_every=1` (~10%) and `traj_every=1` (+100%). Reach for this only
+    when a diagnostic run drives `sampling_window` down far enough that rows
+    arrive in milliseconds.
+
+    `clock` is injectable so the triggers can be tested without sleeping.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        header: str,
+        flush_every: int = 1,
+        min_interval: float = 0.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         """Open (or reopen) `path` for appending; write `header` only if the
         file is new or empty."""
         self.path = Path(path)
         self.flush_every = flush_every
+        self.min_interval = float(min_interval)
+        self._clock = clock
         self._buf: list[str] = []
+        self._last_flush = clock()
         new = (not self.path.exists()) or self.path.stat().st_size == 0
         self._f = open(path, "a")  # noqa: SIM115  (held open; closed by close())
         if new:
@@ -219,9 +283,14 @@ class Log:
             self._f.flush()
 
     def write(self, line: str) -> None:
-        """Buffer one row (newline added if missing); flush on threshold."""
+        """Buffer one row (newline added if missing), then flush if either
+        trigger has fired: enough time has passed since the last flush, or the
+        buffer has hit its cap."""
         self._buf.append(line if line.endswith("\n") else line + "\n")
-        if len(self._buf) >= self.flush_every:
+        if (
+            self._clock() - self._last_flush >= self.min_interval
+            or len(self._buf) >= self.flush_every
+        ):
             self.flush()
 
     def flush(self) -> None:
@@ -231,6 +300,7 @@ class Log:
             self._f.writelines(self._buf)
             self._f.flush()
             self._buf.clear()
+        self._last_flush = self._clock()
 
     def close(self) -> None:
         """Flush and release the file handle."""

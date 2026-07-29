@@ -270,3 +270,71 @@ def test_two_dimensional_submission():
     assert cfg.cell_counts == (4, 4)
     assert cfg.n_workers == 16
     assert len(cfg.cell_dims) == 2
+
+
+def test_the_seed_is_part_of_the_run_identity():
+    """Each seed is an independent chain and gets its own run directory, so the
+    seed MUST move the fingerprint. Regressed once by a whole-file overwrite that
+    reverted `seed` off Config while hash_fingerprint still asked for it, which
+    crashed every run at run_paths."""
+    ids = {run_id(from_params(_p({"n_cell": 8, "seed": s}))) for s in (1, 2, 3)}
+    assert len(ids) == 3, "distinct seeds collapsed onto one run directory"
+
+
+def test_config_exposes_seed_for_the_fingerprint():
+    assert from_params(_p({"n_cell": 8, "seed": 11})).seed == 11
+    assert from_params(_p({"n_cell": 8})).seed is None
+
+
+def test_an_unexpanded_seed_sweep_is_refused():
+    with pytest.raises(ValueError, match=r"run\.seed is a list"):
+        from_params(_p({"n_cell": 8, "seed": [1, 2, 3]}))
+
+
+def test_the_decomposition_summary_reports_every_derived_number():
+    """It goes to stdout so it lands in the scheduler's .out: with n_cell the cell
+    geometry is no longer something the operator typed and can read back."""
+    from gcmc.sim_setup import describe_parallel
+
+    cfg = from_params(_p({"n_cell": 80}, box=[31.322, 31.322, 24.994]))
+    text = describe_parallel(cfg)
+    for expected in (
+        "run.n_cell = 80",
+        "box side",
+        "cells per axis",
+        "= 80 cells",
+        "one cell is one core",
+        "cell pitch",
+        "cell length",
+        "gap between cells",
+        "buffer (border ring)",
+        "shortest cell edge",
+    ):
+        assert expected in text, f"{expected!r} missing from the summary"
+    # per-axis, not a single scalar standing in for three axes
+    assert text.count("x=") >= 4 and text.count("z=") >= 4
+
+
+def test_the_summary_reports_the_per_axis_gap():
+    """In n_cell mode the gap is the buffer on every axis; in manual mode it is
+    whatever the floor divide left over and can differ per axis, which is the
+    reason it is printed per axis rather than assumed."""
+    from gcmc.sim_setup import describe_parallel
+
+    text = describe_parallel(from_params(_p({"cell_length": 8.0, "buffer": 2.0})))
+    assert "manual geometry" in text
+    assert "gap between cells" in text
+
+
+def test_a_serial_run_says_so_instead_of_faking_a_decomposition():
+    from gcmc.sim_setup import describe_parallel
+
+    cfg = from_params(
+        {
+            "potential": {"main": "hard_core"},
+            "sampler": {"type": "metropolis"},
+            "ensemble": {"mu": 2.0, "dimension": 3, "box": 30.0},
+            "run": {"kind": "single"},
+        }
+    )
+    assert "serial" in describe_parallel(cfg)

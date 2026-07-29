@@ -63,6 +63,12 @@ of this block is examples/schema.json, which validation uses.
                  "burn_in": int,                     # default 0
                  "traj_every": int,                  # default 0 (off)
                  "checkpoint_every": int,            # default 1
+                 "log_flush_interval": float,        # default 0.0 = flush every row (unchanged). Seconds:
+                                                     #   a TIME FLOOR between log flushes, so the log only
+                                                     #   batches when rows arrive faster than this. Bounds
+                                                     #   the loss window in time, not in rows. Only worth
+                                                     #   setting for tiny sampling_window; measured, the log
+                                                     #   is 0.02% of runtime at the default cadence
                  "seed": int, "initial_config": str,
                  "matrix_config": str,               # QA only (required by it); file or folder-of-realizations
                  "radius": float,                    # default 0.5; diameter 2*radius is the hard-core floor
@@ -343,6 +349,10 @@ class Config:
     # independent counts (e.g. 4 x 4 x 5 = 80 cells in a cubic box).
     cell_length_sides: tuple[float, ...] | None
     buffer: float
+    # RNG seed: part of the physics identity, so each seed is a distinct run
+    # with its own directory (two seeds are two independent chains, never the
+    # same experiment). None means an unseeded (nondeterministic) chain.
+    seed: int | None
     x_spacing: float | None
     y_spacing: float | None
     sampling_window: int
@@ -350,6 +360,7 @@ class Config:
     burn_in: int
     traj_every: int
     checkpoint_every: int
+    log_flush_interval: float
     initial_config: str | None
     # quenched-annealed matrix: frozen obstacle positions the fluid cannot
     # overlap but which are never inserted/deleted/moved/counted. Default empty
@@ -727,6 +738,7 @@ def from_params(p: dict[str, Any]) -> Config:
             "control_gain_tau",
             "control_window",
             "sweep_label",
+            "log_flush_interval",
         },
     )
 
@@ -786,6 +798,12 @@ def from_params(p: dict[str, Any]) -> Config:
         )
     if aux_block is not None and not two_dim and "g3_csv" not in aux_block:
         raise ValueError("3D pmf auxiliary requires auxiliary.g3_csv")
+    if float(run.get("log_flush_interval", 0.0)) < 0.0:
+        raise ValueError(
+            f"run.log_flush_interval is a time floor between log flushes in "
+            f"seconds and cannot be negative (got "
+            f"{run['log_flush_interval']}); 0.0 means flush every row"
+        )
     if int(smp.get("depth", 0)) < 0:
         raise ValueError("depth must be >= 0")
     if metropolis:
@@ -1256,18 +1274,20 @@ def from_params(p: dict[str, Any]) -> Config:
         # set by the cell/cavity ratio (+19% at 2.7 cavity widths, +0.9 +/- 0.6%
         # at 10; cell_unify_plan.md U3). Warn with the number so an operator can
         # price it; never refuse, because the ratio is a choice, not an error.
-        if int(smp.get("depth", 0)) >= 1 and cav > 0.0:
-            _ratio = min(_plan.cell_length) / (2.0 * cav)
-            if _ratio < 10.0:
-                log.warning(
-                    "parallel depth>=1: shortest cell edge is %.3g = %.1f cavity "
-                    "widths. The cell proposal satisfies global but not detailed "
-                    "balance, and the residual density bias grows as this ratio "
-                    "falls (+19%% at 2.7 widths, +0.9%% at 10). Read this run "
-                    "against a serial curve, not against an equation of state.",
-                    min(_plan.cell_length),
-                    _ratio,
-                )
+        # The depth>=1 cell-proposal caveat is reported ONCE, by
+        # describe_parallel on stdout. It used to be a log.warning here, which
+        # fired on every from_params call -- the launcher builds a config to size
+        # the core budget before it launches anything, so a single sweep printed
+        # it three times before the run even started.
+
+    _raw_seed = run.get("seed")
+    if isinstance(_raw_seed, (list, tuple)):
+        raise ValueError(
+            "run.seed is a list (a sweep) but a single run got it unexpanded. "
+            "Launch sweeps with `python -m gcmc.launcher`; if you did, "
+            "gcmc/launcher.py on this machine is outdated."
+        )
+    seed_val = int(_raw_seed) if _raw_seed is not None else None
 
     return Config(
         potential=potential,
@@ -1337,6 +1357,7 @@ def from_params(p: dict[str, Any]) -> Config:
         cell_length=cell_length,
         cell_length_sides=cell_length_sides,
         buffer=buffer_v,
+        seed=seed_val,
         x_spacing=(float(run["x_spacing"]) if "x_spacing" in run else None),
         y_spacing=(float(run["y_spacing"]) if "y_spacing" in run else None),
         sampling_window=sampling_window,
@@ -1344,6 +1365,7 @@ def from_params(p: dict[str, Any]) -> Config:
         burn_in=int(run.get("burn_in", 0)),
         traj_every=int(run.get("traj_every", 0)),
         checkpoint_every=int(run.get("checkpoint_every", 1)),
+        log_flush_interval=float(run.get("log_flush_interval", 0.0)),
         initial_config=run.get("initial_config"),
         matrix_config=run.get("matrix_config"),
         sweep_label=run.get("sweep_label"),
@@ -1352,3 +1374,74 @@ def from_params(p: dict[str, Any]) -> Config:
         pore_R=_pore_R,
         pore_axis_len=_pore_axis_len,
     )
+
+
+def describe_parallel(cfg: Config) -> str:
+    """Human-readable report of the decomposition a parallel run resolved to.
+
+    Printed to STDOUT by the runner (so it lands in the scheduler's .out beside
+    the traceback if anything fails), never into run.log, which is the CSV data
+    file and must stay machine-parsable.
+
+    Everything derived is shown next to the constraint that shaped it, because
+    the whole point of submitting `n_cell` is that the cell geometry is no longer
+    something the operator typed and can read back from their own params file.
+    Per-axis quantities are printed per axis: the gap is `pitch - cell_length`
+    and equals the buffer exactly in n_cell mode, but in manual mode it is
+    whatever is left over after the floor divide and can differ per axis, which
+    is worth seeing rather than assuming.
+    """
+    if cfg.cell_counts is None:
+        return "decomposition: serial run (one core, no cells)"
+
+    dim = cfg.dimension
+    axes = "xyz"[:dim]
+    sides = [float(v) for v in cfg.box_dims]
+    n_ax = list(cfg.cell_counts)
+    cell = [float(v) for v in cfg.cell_dims]
+    pitch = [s / n for s, n in zip(sides, n_ax)]
+    gap = [p - c for p, c in zip(pitch, cell)]
+
+    reach = (
+        float(cfg.upper_cutoff)
+        if cfg.potential_type == "lennard_jones"
+        else 2.0 * float(cfg.radius)
+    )
+    floor = max(2.0 * float(cfg.cavity_radius), reach)
+    mode = (
+        f"run.n_cell = {cfg.n_cell}"
+        if cfg.n_cell is not None
+        else "manual geometry (run.cell_length + run.buffer)"
+    )
+
+    def row(label: str, vals: list[float], fmt: str = "10.4f") -> str:
+        body = "  ".join(f"{a}={v:{fmt}}" for a, v in zip(axes, vals))
+        return f"  {label:<22}: {body}"
+
+    lines = [
+        "=" * 72,
+        f"PARALLEL DECOMPOSITION  ({dim}D, {cfg.sampler}, depth={cfg.depth})",
+        "=" * 72,
+        f"  {'submitted as':<22}: {mode}",
+        row("box side", sides),
+        f"  {'cells per axis':<22}: "
+        + " x ".join(str(n) for n in n_ax)
+        + f"  = {cfg.n_workers} cells",
+        f"  {'cores':<22}: {cfg.n_workers}   (one cell is one core)",
+        row("cell pitch", pitch),
+        row("cell length", cell),
+        row("gap between cells", gap),
+        f"  {'buffer (border ring)':<22}: {cfg.buffer:.4f}"
+        f"   (interaction reach {reach:.4f})",
+        f"  {'shortest cell edge':<22}: {min(cell):.4f}"
+        f"   (floor {floor:.4f} = max(2*cavity {2.0 * cfg.cavity_radius:.4f},"
+        f" reach {reach:.4f}))",
+    ]
+    if cfg.cavity_radius > 0.0:
+        width = 2.0 * float(cfg.cavity_radius)
+        lines.append(
+            f"  {'cavity width':<22}: {width:.4f}"
+            f"   -> shortest cell = {min(cell) / width:.2f} cavity widths"
+        )
+    lines.append("=" * 72)
+    return "\n".join(lines)

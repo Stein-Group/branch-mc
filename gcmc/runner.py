@@ -449,6 +449,13 @@ def run(
         io.ensure_run_dir(paths, params)
         if getattr(cfg, "pore_geometry", None) is not None:
             _save_pore_geometry(cfg, paths.directory)
+    if cfg.mode == "parallel":
+        # stdout, not run.log: this belongs in the scheduler's .out next to any
+        # traceback, and run.log is machine-parsable CSV. Placed after the last
+        # of the three run_paths branches so it prints on every path, including
+        # a resume and a frozen-matrix run.
+        print(sim_setup.describe_parallel(cfg), flush=True)
+
     acquire_lock(paths)
 
     try:
@@ -479,7 +486,14 @@ def run(
             advance = parallel.advance_parallel
         else:
             advance = MC_engine.advance
-        log = io.Log(paths.log, LOG_HEADER, flush_every=1)
+        # flush_every is a memory cap; min_interval is the real control, and at
+        # its default of 0.0 every row is flushed exactly as before.
+        log = io.Log(
+            paths.log,
+            LOG_HEADER,
+            flush_every=1000,
+            min_interval=cfg.log_flush_interval,
+        )
         info = {
             "step": state.step,
             "mu": cfg.chem_pot,

@@ -119,7 +119,17 @@
     "matrix_config": str,                    // OPTIONAL, QA only (required by it). File, or a FOLDER:
                                              //   a folder pairs one realization per swept run, by index.
                                              //   Cannot be combined with a pore.
-    "checkpoint_every": int,                 // OPTIONAL, default 1
+    "checkpoint_every": int,                 // OPTIONAL, default 1. NOTE: 1 means a state save every
+                                             //   window, which MEASURED costs ~10% of runtime once rows
+                                             //   arrive every few ms. Raise it before reaching for
+                                             //   log_flush_interval — the log is not the bottleneck.
+    "log_flush_interval": float,             // OPTIONAL, default 0.0 = flush the log on every row
+                                             //   (unchanged). Seconds: a TIME FLOOR between flushes, so
+                                             //   the log batches only when rows arrive faster than this.
+                                             //   Bounds the loss window in TIME (a kill costs at most this
+                                             //   many seconds of log) rather than in rows. Measured, the
+                                             //   log is 0.02% of runtime at the default cadence, so this
+                                             //   only earns its keep for a tiny sampling_window.
     "traj_every": int,                       // OPTIONAL, default 0  (0 = off; was 1 in the old schema)
     "burn_in": int,                          // OPTIONAL, default 0
     "radius": float,                         // OPTIONAL, default 0.5. Sphere radius / LJ sigma-half;

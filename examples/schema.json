@@ -424,6 +424,11 @@
           "type": "integer",
           "minimum": 1
         },
+        "log_flush_interval": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Seconds; default 0.0, which flushes the log on every row (unchanged). A TIME FLOOR between log flushes: the log batches only when rows arrive faster than this, so a slow producer still flushes every row and a fast one batches by however much the observed row rate implies. What is bounded is the window of loss IN TIME -- a kill costs at most this many seconds of log at any row rate -- rather than a row count, which bounds memory and lets the loss window grow. Rarely needed: measured, the log is 0.02% of runtime at the default sampling_window, where the write amplification is checkpoint_every=1 (~10%) and traj_every=1 (+100%)."
+        },
         "seed": {
           "type": "integer"
         },

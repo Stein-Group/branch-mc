@@ -226,16 +226,22 @@ def cores_per_run(base: dict[str, Any]) -> int:
     run = base.get("run", {})
     if run.get("kind") != "parallel":
         return 1
-    if "n_cores" in run:
-        raise ValueError(
-            "run.n_cores does not apply to a parallel run: one cell is one "
-            "core, so the core count per run IS the cell count. Set run.n_cell "
-            "(or the full cell geometry) and pass the total budget for the "
-            "sweep with --cores."
-        )
+    # NB: `run.n_cores` is the SWEEP BUDGET (combinations x cores-per-run), which
+    # is a different quantity from cores-per-run and is read by main() below. It
+    # is NOT rejected here. An earlier version of this function refused it on a
+    # parallel base, which made the two checks contradict each other: omit it and
+    # main() says "cores is required: pass --cores N or set run.n_cores", supply
+    # it and this function refused it. The thing decision D4 retires is stating
+    # cores PER RUN, and there has never been a key for that other than the
+    # deprecated run.n_workers.
     from .sim_setup import from_params
 
-    return from_params(base).n_workers
+    # A swept base is not a single run: `run.seed: [1, 2, ...]` and friends are
+    # still lists here, and from_params rightly refuses an unexpanded sweep. Ask
+    # the first expanded combo instead. expand_sweep returns [base] unchanged
+    # when nothing is swept, so this covers both cases with one path.
+    combos, _ = expand_sweep(base)
+    return from_params(combos[0]).n_workers
 
 
 def plan(
@@ -248,8 +254,9 @@ def plan(
     if total > cores:
         raise ValueError(
             f"core budget exceeded: {len(combos)} run(s) x {per} core(s) each "
-            f"= {total} cores needed, but only {cores} available. Reduce the "
-            f"sweep, use fewer cells per run, or request more cores."
+            f"= {total} cores needed, but only {cores} available. One cell is "
+            f"one core, so a parallel run costs its cell count: reduce the "
+            f"sweep, lower run.n_cell, or request more cores."
         )
     return combos, labels, per, max(1, cores // per)
 
