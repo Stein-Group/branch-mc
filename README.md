@@ -251,11 +251,7 @@ that clear the matrix.
 **Depth guidance for QA.** Depth ≥ 1 works at moderate-to-high fluid density
 (verified: seeded above and below it converges to the same density). At the very
 dilute end the cavity proposal cannot bootstrap from a near-empty box, so the
-dilute isotherm tail (low μ) should use **depth 0**. At the dense end the same
-problem appears in reverse — depth ≥ 1 is correct but slow to *fill* from empty —
-and there `"initial_config": "grid"` (below) starts the fluid in the pores
-instead of waiting for it to nucleate; sites overlapping the matrix are dropped,
-so the start respects the obstacles.
+dilute isotherm tail (low μ) should use **depth 0**.
 
 ---
 
@@ -279,55 +275,10 @@ python -m gcmc.launcher base.json --cores 8 --root runs
 The budget refuses to start if `(combinations) × (cores per run) > cores`.
 For a parallel base, cores-per-run = `run.n_workers`; otherwise 1.
 
-**Starting configuration.** By default bulk μVT starts from an **empty box** —
-insertion centres on a uniform random point, so N = 0 → 1 grows on its own — while
-NVT, QA and confined runs seed a valid start of their own. Two ways to override it
-with `run.initial_config`:
-
-```json
-"initial_config": "grid"                    // lattice at a reasonable density
-"initial_config": "grid:0.28"               // ... at an explicit packing fraction
-"initial_config": "/abs/path/equilibrated"  // library, matched on mu/box/dim/T
-"initial_config": "/abs/path/start.xyz"     // one exact file
-```
-
-`"grid"` is a **literal token, not a path**. It builds a periodic-commensurate
-lattice at a dense-but-unambiguously-fluid packing fraction (**0.35** in 3D,
-**0.45** in 2D; hard-sphere freezing is η ≈ 0.494, hard-disk η ≈ 0.70), so the
-start melts within a few windows instead of sitting in a metastable crystal. Use
-it when growing from N = 0 is too slow — high μ with depth ≥ 1, where the cavity
-proposal needs something to nucleate around — and no equilibrated file exists for
-that box or temperature. Details:
-
-- Spacing always **exceeds** the contact distance (the hard core forbids
-  r ≤ σ, so exact contact is already an overlap), and it is recomputed from
-  L/n per axis, so an orthorhombic box has no overlapping seam at the wrap.
-- The density is the closest an integer number of lattice planes can get, which
-  in a small box may be a few percent either side of the target. The achieved
-  value is logged; a gap wider than 15% is warned about.
-- A μVT target density (`target_N` / `target_eta` / `target_density`) is adopted
-  as the target if no explicit value is given, so the chain starts where the
-  controller is driving it. **NVT ignores the density** and places exactly N,
-  since repacking conserves it.
-- QA and confined runs drop lattice sites that overlap a frozen obstacle or fall
-  outside the pore, so the achieved density there is lower — correctly, since
-  that is excluded volume.
-- **Works in parallel**, serial, and every ensemble. The decomposition draws a
-  fresh random cell origin each window, so a lattice never sits systematically on
-  cell edges; and because `d < cell_length` is strict, a molecule that does land
-  on an edge falls into the frozen gap for that window rather than into two cells
-  at once. Verified as a partition (no molecule lost or duplicated) including at
-  an origin constructed to put a whole lattice plane on a cell edge, and
-  end-to-end: at βμ=2, box 12, parallel grid start (N: 1000 → 742) and parallel
-  empty start (N: 0 → 730) both converge on Carnahan–Starling's ⟨N⟩ = 727.
-
 **Reproducibility.** A run directory is named `<identity-hash>__<tag>`. The hash
 covers everything physically meaningful (potential, sampler, depth, μ or N,
 cutoffs, ensemble, and the matrix content for QA), so distinct physics never
-collide and identical physics resumes in place. `initial_config` is **not** part
-of the identity: the starting point is not the ensemble, so a grid start and an
-empty start at the same μ are the same experiment and **share one run directory**.
-Point `--root` elsewhere (or change the seed) to run both side by side.
+collide and identical physics resumes in place.
 
 ---
 
@@ -383,9 +334,6 @@ self-consistency. 32 physics tests in `tests/test_physics.py`:
   cavity proposal cannot grow from a near-empty box. Use depth 0 for the dilute
   isotherm points; depth ≥ 1 is correct at production density. A detailed-balance
   fix for the matrix-blocked trial slots across the full dilute range is pending.
-  Note that `"initial_config": "grid"` does **not** rescue this: the drain is a
-  property of the move, not of the starting configuration, so a dense start only
-  postpones it.
 - **QA is serial, μVT, hard_core or LJ+branch only** — enforced by the validator.
 - **Depth is capped at 3.**
 - **Full-span channel with LJ is cheap at small depth, expensive at

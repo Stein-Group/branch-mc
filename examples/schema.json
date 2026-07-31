@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "gcmc params.json",
-  "description": "Input template for a GCMC run or sweep. Pass to `python -m gcmc run` for one run, or to `python -m gcmc.launcher` for a sweep. For sweeps, set ensemble.mu, sampler.trial_density, and/or sampler.trial_box_side to a LIST; the launcher takes the Cartesian product (two lists = a heatmap). Every other field stays scalar. Ensembles: muVT (grand canonical), NVT (canonical, repacking), QA (quenched-annealed fluid in a frozen matrix; set ensemble.type='QA' and run.matrix_config).",
+  "description": "Input template for a GCMC run or sweep. Pass to `python -m gcmc run` for one run, or to `python -m gcmc.launcher` for a sweep. For sweeps, set ensemble.mu, sampler.trial_density, and/or sampler.trial_box_side to a LIST; the launcher takes the Cartesian product (two lists = a heatmap). Every other field stays scalar. Ensembles: muVT (grand canonical), NVT (canonical, repacking), QA (quenched-annealed fluid in a frozen matrix; set ensemble.type='QA' and run.matrix_config). Any key beginning with an underscore is ignored by the validator, so a params file can carry its own explanation; every examples/*.json uses \"_comment\" for that.",
   "type": "object",
   "required": [
     "potential",
@@ -38,7 +38,7 @@
     },
     "auxiliary": {
       "type": "object",
-      "description": "OPTIONAL. Omit for no auxiliary (pure main potential). pmf adds a g3 selection bias that divides out of the density.",
+      "description": "OPTIONAL. Omit for no auxiliary (pure main potential). 'pmf' adds a tabulated g3 selection bias. 'short_range' is dual-cutoff CBMC: the same Lennard-Jones truncated at auxiliary.cutoff is used to propose and select, and the mismatch against run.upper_cutoff is divided back out in the acceptance. Both leave the sampled ensemble unchanged; they only change which moves get proposed.",
       "required": [
         "type"
       ],
@@ -46,7 +46,8 @@
       "properties": {
         "type": {
           "enum": [
-            "pmf"
+            "pmf",
+            "short_range"
           ]
         },
         "g3_csv": {
@@ -62,6 +63,11 @@
         },
         "delta_eta": {
           "type": "number"
+        },
+        "cutoff": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "short_range only, and required for it: the radius the proposal and the clique sum are evaluated at, e.g. 1.5. Must satisfy run.lower_cutoff < cutoff <= run.upper_cutoff. The PHYSICS cutoff is always run.upper_cutoff and is not changed by this key; cutoff == run.upper_cutoff is legal and is the exact no-op control. Supported for sampler.type='channel' with potential.main='lennard_jones' in 3D bulk."
         }
       }
     },
@@ -103,15 +109,16 @@
             {
               "type": "string",
               "enum": [
+                "cyclic",
                 "full",
                 "box",
                 "full_box",
                 "span"
               ],
-              "description": "full-span rod: the rod runs wall to wall along a freely drawn orientation, so its length is set per move by where the line meets the box (box for an axis line, up to box*sqrt(3) for the body diagonal). The periodic guard is lifted and the sweep uses minimum-image distances with retention eviction, so a clique that closes through the periodic boundary (the seam) is scored exactly once. Requires trial_density; sampler.trials is rejected because the length, hence the trial count, varies per move."
+              "description": "cyclic rod: the rod runs wall to wall along a freely drawn orientation, so its length is set per move by where the line meets the box (box for an axis line, up to box*sqrt(3) for the body diagonal). The periodic guard is lifted and the sweep uses minimum-image distances with retention eviction, so a clique that closes through the periodic boundary (the seam) is scored exactly once. Requires trial_density; sampler.trials is rejected because the length, hence the trial count, varies per move."
             }
           ],
-          "description": "channel only: length of the long axis of the oriented trial cuboid. A positive number selects the fixed-length rod; the string \"full\" (or \"box\"/\"full_box\"/\"span\") selects the wall-to-wall full-span rod."
+          "description": "channel only: length of the long axis of the oriented trial cuboid. A positive number selects the fixed-length rod; the string \"cyclic\" selects the wall-to-wall rod whose ends meet through the periodic boundary. \"full\", \"box\", \"full_box\" and \"span\" are accepted legacy spellings of \"cyclic\"."
         },
         "channel_width": {
           "type": "number",
@@ -485,6 +492,10 @@
           "description": "Written BY gcmc.launcher into each expanded run, naming the swept axes and their values (e.g. 'mu2.0_seed3'); it names the run directory and is not normally set by hand. It is declared here because run.additionalProperties is false, so without it every launcher-expanded config would fail validation against this schema."
         }
       }
+    },
+    "_comment": {
+      "type": "string",
+      "description": "Free text, ignored by the validator. Any underscore-prefixed key is ignored, at the top level and inside every section, so the reason for a run can live in the run."
     }
   }
 }

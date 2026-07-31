@@ -62,6 +62,7 @@ _IDENTITY_FIELDS = (
     "channel",
     "channel_length",
     "channel_width",
+    "aux_cutoff",
 )
 
 
@@ -85,6 +86,13 @@ def identity_dict(cfg: Config) -> dict[str, object]:
     # from before the channel sampler existed.
     active_channel = getattr(cfg, "channel", False)
     skip = () if active_channel else ("channel", "channel_length", "channel_width")
+    # the short-range auxiliary radius identifies a run only when that auxiliary
+    # is on; with it off the key is omitted so every fingerprint predating the
+    # auxiliary is byte-for-byte what it was. Note aux_cutoff DOES belong to the
+    # identity when set: it changes the proposal distribution, hence the Markov
+    # chain, even though the sampled ensemble is unchanged by construction.
+    if getattr(cfg, "aux_cutoff", None) is None:
+        skip = (*skip, "aux_cutoff")
     # box_sides is part of the physics identity only for an orthorhombic box;
     # cubic runs (box_sides None) omit it so the fingerprint is byte-identical to
     # before per-axis boxes existed.

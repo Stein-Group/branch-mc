@@ -17,8 +17,15 @@ of this block is examples/schema.json, which validation uses.
                  "T": float,                        # required iff main = lennard_jones, else forbidden
                  "tail": bool},                     # default True; LJ only; auto-off under a pore/QA matrix
 
-  "auxiliary":  {"type": "pmf",                      # OPTIONAL block; omit = no aux
-                 "g3_csv": str,                      # required iff present and 3D
+  "_comment":   str,                                 # OPTIONAL anywhere; any key starting with
+                                                     #   "_" is ignored, so a params file can
+                                                     #   carry its own explanation
+  "auxiliary":  {"type": "pmf" | "short_range",      # OPTIONAL block; omit = no aux
+                 "g3_csv": str,                      # pmf only; required iff 3D
+                 "cutoff": float,                    # short_range only, required for it:
+                                                     #   the proposal/selection radius, e.g. 1.5.
+                                                     #   lower_cutoff < cutoff <= upper_cutoff.
+                                                     #   channel + lennard_jones + 3D bulk only.
                  "eta": float,                       # default 0.69 (2D)
                  "gamma_max": float, "delta_eta": float},
 
@@ -30,7 +37,12 @@ of this block is examples/schema.json, which validation uses.
                  "trials": int | "trial_density": float,   # trials default 30; forbidden for metropolis; XOR
                  "trial_box_side": float,                  # default 3.0; rosenbluth/branch only (cube trial
                                                            #   box); rejected for channel and metropolis
-                 "channel_length": float, "channel_width": float},  # channel only: oriented cuboid extents
+                 "channel_length": float | "cyclic",        # channel only: rod length along the sweep
+                                                           #   axis, or "cyclic" for a wall-to-wall rod
+                                                           #   whose ends meet through the boundary.
+                                                           #   Legacy spellings "full" | "box" |
+                                                           #   "full_box" | "span" are equivalent.
+                 "channel_width": float},                  # channel only: square cross-section side
 
   "ensemble":   {"dimension": 2 | 3,                 # required
                  "type": "muVT" | "NVT" | "QA" | "confined",   # default muVT
@@ -134,6 +146,14 @@ Samplers x potential:
 An optional pmf auxiliary layers onto hard_core (-> aux) or lennard_jones
 (-> ljaux, 3D only, needs auxiliary.g3_csv); reweight takes no auxiliary.
 
+The short_range auxiliary is a different thing wearing the same block: the SAME
+Lennard-Jones at a shorter radius, used to propose and select, with the mismatch
+divided out in the acceptance (dual-cutoff CBMC). It does not change the
+potential_type -- the run is still ljbranch, with aux_cutoff as a parameter of it
+-- so it cannot disturb an existing run fingerprint. Supported for channel +
+lennard_jones + 3D + bulk + serial only; every other combination is refused with
+a message naming the reason.
+
 Samplers x ensemble:
   muVT        every sampler
   NVT         every sampler except reweight paths that assume muVT targeting
@@ -142,7 +162,7 @@ Samplers x ensemble:
 
 Dimension:
   reweight    2D only
-  channel     3D only
+  channel     2D and 3D (2D body is an oriented rectangle, not a cuboid)
   confined    3D only
   LJ + pmf    3D only
 
@@ -274,8 +294,16 @@ def _check(
 ) -> None:
     """Validate one params section against its schema: unknown keys are an
     error (typos surface immediately, not as silently ignored physics) and
-    required keys must be present."""
-    extra = set(section) - set(allowed)
+    required keys must be present.
+
+    Keys beginning with an underscore are IGNORED, so a params file can carry its
+    own explanation. JSON has no comments, and the alternative -- keeping the
+    rationale for a run in a separate file from the run -- is how a job ends up
+    being repeated a year later by someone who cannot tell what it was for. The
+    prefix cannot collide with a real key because every schema key is a bare
+    identifier. `examples/*.json` all use `_comment`.
+    """
+    extra = {k for k in set(section) - set(allowed) if not k.startswith("_")}
     if extra:
         raise ValueError(f"unknown keys {sorted(extra)}; allowed {sorted(allowed)}")
     missing = set(required) - set(section)
@@ -297,7 +325,7 @@ class Config:
 
     # identity-bearing
     potential: str  # "hard_sphere" | "lennard_jones"
-    bias: str | None  # None | "pmf" | "psi6"
+    bias: str | None  # None | "pmf" | "short_range" | "psi6"
     sampler: str
     dimension: int
     chem_pot: float
@@ -386,10 +414,15 @@ class Config:
     pore_R: float | None = None  # cylinder radius (axis along z, at centre)
     pore_axis_len: float | None = None  # cylinder axial length (periodic z)
     # channel sweep (sampler == "channel"): thin oriented cuboid trial region
+    # short-range (dual-cutoff) auxiliary radius, or None when the auxiliary is
+    # off. The PHYSICS cutoff is always upper_cutoff; this is only the radius the
+    # proposal and the clique sum are evaluated at, with the mismatch divided out
+    # in the acceptance. aux_cutoff == upper_cutoff is a legal no-op.
+    aux_cutoff: float | None = None
     channel: bool = False
     channel_length: float = 0.0  # cuboid length along the sweep axis
     channel_width: float = 0.0  # cuboid cross-section (square side)
-    channel_full_span: bool = False  # channel_length == "full": wall-to-wall
+    channel_cyclic: bool = False  # channel_length == "cyclic": wall-to-wall rod
     # Per-axis orthorhombic box (A2.1). None means cubic: every axis is `box`,
     # and the scalar path runs exactly as before, so cubic fingerprints, RNG
     # streams and characterisation trajectories are unchanged. When set it is a
@@ -705,12 +738,59 @@ def from_params(p: dict[str, Any]) -> Config:
             mu = float(ens["mu"])
 
     # ---- auxiliary ----
+    # Two auxiliaries, and they are unrelated apart from sharing this block:
+    #
+    #   "pmf"          the tabulated g3(r, cos theta) / analytic hard-disk g(r)
+    #                  bias. Biases WHICH trial is selected; the main potential
+    #                  is untouched. Needs g3_csv (3D) and a gamma schedule.
+    #   "short_range"  dual-cutoff CBMC (Vlugt, Martin, Smit, Siepmann, Krishna,
+    #                  Mol. Phys. 94, 727 (1998)): the SAME Lennard-Jones,
+    #                  truncated at `cutoff` < upper_cutoff, used to propose and
+    #                  select; the mismatch against the full potential is divided
+    #                  back out in the acceptance. Takes no g3 table and no gamma
+    #                  schedule -- there is no exponent to tune, only a radius.
     aux_block = p.get("auxiliary")
-    pmf = aux_block is not None
+    aux_type = None if aux_block is None else aux_block.get("type")
+    pmf = aux_type == "pmf"
+    short_range = aux_type == "short_range"
+    aux_cutoff: float | None = None
     if aux_block is not None:
-        _check(aux_block, {"type", "g3_csv", "eta", "gamma_max", "delta_eta"}, {"type"})
-        if aux_block["type"] != "pmf":
-            raise ValueError("the only auxiliary potential is 'pmf'")
+        _check(
+            aux_block,
+            {"type", "g3_csv", "eta", "gamma_max", "delta_eta", "cutoff"},
+            {"type"},
+        )
+        if not (pmf or short_range):
+            raise ValueError(
+                f"unknown auxiliary.type {aux_type!r}; the auxiliaries are "
+                f"'pmf' (tabulated g3 selection bias) and 'short_range' "
+                f"(dual-cutoff: the same LJ at a shorter radius)"
+            )
+        if short_range:
+            # keys that belong to the pmf bias and mean nothing here. Silently
+            # ignoring them would let someone believe a gamma schedule is being
+            # applied to a scheme that has no exponent.
+            stray = {"g3_csv", "eta", "gamma_max", "delta_eta"} & set(aux_block)
+            if stray:
+                raise ValueError(
+                    f"auxiliary.type='short_range' takes only 'cutoff'; "
+                    f"{sorted(stray)} belong to the pmf bias (a tabulated table "
+                    f"and its gamma exponents). The short-range auxiliary is the "
+                    f"same potential at a shorter radius: it has no table and no "
+                    f"exponent to tune."
+                )
+            if "cutoff" not in aux_block:
+                raise ValueError(
+                    "auxiliary.type='short_range' requires auxiliary.cutoff (the "
+                    "radius used to propose and select, e.g. 1.5). The physics "
+                    "cutoff stays run.upper_cutoff and is not changed by it."
+                )
+            aux_cutoff = float(aux_block["cutoff"])
+        elif "cutoff" in aux_block:
+            raise ValueError(
+                "auxiliary.cutoff belongs to auxiliary.type='short_range'; the "
+                "pmf bias is tabulated to its own range and reads run.upper_cutoff"
+            )
 
     # ---- run ----
     run = p.get("run", {})
@@ -792,7 +872,7 @@ def from_params(p: dict[str, Any]) -> Config:
         raise ValueError("reweight (psi6) is a 2D method; use dimension 2")
     if pmf and lj and two_dim:
         raise ValueError("the Lennard-Jones + pmf auxiliary mode is 3D only")
-    if aux_block is not None and lj and "g3_csv" not in aux_block:
+    if pmf and lj and "g3_csv" not in aux_block:
         raise ValueError("Lennard-Jones + pmf requires auxiliary.g3_csv")
     if pmf and branch:
         raise ValueError("branch takes no auxiliary potential")
@@ -800,8 +880,68 @@ def from_params(p: dict[str, Any]) -> Config:
         raise ValueError(
             "reweight uses psi6, not a pmf auxiliary; remove the auxiliary block"
         )
-    if aux_block is not None and not two_dim and "g3_csv" not in aux_block:
+    if pmf and not two_dim and "g3_csv" not in aux_block:
         raise ValueError("3D pmf auxiliary requires auxiliary.g3_csv")
+
+    # ---- short-range auxiliary support matrix -----------------------------
+    # Deliberately narrow. Every rejection below is a combination that is either
+    # meaningless or simply untested; each is a separate, cheap relaxation later,
+    # and refusing them now is what keeps "validated" honest. The reason is spelt
+    # out in each message because these are the guards a user will actually hit.
+    if short_range:
+        if not lj:
+            raise ValueError(
+                "auxiliary.type='short_range' needs potential.main="
+                "'lennard_jones'. It shortens an interaction range, and a hard "
+                "core has no range to shorten -- its exclusion floor IS the "
+                "interaction, so there is nothing to propose with and nothing "
+                "to correct."
+            )
+        if sampler != "channel":
+            raise ValueError(
+                f"auxiliary.type='short_range' is supported for "
+                f"sampler.type='channel' only (got {sampler!r}). The saving is "
+                f"in the transfer-matrix sweep, whose DP window width IS the "
+                f"interaction radius. 'branch' would gain almost nothing: its "
+                f"clique adjacency is built at the overlap floor, not at the "
+                f"cutoff, so the enumeration cost does not shrink. 'metropolis' "
+                f"has a single trial and no selection, so there is no proposal "
+                f"bias to divide out. 'rosenbluth' would be correct and is a "
+                f"clean later extension, but its per-trial weight is a vector "
+                f"operation, not a combinatorial one."
+            )
+        # 2D IS supported. The sweep is dimension-agnostic (it sorts on axis 0
+        # and takes full Euclidean distances), the trial body is an oriented
+        # rectangle instead of a cuboid, and the periodic guard already carries
+        # (dim-1) widths. tests/unit/test_channel_2d.py pins the 2D sweeps
+        # against brute-force clique enumeration and the 2D engine against the
+        # exact P(N=0)/P(N=1) ratio, for both the fixed and the cyclic rod.
+        #
+        # WHAT 2D DOES NOT INHERIT, and it is worth knowing before trusting a
+        # number: that engine-level 2D check is HARD-CORE only. 2D + LJ + channel
+        # runs and gives a plausible density, but it has never been validated
+        # against a reference at the engine level, in either direction. The
+        # auxiliary is exact relative to whatever the 2D LJ channel already
+        # samples -- its own gate is aux-on == aux-off -- so it cannot make that
+        # worse, but it cannot vouch for it either. 2D LJ metropolis does run, so
+        # a reference for closing that gap exists.
+        if qa:
+            raise ValueError(
+                "auxiliary.type='short_range' does not support the QA frozen "
+                "matrix: frozen obstacles must be dropped from the LJ sum in "
+                "the member weights, the full-potential energy AND the new "
+                "correction term, and QA + channel is not a supported "
+                "combination to begin with."
+            )
+        if _pore_geometry is not None:
+            raise ValueError(
+                "auxiliary.type='short_range' does not support a confining pore "
+                "yet. The algebra carries over (the tail is already disabled in "
+                "a pore, so the correction adds cleanly), but pore + channel is "
+                "untested."
+            )
+        # The numeric guard needs lower_cutoff and uc, which are resolved later;
+        # it lives immediately after them (search: "short-range auxiliary radius").
     if float(run.get("log_flush_interval", 0.0)) < 0.0:
         raise ValueError(
             f"run.log_flush_interval is a time floor between log flushes in "
@@ -873,7 +1013,7 @@ def from_params(p: dict[str, Any]) -> Config:
     lower_cutoff = float(run.get("lower_cutoff", _lower_default))
     r_squared = lower_cutoff * lower_cutoff
 
-    channel_full_span = False
+    channel_cyclic = False
     if metropolis:
         trial_box_side = 0.0
         cav = 0.0
@@ -895,16 +1035,25 @@ def from_params(p: dict[str, Any]) -> Config:
         if isinstance(_clen, (list, tuple)):
             raise ValueError(
                 f"sampler.channel_length must be a single number (the cuboid "
-                f"length along the sweep axis) or the string 'full' for a "
+                f"length along the sweep axis) or the string 'cyclic' for a "
                 f"wall-to-wall rod; got a list of {len(_clen)}. The channel body "
                 f"is one oriented cuboid, so it has one length; per-axis lists "
                 f"apply to run.cell_length (parallel decomposition), not here."
             )
-        channel_full_span = isinstance(_clen, str) and _clen.strip().lower() in (
-            "full",
-            "box",
-            "full_box",
-            "span",
+        # "cyclic" is the canonical spelling: the rod runs wall to wall, so its
+        # two ends meet through the periodic boundary and the transfer-matrix
+        # sweep closes on itself (ChannelSweepCyclic scores that seam with true
+        # minimum-image distances instead of an axial window). The four legacy
+        # spellings are still accepted so existing params files keep working;
+        # they are exactly equivalent, and because the parser collapses all of
+        # them to channel_length = 0.0 the run identity does not record which
+        # word was typed. See test_channel_cyclic_spellings_share_one_run_id.
+        channel_cyclic = isinstance(_clen, str) and _clen.strip().lower() in (
+            "cyclic",
+            "full",  # legacy
+            "box",  # legacy
+            "full_box",  # legacy
+            "span",  # legacy
         )
         channel_width = float(smp.get("channel_width", 0.0))
         if not (diameter <= channel_width <= 2.0 * diameter + 1e-9):
@@ -912,8 +1061,8 @@ def from_params(p: dict[str, Any]) -> Config:
                 f"channel_width must lie in [sigma, 2 sigma] = "
                 f"[{diameter}, {2 * diameter}]; got {channel_width}"
             )
-        if channel_full_span:
-            # Full-span rod: the length is set per move by the orientation (wall
+        if channel_cyclic:
+            # Cyclic rod: the length is set per move by the orientation (wall
             # to wall, box for an axis line up to box*sqrt(3) for the body
             # diagonal), so there is no fixed channel_length and no fixed trial
             # count. trial_density (spheres per unit volume) fixes the linear
@@ -922,13 +1071,13 @@ def from_params(p: dict[str, Any]) -> Config:
             channel_length = 0.0
             if "trials" in smp:
                 raise ValueError(
-                    "full-span channel sets its length per move, so a fixed "
+                    "cyclic channel sets its length per move, so a fixed "
                     "trial count is ambiguous; give sampler.trial_density "
                     "(spheres per unit volume) instead of sampler.trials"
                 )
             trial_density = float(smp.get("trial_density", 0.0))
             if trial_density <= 0.0:
-                raise ValueError("full-span channel needs trial_density > 0")
+                raise ValueError("cyclic channel needs trial_density > 0")
             # longest possible chord is the box body diagonal: box*sqrt(dim).
             # The cross-section carries (dim-1) widths, so the swept measure is
             # chord * w**(dim-1) -- an area in 2D, a volume in 3D.
@@ -938,11 +1087,23 @@ def from_params(p: dict[str, Any]) -> Config:
                 int(round(trial_density * _maxchord * channel_width ** (dim - 1))),
             )
         else:
+            # A string that reached here is not one of the cyclic spellings, so
+            # it is either a typo for "cyclic" or a malformed number. float()
+            # would report `could not convert string to float`, which names
+            # neither cause; say what the key actually accepts instead.
+            if isinstance(_clen, str):
+                raise ValueError(
+                    f"sampler.channel_length={_clen!r} is not recognised: give a "
+                    f'positive number for a fixed-length rod, or "cyclic" for a '
+                    f"wall-to-wall rod whose ends meet through the periodic "
+                    f'boundary (legacy spellings "full", "box", "full_box", '
+                    f'"span" are also accepted)'
+                )
             channel_length = float(_clen)
             if channel_length <= 0.0:
                 raise ValueError(
                     "channel sampler needs channel_length > 0 "
-                    '(or the string "full" for a wall-to-wall '
+                    '(or the string "cyclic" for a wall-to-wall '
                     "rod), and channel_width > 0"
                 )
             # 3D body is a cuboid L x w x w (a volume); 2D body is a rectangle
@@ -1050,6 +1211,30 @@ def from_params(p: dict[str, Any]) -> Config:
                 _where,
             )
         lj_tail_on = False
+
+    # ---- short-range auxiliary radius (needs both cutoffs resolved) --------
+    # The floor is deliberately NOT made configurable per-auxiliary: the clique
+    # adjacency is built at `lower_cutoff`, so a separate aux floor would change
+    # which cliques exist rather than only how they are weighted, and a clique
+    # legal under the aux but overlapping under the main potential would carry
+    # true weight zero. Admissibility is also read off the aux-radius neighbour
+    # query as `all(d >= lower_cutoff)`, which only means anything while that
+    # query reaches past the floor.
+    if short_range:
+        assert aux_cutoff is not None  # set wherever short_range is True
+        # The RANGE check comes first, and the staged-delivery interlock second.
+        # Ordering matters for the message the user gets: a radius below the
+        # exclusion floor is invalid whatever the implementation status is, so
+        # reporting it as "not implemented yet" would be actively misleading.
+        if not (lower_cutoff < aux_cutoff <= uc):
+            raise ValueError(
+                f"auxiliary.cutoff must satisfy run.lower_cutoff < cutoff <= "
+                f"run.upper_cutoff, i.e. {lower_cutoff} < cutoff <= {uc}; got "
+                f"{aux_cutoff}. At or below the floor the auxiliary cannot see "
+                f"the overlap test it has to respect; above the physics cutoff "
+                f"it is not an auxiliary at all. cutoff == upper_cutoff is "
+                f"allowed on purpose: it is the exact no-op control."
+            )
     if lj:
         if two_dim:
             # 2D mean-field tail (g(r)=1 beyond rc), integrated over the plane:
@@ -1065,7 +1250,11 @@ def from_params(p: dict[str, Any]) -> Config:
     # three orthogonal axes; the flat engine tag is derived from them so nothing
     # downstream has to special-case the combinations by hand.
     potential = "lennard_jones" if lj else "hard_sphere"
-    bias = "pmf" if pmf else ("psi6" if reweight else None)
+    bias = (
+        "pmf"
+        if pmf
+        else ("short_range" if short_range else ("psi6" if reweight else None))
+    )
     ptype = _derive_potential_type(potential, bias, sampler)
 
     has_matrix_cfg = run.get("matrix_config") is not None
@@ -1119,17 +1308,40 @@ def from_params(p: dict[str, Any]) -> Config:
         # one oriented cuboid, so the whole pool lives in that body. Its space
         # diagonal must stay below the box minus the interaction range (sigma for
         # hard core, rc for LJ) so local distances equal periodic distances. The
-        # full-span rod lifts this guard on purpose and instead computes true
+        # cyclic rod lifts this guard on purpose and instead computes true
         # minimum-image distances in the sweep, so the guard does not apply.
-        if not channel_full_span:
+        if not channel_cyclic:
+            # The margin is the largest distance the SWEEP will ever read, which is
+            # not necessarily the physics cutoff. The guarded sweep works on local
+            # cuboid coordinates with no minimum image, and its masks are built at
+            # `lower` (overlap) and at the interaction radius; with a short-range
+            # auxiliary that radius is aux_cutoff, so no pair beyond aux_cutoff is
+            # ever consulted and the guard only has to exclude wrapped images
+            # closer than THAT. Everything evaluated at the full upper_cutoff --
+            # the member weights, the tail, and the dual-cutoff correction's two
+            # energies -- goes through the CellList or an explicit minimum image,
+            # so none of it depends on this guard.
+            #
+            # What it buys is modest and worth stating plainly: the cuboid diagonal
+            # is orientation-independent, so this relaxes the admissible rod LENGTH,
+            # not the set of orientations. At box 12, w 1.4, uc 2.5 the longest
+            # legal rod goes from 9.29 to 10.31 (+11%) at aux_cutoff 1.5. The
+            # cyclic rod already lifts the guard entirely and spans the box, so this
+            # matters only if a fixed-length rod is wanted for its own sake.
             guard_cut = uc if lj else diameter
+            if lj and short_range:
+                assert aux_cutoff is not None
+                guard_cut = aux_cutoff
             # body diagonal: cuboid sqrt(L^2 + 2 w^2) in 3D, rectangle
             # sqrt(L^2 + w^2) in 2D. The cross-section carries (dim-1) widths.
             diag = _m.sqrt(channel_length**2 + (dim - 1) * channel_width**2)
             if diag > box - guard_cut:
                 raise ValueError(
-                    f"channel geometry violates the periodic guard: cuboid diagonal "
-                    f"{diag:.3f} must be <= box - cutoff = {box - guard_cut:.3f}"
+                    f"channel geometry violates the periodic guard: cuboid "
+                    f"diagonal {diag:.3f} must be <= box - {guard_cut:.3f} = "
+                    f"{box - guard_cut:.3f} (the margin is the largest distance "
+                    f"the sweep reads, i.e. auxiliary.cutoff when a short-range "
+                    f"auxiliary is configured, else run.upper_cutoff)"
                 )
 
     # ---- fail fast on physically invalid runs, one specific message each ----
@@ -1316,7 +1528,7 @@ def from_params(p: dict[str, Any]) -> Config:
         channel=channel,
         channel_length=channel_length,
         channel_width=channel_width,
-        channel_full_span=channel_full_span,
+        channel_cyclic=channel_cyclic,
         full_repacking=full_repacking,
         move_factor=move_factor,
         temp=temp,
@@ -1336,9 +1548,8 @@ def from_params(p: dict[str, Any]) -> Config:
             if aux_block is not None and "delta_eta" in aux_block
             else None
         ),
-        g3_csv=(
-            aux_block.get("g3_csv") if aux_block is not None and not two_dim else None
-        ),
+        g3_csv=(aux_block.get("g3_csv") if pmf and not two_dim else None),
+        aux_cutoff=aux_cutoff,
         two_dim=two_dim,
         parallel=parallel,
         beta=beta,

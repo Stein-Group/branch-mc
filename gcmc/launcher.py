@@ -65,6 +65,11 @@ _AXES = (
     ("trial_box_side", "sampler", "trial_box_side"),
     ("channel_length", "sampler", "channel_length"),
     ("channel_width", "sampler", "channel_width"),
+    # The short-range auxiliary radius. Sweeping it is how the speedup/acceptance
+    # trade-off gets measured, and the sweep carries its own control: the arm at
+    # cutoff == run.upper_cutoff is the exact no-op, so one launch produces both
+    # the tuning curve and the reference it must agree with.
+    ("aux_cutoff", "auxiliary", "cutoff"),
 )
 
 # nested pore axes (ensemble.pore.{H,R}); handled separately since they live one

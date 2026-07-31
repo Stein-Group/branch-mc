@@ -39,7 +39,7 @@ def test_reweight_constraints():
             "potential": {"main": "hard_core"},
             "ensemble": {"mu": -2.0, "dimension": 2, "box": 30.0},
             "sampler": {"type": "reweight"},
-            "run": {"kind": "parallel", "n_cell": 8},
+            "run": {"kind": "parallel"},
         }
     )
 
@@ -67,7 +67,7 @@ def test_channel_constraints():
             "potential": {"main": "hard_core"},
             "ensemble": {"mu": 2.0, "dimension": 3, "box": 12.0},
             "sampler": base_smp,
-            "run": {"kind": "parallel", "n_cell": 8},
+            "run": {"kind": "parallel"},
         }
     )
     # depth 0
@@ -129,7 +129,8 @@ def _parallel_run(dim):
     # cell_length + buffer must fit the box; 8 + 2 <= 30 grids into 27/9 cells.
     return {
         "kind": "parallel",
-                "sampling_window": 50,
+        "n_workers": 1,
+        "sampling_window": 50,
         "cell_length": 8.0,
         "buffer": 2.0,
     }

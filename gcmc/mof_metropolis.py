@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from scipy.spatial import cKDTree
@@ -73,6 +74,7 @@ def _guest_guest_energy(
     table: PairTable,
     nn: int,
     uc: float,
+    tree: Any = None,
 ) -> tuple[float, bool, int]:
     """Guest-guest energy of `trial` (a `trial_species` guest) against a fluid of
     mixed species, whether it overlaps any of them, and the number of guest-guest
@@ -90,7 +92,15 @@ def _guest_guest_energy(
     """
     if len(others) == 0:
         return 0.0, False, 0
-    tree = cKDTree(others, boxsize=box)
+    # `tree` lets the caller hand in a kd-tree it has already built over exactly
+    # these `others`. Profiling the multi-species metropolis path found this
+    # function called 105344 times in one test with a tree rebuilt on EVERY call,
+    # and the translate move calls it TWICE over the same `others` -- once for the
+    # displaced position and once for the original -- so half those builds were
+    # duplicates of the build beside them. Passing the tree in is bit-identical by
+    # construction: the same tree over the same points answers the same query.
+    if tree is None:
+        tree = cKDTree(others, boxsize=box)
     k = min(nn, len(others))
     d, idx = tree.query(trial, k=k, distance_upper_bound=uc)
     d = np.atleast_1d(d)
@@ -330,9 +340,12 @@ def advance_metropolis_mof_ms(
         tbl: PairTable,
         nn: int,
         uc: float,
+        tree: Any = None,
     ) -> tuple[float, bool]:
         nonlocal n_evals
-        u, ov, ne = _gg_fn(trial, others, others_s, box_, pot, ts, tbl, nn, uc)
+        u, ov, ne = _gg_fn(
+            trial, others, others_s, box_, pot, ts, tbl, nn, uc, tree=tree
+        )
         n_evals += ne
         return u, ov
 
@@ -358,14 +371,34 @@ def advance_metropolis_mof_ms(
             moved = (old + disp) % side
             if field.overlaps(moved, s):
                 continue
+            # one tree for both legs of this move; see _guest_guest_energy
+            tree_wo = cKDTree(without, boxsize=box) if len(without) else None
             u_gg_new, ov = gg(
-                moved, without, without_s, box, pots[s], s, table, n_neigh, upper_cutoff
+                moved,
+                without,
+                without_s,
+                box,
+                pots[s],
+                s,
+                table,
+                n_neigh,
+                upper_cutoff,
+                tree=tree_wo,
             )
             if ov:
                 continue
             u_gf_new = field.energy(moved, s)
             u_gg_old, _ = gg(
-                old, without, without_s, box, pots[s], s, table, n_neigh, upper_cutoff
+                old,
+                without,
+                without_s,
+                box,
+                pots[s],
+                s,
+                table,
+                n_neigh,
+                upper_cutoff,
+                tree=tree_wo,
             )
             u_gf_old = field.energy(old, s)
             du = (u_gg_new + u_gf_new) - (u_gg_old + u_gf_old)

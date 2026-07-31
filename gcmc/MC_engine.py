@@ -47,9 +47,9 @@ from .samplers.base import EnergyWeigher, ReweightWeigher, UniformWeigher
 from .samplers.branch import count_and_sample
 from .samplers.channel import (
     ChannelSweep,
-    ChannelSweepFull,
+    ChannelSweepCyclic,
     ChannelSweepLJ,
-    ChannelSweepLJFull,
+    ChannelSweepLJCyclic,
     axial_coord_full,
     cuboid_members_cl,
     local_from_box,
@@ -60,6 +60,43 @@ from .samplers.channel import (
 from .samplers.rosenbluth import select_forward, select_reverse
 from .state import zero_counters
 from .trials import TrialSet
+
+# ---------------------------------------------------------------------------
+# VALIDATION RECORD for the short-range (dual-cutoff) auxiliary.
+#
+# A release gate lived here and refused aux_cutoff < upper_cutoff. It is gone
+# because the evidence it was waiting for is in. What that evidence is, so the
+# claim can be audited rather than taken on trust:
+#
+# EXACT BY CONSTRUCTION (no sampling involved)
+#   * bit-identical to the no-auxiliary engine at aux_cutoff == upper_cutoff, over
+#     2D/3D x fixed/cyclic rod x depth-2/full_repacking x 3 seeds
+#   * clique weight sums == brute-force enumeration over all C(n,k) subsets at the
+#     SHORT radius, in 2D and 3D, with non-uniform member weights, including
+#     minimum-image pairs across the cyclic seam
+#   * the same sums == ljbranch_weight_sum, an independent implementation
+#   * sample() draws proportional to clique weight, 40k draws against exact
+#     per-clique weights
+#   * the correction's two energies == a from-scratch minimum-image double loop
+#     sharing no code with the engine
+#
+# SAMPLED DISTRIBUTION UNCHANGED (aux-on == aux-off, seed-wise, 2 sigma, one
+# number per seed, each with the stationarity precondition satisfied)
+#   NVT  rho* 0.145   z = 0.31   resolution 0.93% of |U|
+#   NVT  rho* 0.347   z = 0.44   resolution 0.59%
+#   NVT  rho* 0.573   z = 0.06   resolution 0.60%
+#   muVT mu = -4      z = 0.58   resolution 8.1% of <N>
+#   cutoff sweep at rho* 0.347: 1.5 / 1.8 / 2.0 give z = 0.39 / 0.74 / 0.69 with
+#   no ordering among them, so there is no radius-dependent bias in the usable
+#   range -- which is the shape a failure to divide out the proposal bias would
+#   have had.
+#
+# KNOWN LIMIT, and it is an efficiency limit rather than a correctness one:
+# below about 1.4 sigma the correction's spread explodes and acceptance collapses
+# (sd 1.53 kT and acceptance 0.069 at cutoff 1.3, against 0.451 and 0.851 at 1.5).
+# The chain then samples nothing while still completing and still looking
+# plausible, so sim_setup warns. The default of 1.5 is nearer that edge than
+# expected.
 
 
 def _pore_bounds(cfg: Config) -> tuple[str, float, float]:
@@ -223,8 +260,14 @@ def _advance_metropolis(
     """Standard single-particle grand-canonical Metropolis (textbook GCMC): one
     trial insertion at a uniform-random box point or one deletion of a random
     particle, accepted by the GCMC criterion. No cavity, no multiple trials, no
-    depth. Supports hard_core (2D/3D) and Lennard-Jones (3D), using the same
-    pair energy and tail as the Rosenbluth path so the two agree at equilibrium.
+    depth. Supports hard_core and Lennard-Jones, both in 2D and 3D, using the
+    same pair energy and tail as the Rosenbluth path so the two agree at
+    equilibrium. (This said "Lennard-Jones (3D)" until 2D LJ was checked and
+    found to run: the 2D tail has its own closed form in sim_setup and the pair
+    energy is dimension-independent. Worth knowing because 2D LJ metropolis is
+    the only available reference for validating the 2D LJ channel, which has
+    none -- tests/unit/test_channel_2d.py validates the 2D engine against the
+    exact P(N=0)/P(N=1) ratio for HARD CORES only.)
     """
     if cfg.potential_type == "aux":
         raise NotImplementedError(
@@ -468,6 +511,71 @@ def _lj_set_energy(
     return total
 
 
+def _lj_set_energy_split(
+    coords: FloatArray,
+    box: FloatArray,
+    rc_short: float,
+    rc_full: float,
+    rest_neighbors: Any = None,
+) -> tuple[float, float]:
+    """(U_short, U_full) for the same set of `coords`, from ONE neighbour query.
+
+    Both are exactly what `_lj_set_energy` returns at the respective radius --
+    each point against the live fluid rest, plus pairs among `coords` -- so this
+    is a two-for-one, not a different quantity. Frozen matrix slots are dropped
+    from both, as there.
+
+    WHY ONE QUERY. The dual-cutoff correction needs the difference between two
+    radii, and the wider one already contains every pair the narrower one sees:
+    query once at rc_full, then sum twice with two masks. Querying separately
+    would double the only expensive part and would also open the door to the two
+    sums disagreeing about which neighbours exist, which is precisely the error
+    the correction cannot tolerate -- it is a difference of two nearly equal
+    numbers, so a single spurious pair does not cancel.
+
+    Note rc_short <= rc_full is required, not checked: the caller is the engine,
+    where the validator has already enforced it.
+    """
+    coords = np.asarray(coords, float)
+    if len(coords) == 0:
+        return 0.0, 0.0
+    box_arr = np.asarray(box, float)
+    u_short = u_full = 0.0
+    nb = rest_neighbors
+    if nb is not None and nb.n_active:
+        # ONE BATCHED QUERY for all k points, not k separate query_point calls.
+        #
+        # This is the auxiliary's whole per-move overhead and it was the reason a
+        # real run came out SLOWER than the same run without an auxiliary at high
+        # density. Profiling a box-20 fixed-rod full_repacking job at rho* 0.614
+        # found ~14 _neighbor_pairs calls per move, of which ~12 came from this
+        # loop -- two calls to this function per move (inserted group, removed
+        # group), each looping over k points. Meanwhile the DP that the auxiliary
+        # makes cheaper was only ~27% of the window: at high density most trials
+        # overlap the fluid and are dropped, so the pool is small and the sweep is
+        # already cheap. Shrinking a cheap thing while adding k queries per move
+        # is a net loss, and that is exactly what the timing showed.
+        #
+        # `query` pads with inf / data.shape[0], and that pad index is one past the
+        # end of `is_matrix`, so the finite mask has to come first.
+        d, slots = nb.query(coords, rc_full)
+        live = np.isfinite(d)
+        if live.any():
+            dv = d[live]
+            sv = slots[live]
+            dv = dv[~nb.is_matrix[sv]]
+            u_full += _lj_energy(dv, rc_full)
+            u_short += _lj_energy(dv, rc_short)
+    if len(coords) > 1:
+        ii, jj = np.triu_indices(len(coords), k=1)
+        dvec = coords[ii] - coords[jj]
+        dvec -= np.round(dvec / box_arr) * box_arr
+        dr = np.sqrt((dvec**2).sum(axis=1))
+        u_full += _lj_energy(dr, rc_full)
+        u_short += _lj_energy(dr, rc_short)
+    return u_short, u_full
+
+
 def advance(
     state: ChainState, cfg: Config, potential: Potential | None, weigher: Any
 ) -> dict[str, Any]:
@@ -516,6 +624,27 @@ def advance(
     lower = cfg.lower_cutoff  # the single exclusion floor (diameter, or 0.85 for LJ)
     r_sq = cfg.r_squared
     uc = cfg.upper_cutoff
+    # SELECTION radius, as opposed to the PHYSICS radius `uc`.
+    #
+    # With no short-range auxiliary these are the same number and every
+    # expression below is byte-for-byte what it was. With one, `rc_sel` is the
+    # shorter radius at which trials are proposed and the clique sum is
+    # evaluated (dual-cutoff CBMC: Vlugt, Martin, Smit, Siepmann, Krishna,
+    # Mol. Phys. 94, 727 (1998)); the mismatch against `uc` is divided back out
+    # in the acceptance, so the sampled ensemble is unchanged.
+    #
+    # WHICH USES OF uc BECOME rc_sel, and why the split falls exactly here:
+    #   ->  the member-weight neighbour query, the clique weight sums and the
+    #       sweep interaction windows. These are PROPOSAL machinery: any strictly
+    #       positive weight function is a legal bias, so a shorter radius costs
+    #       no accuracy and is corrected for exactly.
+    #   --  the LJ tail, the Metropolis translation acceptance and the cell-list
+    #       cell width stay on `uc`. The first two ARE the sampled physics. The
+    #       third is a capacity rather than a physics choice: cell width is keyed
+    #       to the largest radius any query will use, so a list built at rc_sel
+    #       would push the full-potential query onto a 5^dim stencil instead of
+    #       3^dim -- slower, for a radius that is not the physics anyway.
+    rc_sel = uc if getattr(cfg, "aux_cutoff", None) is None else float(cfg.aux_cutoff)
     nn = cfg.no_neigh
     mf = cfg.move_factor
     n_trials = cfg.no_of_trial_molecules
@@ -532,6 +661,11 @@ def advance(
     total_vol = cfg.total_volume
     ljaux = cfg.potential_type == "ljaux"
     ljbranch = cfg.potential_type == "ljbranch"  # true LJ+branch, no auxiliary
+    # The auxiliary is ACTIVE only when a shorter radius is actually configured.
+    # At rc_sel == uc the correction below is identically zero, so the flag is
+    # kept as `rc_sel < uc` rather than "an auxiliary block exists": that way the
+    # no-op case does no arithmetic at all and bit-identity is structural.
+    aux_on = ljbranch and rc_sel < uc
     lj = (
         cfg.potential_type in ("lj", "ljbranch") or ljaux
     )  # LJ physics: floor, translation, tail
@@ -540,7 +674,7 @@ def advance(
     hs_needs_dists = cfg.potential_type != "hard_sphere"
     branch = cfg.branch
     channel = getattr(cfg, "channel", False)  # branch variant: cuboid + sweep
-    channel_full = getattr(cfg, "channel_full_span", False)  # wall-to-wall rod
+    channel_cyclic = getattr(cfg, "channel_cyclic", False)  # wall-to-wall rod
     n_trials_base = n_trials  # full-span resets n_trials/move
     full_repacking = getattr(cfg, "full_repacking", False)  # whole-cavity repack
     reweight = cfg.potential_type == "reweight"
@@ -619,6 +753,14 @@ def advance(
     # local density n_cav/v_cav against the global N/V.
     _ncav_sum = 0.0
     _ncav_count = 0
+    # dual-cutoff correction statistics for this window. The MEAN should sit near
+    # zero (the shell energy cancels between the inserted and removed groups) and
+    # the SD is what costs acceptance, so both are reported: a drifting mean means
+    # the two groups are not being drawn from comparable surroundings, which is a
+    # different bug from a merely wide distribution.
+    _corr_sum = 0.0
+    _corr_sq = 0.0
+    _corr_count = 0
 
     step = 0
     while step < cfg.sampling_window:
@@ -705,6 +847,15 @@ def advance(
 
         # ---------------------------------------------------------- add/remove
         if choice == "repack":
+            # NOTE on `repack` vs `full_repacking`, which are easy to confuse and
+            # are unrelated. `repack` is a MOVE TYPE and is proposed only in NVT
+            # (see the choice dispatch above): it removes k and inserts k, so N is
+            # conserved, which is what NVT requires. `full_repacking` is a SIZE
+            # setting, valid in either ensemble, which throws away `depth` and acts
+            # on the whole cavity occupancy instead. So in muVT the repack_*
+            # counters are legitimately zero even with full_repacking on -- muVT
+            # draws only move/add/remove, and full_repacking there means "exchange
+            # as many particles as the cavity holds", not "repack".
             c["repack_step"] += 1
             n_add = n_remove = depth + 1  # remove k, insert k; N conserved
         elif choice == "add":
@@ -768,11 +919,11 @@ def advance(
             # channel: draw the orientation now so removal membership and the
             # trial cloud share the same oriented body (required for reversibility).
             chan_R = random_rotation_matrix(rng, dim) if channel else None
-            chan_chord: tuple[
-                FloatArray, FloatArray, FloatArray | None, float, float
-            ] | None
+            chan_chord: (
+                tuple[FloatArray, FloatArray, FloatArray | None, float, float] | None
+            )
             chan_chord = None  # full-span: (axis, e1, e2, s_min, s_max)
-            if channel and channel_full:
+            if channel and channel_cyclic:
                 assert chan_R is not None  # channel implies a drawn rotation
                 # wall-to-wall rod along a freely chosen orientation. The length
                 # is set by where the line meets the box (box for an axis line,
@@ -876,7 +1027,7 @@ def advance(
             # pure deletion with no fluid left: nothing to remove.
             continue
         # trial molecules in the cavity
-        if channel and channel_full:
+        if channel and channel_cyclic:
             # trials uniform along the wall-to-wall chord: axial s in [s_min,
             # s_max], cross-section w per perpendicular axis. Same chord as the
             # membership test, so insertion and removal act on one body. In 2D
@@ -949,7 +1100,7 @@ def advance(
                 trials,
                 disk_in,
                 lower,
-                uc,
+                rc_sel,  # member weights are a proposal quantity: aux radius
                 nn,
                 keep_mask=keep_mask,
                 valid=pore_valid,
@@ -996,7 +1147,7 @@ def advance(
             # channel mode: one sweep over the pool serves both the forward count
             # (Z_{n_add}) and the reverse count (Z_{n_remove}); kmax covers both.
             chan_sweep: ChannelSweep | ChannelSweepLJ | None = None
-            if channel and channel_full and len(pool):
+            if channel and channel_cyclic and len(pool):
                 # every pool atom (surviving trial or removed member) lies on the
                 # rod, so its axial coordinate is recovered from the same chord. The
                 # sweep uses minimum-image box distances and retention eviction, so
@@ -1006,25 +1157,27 @@ def advance(
                 ax_pool = axial_coord_full(pool.coords, center, axis, s_min, s_max, box)
                 kmx = max(n_add, n_remove)
                 if ljbranch:
-                    chan_sweep = ChannelSweepLJFull(
+                    chan_sweep = ChannelSweepLJCyclic(
                         pool.coords,
                         ax_pool,
                         pool.energy_weight,
                         box,
                         lower,
-                        uc,
+                        rc_sel,  # DP interaction window: aux radius
                         beta,
                         kmx,
                     )
                 else:
-                    chan_sweep = ChannelSweepFull(pool.coords, ax_pool, box, lower, kmx)
+                    chan_sweep = ChannelSweepCyclic(
+                        pool.coords, ax_pool, box, lower, kmx
+                    )
             elif channel and len(pool):
                 assert chan_R is not None  # channel implies a drawn rotation
                 U_pool = local_from_box(pool.coords, center, chan_R, side)
                 kmx = max(n_add, n_remove)
                 if ljbranch:
                     chan_sweep = ChannelSweepLJ(
-                        U_pool, pool.energy_weight, lower, uc, beta, kmx
+                        U_pool, pool.energy_weight, lower, rc_sel, beta, kmx
                     )
                 else:
                     chan_sweep = ChannelSweep(U_pool, lower, kmx)
@@ -1052,7 +1205,7 @@ def advance(
                             # weight. Returns the chosen clique's coords and
                             # log W_new = log sum over cliques.
                             _cc, _lw = _ljbranch_forward(
-                                pool, n_add, lower, box, uc, beta, rng
+                                pool, n_add, lower, box, rc_sel, beta, rng
                             )
                             if _cc is None or _lw is None:
                                 continue
@@ -1122,7 +1275,7 @@ def advance(
                             # guaranteed to be one member. Same enumerator and weight
                             # as the forward, so detailed balance holds.
                             sum_current = _ljbranch_reverse(
-                                pool, n_remove, lower, box, uc, beta
+                                pool, n_remove, lower, box, rc_sel, beta
                             )
                         e_u_r_current = 0.0
                     else:
@@ -1176,6 +1329,53 @@ def advance(
                 delta_E_lj = beta * tail * (n_new**2 - n_old**2)
             else:
                 delta_E_lj = None
+
+            # DUAL-CUTOFF CORRECTION (Vlugt, Martin, Smit, Siepmann, Krishna,
+            # Mol. Phys. 94, 727 (1998)).
+            #
+            # The clique sums above were built at rc_sel, so the chosen group was
+            # drawn with probability w~_C / W~_new where w~_C = exp(-beta U_C^aux).
+            # Writing out detailed balance for the exchange, the group's Boltzmann
+            # factor no longer cancels against its own selection probability; what
+            # survives is exactly the mismatch between the two radii:
+            #
+            #   Delta_corr = beta * [ (U_ins^uc - U_ins^aux)
+            #                       - (U_rem^uc - U_rem^aux) ]
+            #
+            # It enters neg_log_acc with the SAME sign and in the same place as
+            # the tail, and it is the only new term: the combinatorial k_trials
+            # factors, the mu terms and the Rosenbluth ratio are untouched,
+            # because a shorter radius changes what gets PROPOSED, not the space
+            # of moves or their multiplicities.
+            #
+            # U here means "group against the live fluid rest, plus pairs within
+            # the group" -- the same quantity the member weights and the intra-
+            # clique factor together represent, which is what makes the
+            # cancellation exact rather than approximate. The removed group's
+            # slots are tombstoned at this point, so `rest` is the same set on
+            # both sides and the inserted/removed cross term correctly does not
+            # appear.
+            #
+            # MEAN vs FLUCTUATION: the absolute shell energy between rc_sel and
+            # uc is large (order -3 eps per particle at rho* = 0.8), but this is a
+            # DIFFERENCE between two groups of the same size in statistically
+            # identical surroundings, so the mean cancels and only the fluctuation
+            # reaches the acceptance. That is the whole reason the scheme is
+            # affordable, and it is why the variance is accumulated and reported
+            # below rather than left to be inferred from the acceptance ratio.
+            if aux_on:
+                u_ins_s, u_ins_f = _lj_set_energy_split(
+                    chosen_coords, box, rc_sel, uc, rest_neighbors=cl
+                )
+                u_rem_s, u_rem_f = _lj_set_energy_split(
+                    disk_in, box, rc_sel, uc, rest_neighbors=cl
+                )
+                delta_corr = beta * ((u_ins_f - u_ins_s) - (u_rem_f - u_rem_s))
+                _corr_sum += delta_corr
+                _corr_sq += delta_corr * delta_corr
+                _corr_count += 1
+                # aux_on implies ljbranch implies lj, so the tail term exists
+                delta_E_lj = (delta_E_lj or 0.0) + delta_corr
 
             # The depth >= 1 acceptance is the original's, complete as written;
             # the depth-0 mirror scheme likewise needs no extra terms.
@@ -1306,4 +1506,14 @@ def advance(
     state.step += cfg.sampling_window
     packing = (N * cfg.volume_of_molecule) / total_vol
     n_cav_mean = (_ncav_sum / _ncav_count) if _ncav_count else 0.0
-    return {"N": N, "packing_fraction": packing, "counters": c, "n_cav": n_cav_mean}
+    out = {"N": N, "packing_fraction": packing, "counters": c, "n_cav": n_cav_mean}
+    if _corr_count:
+        mean = _corr_sum / _corr_count
+        # population variance of the correction over the window's exchanges;
+        # clamped at 0 because the sum-of-squares form can go slightly negative
+        # by rounding when the true variance is near zero
+        var = max(0.0, _corr_sq / _corr_count - mean * mean)
+        out["aux_corr_mean"] = mean
+        out["aux_corr_sd"] = float(np.sqrt(var))
+        out["aux_corr_n"] = _corr_count
+    return out

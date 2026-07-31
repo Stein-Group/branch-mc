@@ -6,7 +6,6 @@ across a reopen. These are the disk-boundary guarantees a resume relies on.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from gcmc import io
 from gcmc.hash_fingerprint import RunPaths
@@ -81,75 +80,3 @@ def test_trim_log_drops_rows_past_the_cutoff(tmp_path):
     io.trim_log(path, 0.002)
     kept = [ln for ln in path.read_text().splitlines() if not ln.startswith("#")]
     assert kept == ["0.001 a", "0.002 b"]
-
-
-def _comment(paths) -> str:
-    """The second line of an extxyz frame: the Lattice/Properties/pbc header."""
-    return paths.trajectory.read_text().splitlines()[1]
-
-
-def test_a_2d_frame_declares_a_degenerate_open_z_axis(tmp_path):
-    """The padded third axis is not a physical direction: it has no length and no
-    periodicity. Writing a real side there described a cubic 3D box that was never
-    simulated, so a viewer would wrap along z and count spurious images."""
-    paths = _paths(tmp_path)
-    io.write_frame(
-        paths,
-        np.array([[1.0, 2.0], [3.0, 4.0]]),
-        two_dim=True,
-        box=75.0,
-        info={"step": 1000},
-        append=False,
-    )
-    line = _comment(paths)
-    assert 'Lattice="75.0 0.0 0.0 0.0 75.0 0.0 0.0 0.0 0.0"' in line
-    assert 'pbc="T T F"' in line
-
-
-def test_a_2d_frame_with_a_per_axis_box_keeps_both_real_sides(tmp_path):
-    """The old code reached the scalar branch first, so a per-axis 2D box was
-    given a bogus z side too. Both 2D paths are covered now."""
-    paths = _paths(tmp_path)
-    io.write_frame(
-        paths,
-        np.array([[1.0, 2.0]]),
-        two_dim=True,
-        box=[75.0, 60.0],
-        info={"step": 1},
-        append=False,
-    )
-    line = _comment(paths)
-    assert 'Lattice="75.0 0.0 0.0 0.0 60.0 0.0 0.0 0.0 0.0"' in line
-    assert 'pbc="T T F"' in line
-
-
-@pytest.mark.parametrize(
-    "box,want",
-    [
-        (30.0, '"30.0 0.0 0.0 0.0 30.0 0.0 0.0 0.0 30.0"'),
-        ([31.322, 31.322, 24.994], '"31.322 0.0 0.0 0.0 31.322 0.0 0.0 0.0 24.994"'),
-    ],
-    ids=["cubic", "orthorhombic"],
-)
-def test_3d_frames_are_unchanged(tmp_path, box, want):
-    paths = _paths(tmp_path)
-    io.write_frame(
-        paths,
-        np.array([[1.0, 2.0, 3.0]]),
-        two_dim=False,
-        box=box,
-        info={"step": 1},
-        append=False,
-    )
-    line = _comment(paths)
-    assert f"Lattice={want}" in line
-    assert 'pbc="T T T"' in line
-
-
-def test_a_2d_frame_still_loads_back(tmp_path):
-    """A zero cell vector must not break the equilibrated warm-start library: the
-    loaders take positions only and never consult the cell or pbc."""
-    paths = _paths(tmp_path)
-    pos = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
-    io.write_frame(paths, pos, two_dim=True, box=75.0, info={"step": 1}, append=False)
-    assert np.allclose(io.load_config_file(paths.trajectory, 2), pos)

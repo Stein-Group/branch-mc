@@ -102,15 +102,15 @@ _FULL_SPAN = {
 }
 
 
-def test_channel_full_span_n0_ratio():
+def test_channel_cyclic_n0_ratio():
     _check_ratio(
-        "channel_full_span", {**_FULL_SPAN, "depth": 1}, tol=0.05, steps=N_STEPS_CHANNEL
+        "channel_cyclic", {**_FULL_SPAN, "depth": 1}, tol=0.05, steps=N_STEPS_CHANNEL
     )
 
 
-def test_channel_full_span_tetris_n0_ratio():
+def test_channel_cyclic_tetris_n0_ratio():
     _check_ratio(
-        "channel_full_span_tetris",
+        "channel_cyclic_tetris",
         {**_FULL_SPAN, "full_repacking": True},
         tol=0.05,
         steps=N_STEPS_CHANNEL,
@@ -120,6 +120,6 @@ def test_channel_full_span_tetris_n0_ratio():
 if __name__ == "__main__":
     test_metropolis_n0_ratio()
     test_branch_n0_ratio()
-    test_channel_full_span_n0_ratio()
-    test_channel_full_span_tetris_n0_ratio()
+    test_channel_cyclic_n0_ratio()
+    test_channel_cyclic_tetris_n0_ratio()
     print("PASS test_item01_detailed_balance")
