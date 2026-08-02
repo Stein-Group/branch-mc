@@ -911,14 +911,53 @@ def advance(
             _ncav_sum += n_cav
             _ncav_count += 1
         else:
+            # depth >= 1 uses the SAME mirror geometry as depth 0, for the same
+            # reason. An `add` centres the cavity uniformly; a `remove` must
+            # therefore be able to produce that identical cavity, which it can
+            # only do by drawing an anchor and offsetting it uniformly over the
+            # cavity body. Pinning the centre exactly ON a particle (what the
+            # original did here) makes the two directions' cavity measures
+            # mutually singular: no reverse path reproduces the forward cavity.
+            # The bias that follows is small for rosenbluth, whose weights are
+            # path-local, and large for branch, whose log Z is a global property
+            # of the whole pool -- measured +0.0069 in eta at 2D mu = 1, L = 2,
+            # against +0.0012 for rosenbluth. See the derivation note below.
+            #
+            # The orientation is drawn BEFORE the centre because an oriented body
+            # must be offset in its own frame: for the channel the mirror offset
+            # runs along the cuboid's local axes, not the lab axes.
+            chan_R = random_rotation_matrix(rng, dim) if channel else None
+            anchor_d1 = -1
             if choice == "add":
                 center = rng.uniform(0.0, 1.0, size=3)[:dim] * side
-            else:  # remove or repack: centre on an existing particle so the
-                center = cl.coords[int(alive[rng.choice(N)])]  # cavity nonempty
-            anchor = -1
-            # channel: draw the orientation now so removal membership and the
-            # trial cloud share the same oriented body (required for reversibility).
-            chan_R = random_rotation_matrix(rng, dim) if channel else None
+            else:
+                anchor_d1 = int(alive[rng.choice(N)])
+                _base = cl.coords[anchor_d1]
+                if channel and channel_cyclic:
+                    # wall-to-wall rod: the axial direction is DEGENERATE (any
+                    # axial shift of the centre names the same rod, the same
+                    # members and the same trial region), so only the
+                    # cross-section is offset. The resulting measure ratio is
+                    # A_perp / w^(dim-1) = V / v, identical to the plain cavity.
+                    assert chan_R is not None
+                    _b = 0.5 * cfg.channel_width
+                    _off = rng.uniform(-_b, _b) * chan_R[:, 1]
+                    if dim == 3:
+                        _off = _off + rng.uniform(-_b, _b) * chan_R[:, 2]
+                    center = (_base + _off) % side
+                elif channel:
+                    assert chan_R is not None
+                    _a, _b = 0.5 * cfg.channel_length, 0.5 * cfg.channel_width
+                    _u = np.empty(dim)
+                    _u[0] = rng.uniform(-_a, _a)
+                    _u[1:] = rng.uniform(-_b, _b, dim - 1)
+                    center = (_base + _u @ chan_R.T) % side
+                else:
+                    center = (
+                        _base
+                        + rng.uniform(-cfg.cavity_radius, cfg.cavity_radius, size=dim)
+                    ) % side
+            anchor = anchor_d1 if choice != "add" else -1
             chan_chord: (
                 tuple[FloatArray, FloatArray, FloatArray | None, float, float] | None
             )
@@ -992,14 +1031,35 @@ def advance(
                 else:
                     continue
             elif n_cav < n_remove:
+                # The cavity holds fewer than `depth`, so the group size is
+                # capped at what is actually there. The two directions MUST cap
+                # to each other's inverse: an add that removes n_cav and inserts
+                # n_cav + 1 leaves occupancy n_cav + 1, and the remove that
+                # undoes it removes all n_cav + 1 and inserts n_cav -- which is
+                # exactly the `else` branch evaluated at the new occupancy, and
+                # the same condition (n_cav < depth) holds on both sides.
+                #
+                # This used to read `n_add, n_remove = n_cav, n_cav - 1` for the
+                # add: it removed n_cav - 1 and left ONE occupant behind, so its
+                # reverse would have to remove n_cav and insert n_cav - 1, a move
+                # the remove branch never proposes. The add and remove fallbacks
+                # were therefore not inverses and detailed balance failed. It
+                # fires whenever n_cav < depth, so it is invisible at depth 1
+                # (where n_cav == 0 is handled above and nothing else can
+                # trigger it) and dominates at large depth: measured -0.0059 in
+                # eta at 2D mu = 1, depth 3, L = 2. Note the n_cav == 0 add rule
+                # above, (1, 0), and full_repacking both already use this
+                # convention -- the old add fallback was the odd one out.
                 if choice == "repack":
                     # repack must stay balanced: remove and add the same count,
                     # capped at what the cavity actually holds, so N is conserved
                     n_add = n_remove = n_cav
                 elif choice == "add":
-                    n_add, n_remove = n_cav, n_cav - 1
+                    n_add, n_remove = n_cav + 1, n_cav
                 else:
                     n_add, n_remove = n_cav - 1, n_cav
+                if n_add > n_trials:
+                    continue  # more insertions than the trial cloud can supply
 
         # Split the system into in-cavity (to remove) and the rest. The rest is
         # never materialised: it is exactly the cell list's active fluid once the
@@ -1009,7 +1069,7 @@ def advance(
         if n_remove == 0:
             disk_in = np.empty((0, dim))
         else:
-            if depth == 0 and not full_repacking:
+            if anchor >= 0 and not full_repacking:
                 # the anchor is always removed; any further removals come
                 # uniformly from the remaining cavity occupants
                 others = idx_cav[idx_cav != anchor]
@@ -1223,7 +1283,7 @@ def advance(
                             assert idx is not None  # num_new > 0
                         else:
                             num_new, idx = count_and_sample(
-                                pool.coords, n_add, lower, box_lengths=box
+                                pool.coords, n_add, lower, box_lengths=box, rng=rng
                             )
                             if num_new == 0 or idx is None:
                                 continue

@@ -1121,13 +1121,23 @@ def from_params(p: dict[str, Any]) -> Config:
         cav = trial_box_side / 2.0
         channel_length = float(smp.get("channel_length", 0.0))
         channel_width = float(smp.get("channel_width", 0.0))
-        span = trial_box_side**2
+        # `trial_density` is a REDUCED density: trial molecules per unit measure
+        # of the trial body, in units of one molecule's own measure. Both factors
+        # must therefore be taken in the run's dimension. This used to read
+        # `span = trial_box_side**2` and `disk = pi r^2` in 3D as well, i.e. an
+        # area over an area for a cubic body, so a 3D `trial_density` was not the
+        # density it claimed to be and did not scale with trial_box_side
+        # correctly. 2D is unchanged and bit-identical; 3D counts change, so a 3D
+        # config carried over from before must be restated (pin `trials` outright
+        # if you need to reproduce an earlier trial count exactly).
+        span = trial_box_side**dim
+        unit = disk if two_dim else (4.0 / 3.0) * math.pi * radius**3
         if "trial_density" in smp:
             trial_density = float(smp["trial_density"])
-            n_trials = int((trial_density * span) / disk)
+            n_trials = int((trial_density * span) / unit)
         else:
             n_trials = int(smp.get("trials", 30))
-            trial_density = round((n_trials * disk) / span, 3)
+            trial_density = round((n_trials * unit) / span, 3)
 
     no_neigh = int(run.get("no_neigh", 40 if two_dim else 75))
     if "upper_cutoff" in run:

@@ -82,6 +82,53 @@ def query_saturating(
         k = min(2 * k, n)
 
 
+def assert_no_overlap(
+    coords: FloatArray,
+    sigma: float,
+    side: float | FloatArray,
+    *,
+    what: str = "configuration",
+) -> None:
+    """Raise unless every pair in `coords` is at least `sigma` apart under the
+    per-axis minimum image.
+
+    A hard-core chain can NEVER repair an overlap it starts with: displacement
+    moves reject any move that would overlap, and an exchange move only removes
+    whole particles, so an overlapping pair stays overlapping for the entire
+    run while still contributing to N. The result is a silently inflated density
+    (measured: a warm start with ~12 overlapping pairs in a 10 x 10 box pushed
+    eta from 0.309 to 0.357 and made every sampler disagree by ~0.02). Nothing
+    downstream can detect it, so it is checked once, here, at the point a
+    configuration enters the chain.
+
+    Uses the same `sigma - OVERLAP_TOL` convention as the rest of this module,
+    so a pair at exactly sigma (a lattice at contact) is legal.
+    """
+    # local import: this is a one-shot start-up check, and geometry.py must not
+    # put a tree in the hot path (tests/engine/test_no_kdtree_in_hot_path.py)
+    from scipy.spatial import KDTree
+
+    pts = np.asarray(coords, dtype=float)
+    if len(pts) < 2:
+        return
+    sides = np.broadcast_to(np.asarray(side, dtype=float), (pts.shape[1],))
+    tree = KDTree(np.mod(pts, sides), boxsize=sides)
+    pairs = tree.query_pairs(r=overlap_radius(sigma), output_type="ndarray")
+    if len(pairs) == 0:
+        return
+    i, j = int(pairs[0, 0]), int(pairs[0, 1])
+    d = pts[i] - pts[j]
+    d -= np.round(d / sides) * sides
+    raise ValueError(
+        f"{what}: {len(pairs)} overlapping pair(s) at a hard-core diameter of "
+        f"{sigma:g}; the closest is particles {i} and {j} at "
+        f"{float(np.sqrt((d**2).sum())):.6g}. A hard-core chain cannot separate "
+        f"an overlap it starts with, so this run would report an inflated "
+        f"density for its entire length. Re-equilibrate the warm start, or "
+        f"check that its box matches ensemble.box ({sides})."
+    )
+
+
 def wrap(coords: FloatArray, side: float | FloatArray) -> FloatArray:
     """Map coordinates into the primary periodic image [0, side)."""
     return np.mod(coords, side)

@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from .sim_setup import Config
     from .state import ChainState
 
-from . import MC_engine, hash_fingerprint, io, sim_setup
+from . import MC_engine, geometry, hash_fingerprint, io, sim_setup
 from .state import ChainState
 
 # Module logger is `logger`, not `log`: run() binds `log` to the io.Log run-log
@@ -559,6 +559,22 @@ def release_lock(paths: RunPaths) -> None:
     paths.lock.unlink(missing_ok=True)
 
 
+def _assert_start_is_legal(cfg: Config, pos: FloatArray, what: str) -> None:
+    """Reject a starting configuration that already contains a hard-core overlap.
+
+    Applies to every entry point -- a warm-start .xyz, a grid bootstrap, or a
+    resumed checkpoint -- because none of them is trusted and an overlap is
+    unrecoverable once the chain is running (see geometry.assert_no_overlap).
+    Skipped for a soft potential, where an overlap is merely expensive.
+    """
+    if cfg.potential != "hard_sphere":
+        return
+    sides = cfg.box_sides if cfg.box_sides is not None else (cfg.box,) * cfg.dimension
+    geometry.assert_no_overlap(
+        pos, cfg.lower_cutoff, np.asarray(sides, dtype=float), what=what
+    )
+
+
 def _save(
     paths: RunPaths, cfg: Config, state: ChainState, params: dict[str, Any]
 ) -> None:
@@ -683,6 +699,7 @@ def run(
             seed = params.get("run", {}).get("seed")
             state = ChainState.fresh(cfg.dimension, seed=seed)
             state.positions = _init_config(cfg, state.rng)
+            _assert_start_is_legal(cfg, state.positions, "initial_config")
         else:
             gen = io.set_rng_state(np.random.default_rng(), ckpt["rng"])
             state = ChainState(
@@ -693,6 +710,7 @@ def run(
                 mu=ckpt.get("mu"),
                 n_history=list(ckpt.get("n_history", [])),
             )
+            _assert_start_is_legal(cfg, state.positions, "checkpoint")
             io.trim_log(paths.log, state.step / 1e6)
             if cfg.traj_every >= 1:
                 io.trim_trajectory(paths.trajectory, state.step)

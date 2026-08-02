@@ -270,10 +270,18 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng, n_
             # +1.3 +/- 0.8 % at 6.7 widths, +0.9 +/- 0.6 % at 10 widths.
             # sim_setup warns accordingly; serial runs are the exact
             # reference at depth >= 1.
+            # mirror geometry, as depth 0 and as the serial engine: a remove must
+            # be able to reproduce the cavity an add proposed, which requires an
+            # anchor plus a uniform offset over the cavity body. Pinning the
+            # centre on the particle makes the two directions' cavity measures
+            # mutually singular and biases the density (branch far worse than
+            # rosenbluth, because log Z is a global pool property).
+            anchor_g = -1
             if choice == "add" or lj:
                 u_center = rng.uniform(0.0, L_c, size=dim)
             else:
-                u_center = u_main[int(rng.choice(N))].copy()
+                anchor_g = int(rng.choice(N))
+                u_center = (u_main[anchor_g] + rng.uniform(-cav, cav, size=dim)) % L_c
             d = (u_main - u_center + L_c / 2.0) % L_c - L_c / 2.0
             idx_cav = np.flatnonzero(np.all(np.abs(d) <= cav, axis=1))
             n_cav = len(idx_cav)
@@ -293,17 +301,35 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng, n_
                 else:
                     continue
             elif n_cav < n_remove:
+                # capped group size; the two directions must cap to each other's
+                # inverse or detailed balance fails. See the long note at the
+                # matching branch in MC_engine.advance -- the add used to remove
+                # n_cav - 1 and leave one occupant behind, which no remove
+                # proposal undoes.
                 if choice == "add":
-                    n_add, n_remove = n_cav, n_cav - 1
+                    n_add, n_remove = n_cav + 1, n_cav
                 else:
                     n_add, n_remove = n_cav - 1, n_cav
+                if n_add > n_trials:
+                    continue
             if n_remove == 0:
                 disk_in_u = np.empty((0, dim))
                 rest_u = u_main
                 rest_slots = main_slots
                 doomed = np.empty(0, dtype=np.int64)
             else:
-                chosen_idx = rng.choice(idx_cav, n_remove, replace=False)
+                if anchor_g >= 0:
+                    # the anchor is always removed; the rest come uniformly from
+                    # the remaining occupants
+                    others = idx_cav[idx_cav != anchor_g]
+                    if len(others) < n_remove - 1:
+                        continue
+                    chosen_idx = np.empty(n_remove, dtype=np.int64)
+                    chosen_idx[0] = anchor_g
+                    if n_remove > 1:
+                        chosen_idx[1:] = rng.choice(others, n_remove - 1, replace=False)
+                else:
+                    chosen_idx = rng.choice(idx_cav, n_remove, replace=False)
                 disk_in_u = u_main[chosen_idx]
                 keep = np.ones(N, dtype=bool)
                 keep[chosen_idx] = False
@@ -391,7 +417,7 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng, n_
                 e_u_r_new = 0.0
                 if branch:
                     num_new, idx = count_and_sample(
-                        pool.coords, n_add, lower, box_lengths=box
+                        pool.coords, n_add, lower, box_lengths=box, rng=rng
                     )
                     if num_new <= 0 or idx is None:
                         continue

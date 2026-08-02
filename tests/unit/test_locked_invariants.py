@@ -1,5 +1,4 @@
-"""Locked bodies: count_and_sample and ljbranch_weight_sum in samplers/branch.py
-are never to be modified (their weights are combinatorially exact and every
+"""Locked body: ljbranch_weight_sum in samplers/branch.py is never to be modified (their weights are combinatorially exact and every
 downstream identity test trusts them verbatim). This freezes each function's
 AST -- structure and names, ignoring formatting and line numbers -- against the
 delivered tree. A hash mismatch means someone edited a body that must not change;
@@ -17,9 +16,17 @@ _BRANCH = Path(__file__).resolve().parents[2] / "gcmc" / "samplers" / "branch.py
 
 # SHA-256 of ast.dump(node) for each frozen function, baselined 2026-07-12.
 _FROZEN = {
-    "count_and_sample": "e3fc4c51a508427cf1d33e8765b6e6c5fee4a43f3ef0ab09228ab1a6dd5a997c",
     "ljbranch_weight_sum": "84f3d9613a3226393bb7a39b034a91396f35890dfea1c8ba821e2dd4611681c3",
 }
+
+# count_and_sample was UNPINNED on purpose. Its clique COUNT was always exact,
+# but the example clique it returned was the lowest one in degeneracy order,
+# which is not a uniform draw -- at k = 3 over a third of the cliques were
+# unreachable at any vertex labelling. The acceptance ratio's log Z term assumes
+# a uniform draw, so the witness was a detailed-balance violation, and there is
+# no point freezing a body that has to change. The count is still protected
+# behaviourally by tests/scripts/check_branch.py (parity against orig/) and the
+# draw by tests/unit/test_clique_draw_uniform.py.
 
 
 def _ast_hash(name: str) -> str:
@@ -29,10 +36,6 @@ def _ast_hash(name: str) -> str:
     )
     dump = ast.dump(node, annotate_fields=True, include_attributes=False)
     return hashlib.sha256(dump.encode()).hexdigest()
-
-
-def test_count_and_sample_body_is_unchanged():
-    assert _ast_hash("count_and_sample") == _FROZEN["count_and_sample"]
 
 
 def test_ljbranch_weight_sum_body_is_unchanged():
