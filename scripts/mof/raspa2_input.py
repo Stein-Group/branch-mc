@@ -167,13 +167,16 @@ def simulation_input(
     init_cycles: int,
     counts: dict[str, int] | None = None,
     restart: bool = False,
+    print_every: int | None = None,
 ) -> str:
     fug = peng_robinson(ff, T, pressure, mol_fractions)
     lines = [
         "SimulationType                MonteCarlo",
         f"NumberOfCycles                {cycles}",
         f"NumberOfInitializationCycles  {init_cycles}",
-        f"PrintEvery                    {max(1, cycles // 100) if cycles else 1}",
+        # R1.8: this stream is the primary data source, not a progress log.
+        f"PrintEvery                    "
+        f"{print_every if print_every else (max(1, cycles // 100) if cycles else 1)}",
         f"RestartFile                   {'yes' if restart else 'no'}",
         "",
         "Forcefield                    Local",
@@ -220,6 +223,7 @@ def write_case(
     present: tuple[str, ...],
     counts: dict[str, int] | None = None,
     restart: bool = False,
+    print_every: int | None = None,
 ) -> Path:
     out.mkdir(parents=True, exist_ok=True)
     write_raspa2_cif(cif, out / cif.name)
@@ -244,6 +248,7 @@ def write_case(
             init_cycles,
             counts,
             restart,
+            print_every,
         )
     )
     return out
@@ -261,11 +266,34 @@ def _main(argv: list[str] | None = None) -> int:
     p.add_argument("--cycles", type=int, default=0)
     p.add_argument("--init-cycles", type=int, default=0)
     p.add_argument("--present", default="Xe,Kr,In,C,O,H")
+    p.add_argument(
+        "--y",
+        default=None,
+        help="gas mole fractions per guest, comma-separated in --guests order "
+        "(e.g. 0.2,0.8). Default: uniform. REQUIRED for the 20:80 binary record "
+        "runs -- the uniform default silently gives 50:50.",
+    )
+    p.add_argument(
+        "--print-every",
+        type=int,
+        default=None,
+        help="PrintEvery in cycles. The instantaneous stream is the PRIMARY data "
+        "source (R1.8) and block-length doubling needs thousands of rows, so the "
+        "cycles//100 default (100 rows per leg) is too coarse for a record run.",
+    )
     a = p.parse_args(argv)
 
     ff = load_forcefield(a.forcefield)
-    names = a.guests.split(",")
-    fracs = {n: 1.0 / len(names) for n in names}
+    names = [n.strip() for n in a.guests.split(",") if n.strip()]
+    if a.y is None:
+        fracs = {n: 1.0 / len(names) for n in names}
+    else:
+        vals = [float(x) for x in a.y.split(",")]
+        if len(vals) != len(names):
+            p.error("--y must list one mole fraction per guest, in --guests order")
+        if abs(sum(vals) - 1.0) > 1e-9:
+            p.error("--y must sum to 1")
+        fracs = dict(zip(names, vals, strict=True))
     out = write_case(
         a.out,
         ff,
@@ -277,6 +305,7 @@ def _main(argv: list[str] | None = None) -> int:
         a.cycles,
         a.init_cycles,
         tuple(a.present.split(",")),
+        print_every=a.print_every,
     )
     print(f"wrote RASPA2 case in {out}")
     return 0

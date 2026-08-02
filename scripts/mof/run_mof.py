@@ -55,6 +55,11 @@ class MofRunSpec:
     sweep_L_long: float = 4.0
     sweep_w: float = 0.9
     sweep_n_trials: int = 12
+    # short-range (dual-cutoff CBMC) auxiliary for the sweep move: PROPOSAL radius
+    # in reduced units. None = no auxiliary (the move stays a heat bath). Setting
+    # it equal to rc is an exact no-op and is the control arm. The physics cutoff
+    # is always the forcefield rc; this only shortens the proposal.
+    sweep_rc_aux: float | None = None
     root: Path = field(default_factory=lambda: Path("runs/mof"))
 
 
@@ -90,6 +95,11 @@ def _identity(spec: MofRunSpec) -> dict[str, object]:
         "sweep_L_long": float(spec.sweep_L_long),
         "sweep_w": float(spec.sweep_w),
         "sweep_n_trials": int(spec.sweep_n_trials),
+        # the auxiliary changes the acceptance test and the RNG consumption, so an
+        # aux-on leg must never resume an aux-off directory (BLOCKER-2 class bug)
+        "sweep_rc_aux": (
+            None if spec.sweep_rc_aux is None else float(spec.sweep_rc_aux)
+        ),
     }
 
 
@@ -175,10 +185,31 @@ def run_mof(spec: MofRunSpec) -> MofRunResult:
     # fixed, rectangular decomposition columns from the guest set (windows with a
     # species absent report 0.0 for its terms rather than a ragged row)
     hg_cols = [f"u_hg_{g}" for g in guests]
+    # The pair keys must be built in the order mof_energy_decomposition emits them,
+    # which is TYPE-ID order (guests at the low ids), not alphabetical order of the
+    # names. Building them alphabetically silently wrote 0.0 into every cross-species
+    # column via decomp.get(col, 0.0) -- u_gg_Xe_Kr was emitted, u_gg_Kr_Xe was
+    # asked for -- while u_total still contained the term, so the printed components
+    # did not sum to the printed total. Ordering by table index makes the two agree
+    # by construction; the assertion below is what would have caught it.
+    guests_by_type = sorted(guests, key=table.index)
     gg_cols = [
-        f"u_gg_{a}_{b}" for a, b in itertools.combinations_with_replacement(guests, 2)
+        f"u_gg_{a}_{b}"
+        for a, b in itertools.combinations_with_replacement(guests_by_type, 2)
     ]
     decomp_cols = [*hg_cols, *gg_cols, "u_total"]
+    sweep_cols = (
+        [
+            "sweep_attempts",
+            "sweep_accepts",
+            "sweep_k_mean",
+            "sweep_k_max",
+            "aux_corr_mean",
+            "aux_corr_sd",
+        ]
+        if spec.sweep_moves_per_window and n_species > 1
+        else []
+    )
     res = None
     cum_evals = 0
     with paths.log.open("w" if new_log else "a", newline="") as fh:
@@ -190,6 +221,7 @@ def run_mof(spec: MofRunSpec) -> MofRunResult:
                     *[f"N_{g}" for g in guests],
                     "N_total",
                     *decomp_cols,
+                    *sweep_cols,
                     "n_evals",
                     "cum_n_evals",
                     "wall_s",
@@ -215,11 +247,11 @@ def run_mof(spec: MofRunSpec) -> MofRunResult:
                 window=spec.window_cycles,
                 species_probs=species_probs,
             )
-            wall = time.perf_counter() - t0
             pos, spc = res.positions, res.species
             assert spc is not None and res.n_by_type is not None
             # A5.6: interleave whole-window heat-bath repacks (multi-species only;
             # a single species has nothing to recompose and the move is a no-op)
+            sweep_stats: dict[str, float] = {}
             if spec.sweep_moves_per_window and n_species > 1:
                 for _ in range(spec.sweep_moves_per_window):
                     pos, spc, _moved = channel_repack_move_ms(
@@ -236,7 +268,13 @@ def run_mof(spec: MofRunSpec) -> MofRunResult:
                         L_long=spec.sweep_L_long,
                         w=spec.sweep_w,
                         n_trials=spec.sweep_n_trials,
+                        rc_aux=spec.sweep_rc_aux,
+                        stats=sweep_stats,
                     )
+            # wall_s is timed AFTER the sweep moves, not before them: they are part
+            # of the window's cost and V5's secondary per-CPU-second metric is
+            # meaningless if the sampler being benchmarked is outside the clock.
+            wall = time.perf_counter() - t0
             counts = [res.n_by_type[table.index(g)] for g in guests]
             decomp = mof_energy_decomposition(
                 pos,
@@ -246,13 +284,41 @@ def run_mof(spec: MofRunSpec) -> MofRunResult:
                 beta=sysm.beta,
                 upper_cutoff=fieldobj.rc,
             )
+            # The stream is only trustworthy if the terms it prints add up to the
+            # total it prints. A column name the decomposition never emits would
+            # otherwise be written as a silent 0.0 and the loss would show up
+            # nowhere -- which is exactly how the cross-species pair term was lost.
+            _parts = sum(decomp.get(c, 0.0) for c in decomp_cols if c != "u_total")
+            _tot = decomp.get("u_total", 0.0)
+            assert abs(_parts - _tot) <= 1e-8 * max(1.0, abs(_tot)), (
+                f"decomposition columns do not sum to u_total ({_parts!r} vs "
+                f"{_tot!r}); a column name is missing from the emitted keys "
+                f"{sorted(decomp)} and is being written as 0.0"
+            )
             cum_evals += res.n_evals
+            sweep_vals: list[object] = []
+            if sweep_cols:
+                n_corr = sweep_stats.get("corr_n", 0.0)
+                s1 = sweep_stats.get("corr_sum", 0.0)
+                s2 = sweep_stats.get("corr_sumsq", 0.0)
+                mean = s1 / n_corr if n_corr else 0.0
+                var = max(s2 / n_corr - mean * mean, 0.0) if n_corr else 0.0
+                n_att = sweep_stats.get("attempts", 0.0)
+                sweep_vals = [
+                    int(n_att),
+                    int(sweep_stats.get("accepts", 0.0)),
+                    f"{(sweep_stats.get('k_sum', 0.0) / n_att if n_att else 0.0):.4g}",
+                    int(sweep_stats.get("k_max", 0.0)),
+                    f"{mean:.6g}",
+                    f"{var**0.5:.6g}",
+                ]
             writer.writerow(
                 [
                     w + 1,
                     *counts,
                     res.n,
                     *[f"{decomp.get(c, 0.0):.10g}" for c in decomp_cols],
+                    *sweep_vals,
                     res.n_evals,
                     cum_evals,
                     f"{wall:.6g}",

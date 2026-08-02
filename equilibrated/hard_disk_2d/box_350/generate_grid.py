@@ -3,7 +3,7 @@ import numpy as np
 # System parameters
 L = 350.0  # Box size
 r = 0.5    # Disk radius
-target_eta = 0.740  # Desired packing fraction
+target_eta = 0.7225  # Desired packing fraction
 
 # Area of a single disk
 disk_area = np.pi * (r ** 2)
