@@ -56,6 +56,20 @@ _LOG_COLS = [
     ("avgN", 11),
     ("avg_n_cav", 12),
     ("density", 14),
+    # CLIQUE COMPOSITION (MC_engine._clq): raw per-window integer SUMS, one
+    # triple per direction -- A = add, R = remove. clq*_n counts scored moves,
+    # clq*_pos sums the clique sizes, clq*_new sums the positions in those
+    # cliques that were NOT a removed member put back. Never log a ratio here:
+    # summing these columns over any span of rows and dividing at the end is
+    # exact, whereas a per-window fraction would become a mean of means as soon
+    # as the reporting interval changed. (Contrast avg_n_cav, two columns up,
+    # which IS a running mean of per-window means -- do not copy it.)
+    ("clqA_n", 9),
+    ("clqA_pos", 10),
+    ("clqA_new", 10),
+    ("clqR_n", 9),
+    ("clqR_pos", 10),
+    ("clqR_new", 10),
 ]
 _LOG_WIDTHS = [w for _, w in _LOG_COLS]
 
@@ -779,6 +793,12 @@ def run(
 
             if state.step >= cfg.burn_in:
                 cc = stats["counters"]
+                # advance_parallel does not carry the clique accumulators; a
+                # missing block logs as zeros rather than raising, so a parallel
+                # run keeps the same column layout.
+                clq = stats.get("clique") or dict.fromkeys(
+                    ("A_n", "A_pos", "A_new", "R_n", "R_pos", "R_new"), 0
+                )
                 log.write(
                     _log_row(
                         [
@@ -797,6 +817,12 @@ def run(
                             f"{avg_n:.4f}",
                             f"{avg_ncav:.4f}",
                             f"{avg_n / V:.8f}",
+                            clq["A_n"],
+                            clq["A_pos"],
+                            clq["A_new"],
+                            clq["R_n"],
+                            clq["R_pos"],
+                            clq["R_new"],
                         ]
                     )
                 )

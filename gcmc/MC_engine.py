@@ -24,6 +24,7 @@ multi-molecule acceptance.
 from __future__ import annotations
 
 import math
+import os as _os
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, cast
 
@@ -511,6 +512,107 @@ def _lj_set_energy(
     return total
 
 
+# ---------------------------------------------------------------- diagnostics
+# Drop-in instrumentation, added to find out why the channel sampler grinds at
+# high density. Everything here is OFF unless the matching environment variable
+# is set. With all of them unset this module is behaviourally identical to the
+# original: same RNG stream, same counters, same on-disk schema.
+#
+#   BRANCH_DIAG=1      collect rejection-reason counters in MC_engine.DIAG
+#   BRANCH_DIAG_REC=1  also record per-attempt guard inputs in DIAGV["rec"]
+#                      as (choice, n_add, n_remove, len(trial_set), len(pool))
+#   POOLGUARD=1        test the forward-selection guard against len(pool)
+#                      rather than len(trial_set); see the note at the guard
+#   NVT_SKIP_NULL=1    in NVT, a repack that reproduces the incoming
+#                      configuration exactly does not count as a step
+#
+# DIAG/DIAGV/DIAGN are module globals and are NOT reset between windows; a
+# driver that wants per-window numbers should clear them itself.
+DIAG: dict[str, int] = {}
+DIAGV: dict[str, list] = {}
+DIAGN: dict[str, list] = {}
+
+_DIAG_ON = bool(_os.environ.get("BRANCH_DIAG"))
+_DIAG_REC = bool(_os.environ.get("BRANCH_DIAG_REC"))
+_POOLGUARD = bool(_os.environ.get("POOLGUARD"))
+_SKIP_NULL = bool(_os.environ.get("NVT_SKIP_NULL"))
+_REC_CAP = int(_os.environ.get("BRANCH_DIAG_REC_CAP", "2000000"))
+
+# A jammed rod can have exactly one feasible clique -- the one already there --
+# so every repack would be null and an uncounted null would spin the window
+# forever. Once this many nulls have gone uncounted in one window, the rest are
+# counted normally and DIAG["repack_null_capped"] records that it happened.
+_NULL_BUDGET_PER_STEP = int(_os.environ.get("NVT_NULL_BUDGET", "50"))
+
+_CURN = [0]  # system size at the current attempt, for binning events by density
+
+
+def _d(k: str, n: int = 1) -> None:
+    """Count one event, and remember the N it happened at."""
+    if not _DIAG_ON:
+        return
+    DIAG[k] = DIAG.get(k, 0) + n
+    DIAGN.setdefault(k, []).append(_CURN[0])
+
+
+def _dv(k: str, v: float) -> None:
+    """Record one scalar sample."""
+    if not _DIAG_ON:
+        return
+    DIAGV.setdefault(k, []).append(float(v))
+
+
+def _drec(t: tuple) -> None:
+    """Record one per-attempt tuple (capped, these lists get long)."""
+    if not _DIAG_REC:
+        return
+    lst = DIAGV.setdefault("rec", [])
+    if len(lst) < _REC_CAP:
+        lst.append(t)
+
+
+def _count_reused(chosen: FloatArray, old: FloatArray) -> int:
+    """How many of the chosen positions are removed members put back verbatim.
+
+    The pool the clique is drawn from is exactly `surviving trials + removed
+    members`, so a chosen position is either a removed member put back or a
+    genuinely new trial position -- there is no third case. Counting the first
+    therefore splits the clique exactly.
+
+    Exact float comparison is the right test here for the same reason it is in
+    `_same_positions`: a reused position is `pool.coords[...]`, which entered
+    the pool verbatim as `cl.coords[chosen_slots]`. It is the same float64
+    triple, bit for bit, never a recomputed one. Equality means "this is that
+    particle", not "this is near that particle".
+
+    Cost is n_add * n_remove float compares (<= 400 even at full repacking),
+    which is noise beside the transfer-matrix sweep that produced the clique.
+    """
+    if len(chosen) == 0 or len(old) == 0:
+        return 0
+    a = np.asarray(chosen)
+    b = np.asarray(old)
+    return int(np.count_nonzero(np.all(a[:, None, :] == b[None, :, :], axis=2).any(axis=1)))
+
+
+def _same_positions(a: FloatArray, b: FloatArray) -> bool:
+    """True when two coordinate sets are identical as SETS, ignoring order.
+
+    Exact float comparison is the right test here and not a floating-point sin:
+    the chosen coordinates are drawn out of `pool.coords`, and the removed
+    members entered that pool verbatim as `cl.coords[chosen_slots]`. A member
+    that is put back is the same float64 triple, bit for bit, never a recomputed
+    one. So equality means "nothing moved", not "nothing moved much".
+    """
+    if len(a) != len(b):
+        return False
+    if len(a) == 0:
+        return True
+    a = np.asarray(a)
+    b = np.asarray(b)
+    return bool(np.array_equal(a[np.lexsort(a.T)], b[np.lexsort(b.T)]))
+
+
 def _lj_set_energy_split(
     coords: FloatArray,
     box: FloatArray,
@@ -690,8 +792,38 @@ def advance(
     # The one neighbour structure for this window. Built once from the current
     # configuration (frozen obstacles first, so `is_matrix` is a prefix), then
     # updated in place by every accepted move.
+    # GRID PITCH. `CellList`'s `cutoff` argument sets the cell WIDTH and nothing
+    # else -- `self.cutoff` is read on exactly one line, to compute `nc` -- and
+    # every query passes its own radius explicitly. So this is a pure
+    # performance knob with no semantic content.
+    #
+    # It used to be `uc`, which sizes the grid for the LARGEST radius in the run
+    # while the HOTTEST query is the smallest one. The trial cloud is screened at
+    # rc_sel, and at 192 trials per exchange that single query is ~60% of the
+    # exchange path (cProfile, rho* 0.797). With cw = uc = 2.5 the 27-cell
+    # stencil sweeps a volume of 422 to answer a question about a sphere of
+    # volume 14 -- 336 candidate distances per trial where ~11 are in range, and
+    # ~98% of those trials are about to be discarded as overlapping anyway.
+    #
+    # Sizing the grid to rc_sel puts reach(rc_sel) back at 1, so the hot query
+    # sweeps 98 instead of 422. The uc queries (translations, the dual-cutoff
+    # correction) go to reach 2 and sweep 455 instead of 422 -- marginally worse,
+    # but there are far fewer of them and they are not the bottleneck.
+    #
+    # MEASURED at rho* = 0.797, box 20, T 1.5, channel L6 w2.0 depth 2,
+    # trial_density 8, auxiliary 1.5: 1.95x per window (median of repeats).
+    # With no auxiliary rc_sel == uc and this is the old value exactly, so a
+    # non-auxiliary run is untouched.
+    #
+    # NOT BIT-REPRODUCIBLE against existing runs. A different cell width changes
+    # the padded row width k of the neighbour arrays, which changes numpy's
+    # pairwise-summation tree inside the weight products, which lands one ulp
+    # away -- enough to flip an acceptance and send the chain down a different
+    # (equally valid) path. Same sampled distribution, different random walk.
+    # Set GRID_PITCH to reproduce an old run exactly.
+    _grid = float(_os.environ.get("GRID_PITCH", "0") or 0) or rc_sel
     cl = neighbors.CellList.from_positions(
-        pos, side, dim, uc, matrix=matrix if has_matrix else None
+        pos, side, dim, _grid, matrix=matrix if has_matrix else None
     )
     n_mat = len(matrix) if matrix is not None and has_matrix else 0
 
@@ -763,6 +895,34 @@ def advance(
     _corr_count = 0
 
     step = 0
+    # see the NULL REPACK note in the repack acceptance branch
+    null_budget = _NULL_BUDGET_PER_STEP * cfg.sampling_window if _SKIP_NULL else 0
+
+    # CLIQUE COMPOSITION -- how much of each drawn clique is genuinely new.
+    #
+    # RAW SUMS, NEVER MEANS. These are three integers per direction and the log
+    # writes the integers, not a ratio. That is the whole point: a per-window
+    # mean would make any coarser reporting interval a mean of means, weighted
+    # by nothing meaningful (windows differ in how many cliques they draw, and
+    # under full repacking they differ in clique SIZE too). With sums, the
+    # statistic over any span of rows -- one window, a thousand, the whole run,
+    # a resumed run stitched across a walltime kill -- is
+    #
+    #     fraction new  = sum(clq*_new) / sum(clq*_pos)
+    #     new per clique= sum(clq*_new) / sum(clq*_n)
+    #
+    # summing numerator and denominator separately, which is exact. `avg_n_cav`
+    # below is the counter-example: it is a per-window mean and the runner then
+    # takes a running mean OF those, so it is already a mean of means and must
+    # not be used as a template.
+    #
+    # Counted where the acceptance is computed, so clq{A,R}_n match add_attempt
+    # / the remove equivalent exactly -- a free cross-check on the log.
+    _clq = {
+        "A_n": 0, "A_pos": 0, "A_new": 0,
+        "R_n": 0, "R_pos": 0, "R_new": 0,
+        "P_n": 0, "P_pos": 0, "P_new": 0,
+    }
     while step < cfg.sampling_window:
         if nvt:
             # NVT: only number-conserving repacking moves; no insertions or
@@ -1059,11 +1219,14 @@ def advance(
                 else:
                     n_add, n_remove = n_cav - 1, n_cav
                 if n_add > n_trials:
+                    _d("bail_nadd_gt_ntrials")
                     continue  # more insertions than the trial cloud can supply
 
         # Split the system into in-cavity (to remove) and the rest. The rest is
         # never materialised: it is exactly the cell list's active fluid once the
         # chosen slots are tombstoned, and its only other use was a count.
+        _CURN[0] = N
+        _d("attempt")
         chosen_slots = None
         n_rest = N - n_remove
         if n_remove == 0:
@@ -1074,6 +1237,7 @@ def advance(
                 # uniformly from the remaining cavity occupants
                 others = idx_cav[idx_cav != anchor]
                 if len(others) < n_remove - 1:
+                    _d("bail_anchor_others")
                     continue
                 chosen_slots = np.empty(n_remove, dtype=np.int64)
                 chosen_slots[0] = anchor
@@ -1085,6 +1249,7 @@ def advance(
 
         if n_rest == 0 and has_matrix and n_add == 0:
             # pure deletion with no fluid left: nothing to remove.
+            _d("bail_pure_del_empty")
             continue
         # trial molecules in the cavity
         if channel and channel_cyclic:
@@ -1168,6 +1333,7 @@ def advance(
             )
             if raw is None:
                 if n_add != 0:
+                    _d("bail_raw_none_all_trials_overlap")
                     continue  # nothing to insert from: equivalent to rejecting
                 # pure deletion: a fully overlapping shadow cloud is a valid (and
                 # common) outcome whose reverse weight is the removed molecules
@@ -1187,11 +1353,13 @@ def advance(
 
             if n_remove != 0:
                 if raw_in is None:
+                    _d("bail_rawin_none")
                     continue
                 mol_in_cav, _ = _weighted_trials(
                     raw_in, tree, cfg, potential, choice, N, n_rest
                 )
                 if len(mol_in_cav) != n_remove:
+                    _d("bail_molincav_mismatch")
                     continue
             else:
                 mol_in_cav = TrialSet(np.empty((0, dim)), np.empty(0))
@@ -1235,6 +1403,10 @@ def advance(
                 assert chan_R is not None  # channel implies a drawn rotation
                 U_pool = local_from_box(pool.coords, center, chan_R, side)
                 kmx = max(n_add, n_remove)
+                _dv("kmax", kmx)
+                _dv("pool_size", len(pool))
+                _dv("trials_admissible", len(trial_set))
+                _dv("n_remove", n_remove)
                 if ljbranch:
                     chan_sweep = ChannelSweepLJ(
                         U_pool, pool.energy_weight, lower, rc_sel, beta, kmx
@@ -1244,7 +1416,34 @@ def advance(
 
             # forward (new configuration)
             if n_add != 0:
-                if len(trial_set) < n_add:
+                # THE GUARD.
+                #
+                # This tested `len(trial_set)`, the surviving random trials. But
+                # the DP does not draw from trial_set, it draws from `pool` =
+                # trial_set.mask(km) + mol_in_cav, i.e. the surviving trials PLUS
+                # the members just tombstoned. Those members are real particle
+                # positions and so are guaranteed-valid placements; the guard did
+                # not count them. Measured at rho* 0.756: median len(trial_set) 6,
+                # median len(pool) 13, median n_add 10.
+                #
+                # It is also direction-dependent. n_add is n_cav+1 for an
+                # insertion and n_cav-1 for a deletion, so at the same rod
+                # occupancy the insertion faces a threshold two higher. Measured
+                # firing rates over 3990 attempts: 88.1% of insertions against
+                # 68.0% of deletions, a gap of 13-48 points at every occupancy.
+                # A rejection rule that fires more often in one direction than
+                # the other is a detailed-balance defect, and this one fires on
+                # most attempts.
+                #
+                # `len(pool) < n_add` is not a new rule: it is exactly the DP's
+                # own feasibility condition, made cheap. When it holds,
+                # log_weight(n_add) is -inf anyway, and THAT test is symmetric
+                # because both directions read one shared sweep object.
+                _drec(
+                    (choice, int(n_add), int(n_remove), int(len(trial_set)), int(len(pool)))
+                )
+                if (len(pool) if _POOLGUARD else len(trial_set)) < n_add:
+                    _d("bail_guard_lt_nadd")
                     continue
                 if branch:
                     if ljbranch:
@@ -1254,9 +1453,11 @@ def advance(
                             assert isinstance(chan_sweep, ChannelSweepLJ)
                             sum_new = chan_sweep.log_weight(n_add)
                             if not np.isfinite(sum_new):
+                                _d("bail_logZ_infeasible_LJ")
                                 continue
                             idx: Sequence[int] | None = chan_sweep.sample(n_add, rng)
                             if idx is None:
+                                _d("bail_sample_none_LJ")
                                 continue
                             chosen_coords = pool.coords[list(idx)]
                         else:
@@ -1278,6 +1479,7 @@ def advance(
                             assert isinstance(chan_sweep, ChannelSweep)
                             num_new = chan_sweep.count(n_add)
                             if num_new == 0:
+                                _d("bail_count_zero_HS")
                                 continue
                             idx = chan_sweep.sample(n_add, rng)
                             assert idx is not None  # num_new > 0
@@ -1376,6 +1578,14 @@ def advance(
             if branch and not np.isfinite(sum_current):
                 continue
 
+            # clique composition, recorded once per scored move (see _clq above)
+            _ck = {"add": "A", "remove": "R"}.get(choice, "P")
+            _clq[_ck + "_n"] += 1
+            _clq[_ck + "_pos"] += len(chosen_coords)
+            _clq[_ck + "_new"] += len(chosen_coords) - _count_reused(
+                chosen_coords, disk_in
+            )
+
             # LJ tail: a system-level energy change, applied exactly once per move
             # with the same sign in both directions. For branch the per-particle
             # pair energy is inside sum_new / sum_current; for rosenbluth it is
@@ -1443,6 +1653,31 @@ def advance(
 
             # acceptance
             if choice == "repack":
+                # NULL REPACK.
+                #
+                # The pool the DP samples from contains the members that were
+                # just tombstoned, so "put every one of them back exactly where
+                # it was" is a legal clique and, at high density, often the
+                # highest-weight one. That move is accepted (its acceptance
+                # ratio is identically 1: same positions, same energy, same
+                # Rosenbluth weight) and changes nothing. Counting it inflates
+                # repack_accept and makes the sampler look like it is working.
+                #
+                # Not counting a self-transition does not touch the Markov
+                # chain: X -> X leaves the state at X whether or not the
+                # bookkeeping notices. What changes is the meaning of a cycle,
+                # which now costs more real work and reports an honest
+                # acceptance ratio.
+                if (
+                    _SKIP_NULL
+                    and null_budget > 0
+                    and _same_positions(chosen_coords, disk_in)
+                ):
+                    _d("repack_null")
+                    c["repack_step"] -= 1
+                    step -= 1
+                    null_budget -= 1
+                    continue
                 c["repack_attempt"] += 1
                 # Number-conserving move: remove k, insert k in one step. The
                 # chemical-potential prefactor cancels identically (the e^{beta mu}
@@ -1478,11 +1713,16 @@ def advance(
                 # acceptance probability exp(-neg_log_acc) never exceeds 1. The move is
                 # accepted when neg_log_acc <= -log(u), u ~ U(0,1).
                 neg_log_acc = mu_excess + delta_E - corr
+                _d("reach_metropolis_repack")
+                _dv("repack_rosen", mu_excess)
+                _dv("repack_dE", delta_E)
+                _dv("repack_neg_log_acc", neg_log_acc)
                 neg_log_acc = max(0.0, neg_log_acc)
                 if neg_log_acc <= -np.log(rng.uniform(0, 1)):
                     commit_exchange(chosen_coords, chosen_slots)
                     committed = True
                     c["repack_accept"] += 1
+                    _d("accept_repack")
             elif choice == "add":
                 c["add_attempt"] += 1
                 mu_ideal = -np.log(total_vol / (N + 1))
@@ -1514,11 +1754,17 @@ def advance(
                         else (0.0 if lj else (e_u_r_new - e_u_r_current))
                     )
                 neg_log_acc = mu_ideal - beta * mu + mu_excess + delta_E - corr
+                _d("reach_metropolis_add")
+                _dv("add_rosen", mu_excess)
+                _dv("add_dE", delta_E)
+                _dv("add_ideal", mu_ideal - beta * mu)
+                _dv("add_neg_log_acc", neg_log_acc)
                 neg_log_acc = max(0.0, neg_log_acc)
                 if neg_log_acc <= -np.log(rng.uniform(0, 1)):
                     commit_exchange(chosen_coords, chosen_slots)
                     committed = True
                     c["add_accept"] += 1
+                    _d("accept_add")
             else:
                 mu_ideal = -np.log(N / total_vol)
                 if branch:
@@ -1549,11 +1795,17 @@ def advance(
                         else (0.0 if lj else (e_u_r_new - e_u_r_current))
                     )
                 neg_log_acc = mu_ideal + beta * mu + mu_excess + delta_E - corr
+                _d("reach_metropolis_rem")
+                _dv("rem_rosen", mu_excess)
+                _dv("rem_dE", delta_E)
+                _dv("rem_ideal", mu_ideal + beta * mu)
+                _dv("rem_neg_log_acc", neg_log_acc)
                 neg_log_acc = max(0.0, neg_log_acc)
                 if neg_log_acc <= -np.log(rng.uniform(0, 1)):
                     commit_exchange(chosen_coords, chosen_slots)
                     committed = True
                     c["remove_accept"] += 1
+                    _d("accept_remove")
         finally:
             if not committed:
                 for _s in removed_slots:
@@ -1562,11 +1814,18 @@ def advance(
     # The window's only materialisation of the configuration. Order follows
     # `alive`, which is not the order the old array had; nothing downstream
     # depends on particle order.
+    if _SKIP_NULL and null_budget == 0:
+        # every uncounted null was spent: the rod is jammed enough that the
+        # incoming packing is the only one the DP can find. The remaining nulls
+        # in this window were counted as ordinary repacks.
+        _d("repack_null_capped")
     state.positions = np.array(cl.coords[alive[:N]], dtype=float)
     state.step += cfg.sampling_window
     packing = (N * cfg.volume_of_molecule) / total_vol
     n_cav_mean = (_ncav_sum / _ncav_count) if _ncav_count else 0.0
     out = {"N": N, "packing_fraction": packing, "counters": c, "n_cav": n_cav_mean}
+    # raw per-window sums; the runner logs them as integers (see _clq above)
+    out["clique"] = dict(_clq)
     if _corr_count:
         mean = _corr_sum / _corr_count
         # population variance of the correction over the window's exchanges;
