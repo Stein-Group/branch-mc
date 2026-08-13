@@ -5,8 +5,11 @@ Sweepable axes and where they live in the base params:
     ensemble.mu                 (single value or a list; muVT)
     ensemble.packing_fraction   (single value or a list; NVT)
     ensemble.N                  (single value or a list; NVT)
+    sampler.trials              (absolute trial-pool size; XOR trial_density)
     sampler.trial_density
     sampler.trial_box_side
+    sampler.channel_length
+    sampler.channel_width
 
 Any axis given as a JSON list is swept; scalars are fixed. The launcher takes
 the Cartesian product of all swept axes, so two list axes build a heatmap
@@ -61,6 +64,14 @@ _AXES = (
     ("target_density", "ensemble", "target_density"),
     ("depth", "sampler", "depth"),
     ("seed", "run", "seed"),
+    # `trials` (absolute count) and `trial_density` (count per unit measure of
+    # the trial body) are the two ways to say how big the trial pool is, and
+    # sim_setup refuses both at once. Both are sweepable: a k-sweep holds the
+    # budget fixed while the geometry varies, a density sweep holds the
+    # candidates-per-unit-length fixed instead. Omitting `trials` here made a
+    # list-valued sampler.trials survive expansion unexpanded, and every run
+    # then died in from_params on int(list).
+    ("trials", "sampler", "trials"),
     ("trial_density", "sampler", "trial_density"),
     ("trial_box_side", "sampler", "trial_box_side"),
     ("channel_length", "sampler", "channel_length"),

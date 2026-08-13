@@ -918,10 +918,18 @@ def advance(
     #
     # Counted where the acceptance is computed, so clq{A,R}_n match add_attempt
     # / the remove equivalent exactly -- a free cross-check on the log.
+    # The `_acc` triple repeats pos/new over ACCEPTED moves only. The plain
+    # counters are incremented where the acceptance is COMPUTED, so they sum
+    # over rejections too and a turnover fraction built from them silently
+    # assumes turnover is uncorrelated with acceptance -- an assumption that is
+    # false in the direction that flatters the sampler if high-turnover cliques
+    # are rejected more often. The two are kept side by side rather than the
+    # plain ones being moved, because clq{A,R}_n == add_attempt / the remove
+    # equivalent is a free cross-check on the log and moving the site breaks it.
     _clq = {
-        "A_n": 0, "A_pos": 0, "A_new": 0,
-        "R_n": 0, "R_pos": 0, "R_new": 0,
-        "P_n": 0, "P_pos": 0, "P_new": 0,
+        "A_n": 0, "A_pos": 0, "A_new": 0, "A_pos_acc": 0, "A_new_acc": 0,
+        "R_n": 0, "R_pos": 0, "R_new": 0, "R_pos_acc": 0, "R_new_acc": 0,
+        "P_n": 0, "P_pos": 0, "P_new": 0, "P_pos_acc": 0, "P_new_acc": 0,
     }
     while step < cfg.sampling_window:
         if nvt:
@@ -1178,8 +1186,18 @@ def advance(
                     n_add, n_remove = n_cav + 1, n_cav
                 else:
                     n_add, n_remove = n_cav - 1, n_cav
-                if n_add > n_trials:
-                    continue  # more insertions than the trial cloud can supply
+                if max(n_add, n_remove) > n_trials:
+                    # Both counts must fit the trial pool, not just the
+                    # insertions: `keep_mask` is sized n_trials and the removed
+                    # molecules claim n_remove of its slots, so gating on n_add
+                    # alone let the remove branch through at n_cav == n_trials+1
+                    # (n_add = n_cav-1 fits, n_remove = n_cav does not) and it
+                    # died in rng.choice. Gating on the max also keeps the two
+                    # directions inverses of each other: an add at occupancy m
+                    # proposes (m+1, m) and the remove that undoes it proposes
+                    # (m, m+1) at occupancy m+1, so both are blocked at the same
+                    # m >= n_trials instead of the add alone.
+                    continue  # add or remove count exceeds the trial cloud
             elif n_cav == 0:
                 # empty cavity. An ADD needs nothing to remove, so it kicks down
                 # to a pure depth-0 insertion (n_add=1, n_remove=0) rather than
@@ -1218,9 +1236,13 @@ def advance(
                     n_add, n_remove = n_cav + 1, n_cav
                 else:
                     n_add, n_remove = n_cav - 1, n_cav
-                if n_add > n_trials:
+                if max(n_add, n_remove) > n_trials:
+                    # see the full_repacking branch above: the removal count
+                    # claims trial slots too, so gating on n_add alone is both a
+                    # crash at n_cav == n_trials+1 and a direction-dependent
+                    # threshold
                     _d("bail_nadd_gt_ntrials")
-                    continue  # more insertions than the trial cloud can supply
+                    continue  # add or remove count exceeds the trial cloud
 
         # Split the system into in-cavity (to remove) and the rest. The rest is
         # never materialised: it is exactly the cell list's active fluid once the
@@ -1580,11 +1602,11 @@ def advance(
 
             # clique composition, recorded once per scored move (see _clq above)
             _ck = {"add": "A", "remove": "R"}.get(choice, "P")
+            _cpos = len(chosen_coords)
+            _cnew = _cpos - _count_reused(chosen_coords, disk_in)
             _clq[_ck + "_n"] += 1
-            _clq[_ck + "_pos"] += len(chosen_coords)
-            _clq[_ck + "_new"] += len(chosen_coords) - _count_reused(
-                chosen_coords, disk_in
-            )
+            _clq[_ck + "_pos"] += _cpos
+            _clq[_ck + "_new"] += _cnew
 
             # LJ tail: a system-level energy change, applied exactly once per move
             # with the same sign in both directions. For branch the per-particle
@@ -1722,6 +1744,8 @@ def advance(
                     commit_exchange(chosen_coords, chosen_slots)
                     committed = True
                     c["repack_accept"] += 1
+                    _clq["P_pos_acc"] += _cpos
+                    _clq["P_new_acc"] += _cnew
                     _d("accept_repack")
             elif choice == "add":
                 c["add_attempt"] += 1
@@ -1764,6 +1788,8 @@ def advance(
                     commit_exchange(chosen_coords, chosen_slots)
                     committed = True
                     c["add_accept"] += 1
+                    _clq["A_pos_acc"] += _cpos
+                    _clq["A_new_acc"] += _cnew
                     _d("accept_add")
             else:
                 mu_ideal = -np.log(N / total_vol)
@@ -1805,6 +1831,8 @@ def advance(
                     commit_exchange(chosen_coords, chosen_slots)
                     committed = True
                     c["remove_accept"] += 1
+                    _clq["R_pos_acc"] += _cpos
+                    _clq["R_new_acc"] += _cnew
                     _d("accept_remove")
         finally:
             if not committed:

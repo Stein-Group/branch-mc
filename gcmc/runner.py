@@ -70,6 +70,16 @@ _LOG_COLS = [
     ("clqR_n", 9),
     ("clqR_pos", 10),
     ("clqR_new", 10),
+    # ACCEPTED-only repeats of pos/new (MC_engine._clq "*_acc"). The plain
+    # columns above are counted where the acceptance is computed and so include
+    # rejections; these four are incremented at the commit. Turnover per
+    # ACCEPTED move -- clqA_new_a / clqA_pos_a -- is the quantity that says how
+    # much of the configuration a successful move actually replaced, and
+    # clq*_new_a / wall_s is the throughput in positions rather than in moves.
+    ("clqA_pos_a", 11),
+    ("clqA_new_a", 11),
+    ("clqR_pos_a", 11),
+    ("clqR_new_a", 11),
 ]
 _LOG_WIDTHS = [w for _, w in _LOG_COLS]
 
@@ -797,7 +807,8 @@ def run(
                 # missing block logs as zeros rather than raising, so a parallel
                 # run keeps the same column layout.
                 clq = stats.get("clique") or dict.fromkeys(
-                    ("A_n", "A_pos", "A_new", "R_n", "R_pos", "R_new"), 0
+                    ("A_n", "A_pos", "A_new", "R_n", "R_pos", "R_new",
+                     "A_pos_acc", "A_new_acc", "R_pos_acc", "R_new_acc"), 0
                 )
                 log.write(
                     _log_row(
@@ -823,6 +834,10 @@ def run(
                             clq["R_n"],
                             clq["R_pos"],
                             clq["R_new"],
+                            clq.get("A_pos_acc", 0),
+                            clq.get("A_new_acc", 0),
+                            clq.get("R_pos_acc", 0),
+                            clq.get("R_new_acc", 0),
                         ]
                     )
                 )
