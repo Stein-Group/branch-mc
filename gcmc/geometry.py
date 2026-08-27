@@ -24,6 +24,13 @@ import numpy as np
 import numpy.typing as npt
 
 from ._types import BoolArray, FloatArray, IntArray
+from .config_specs import EnsembleSpec, SamplerSpec
+
+# S2: the overlap CONVENTION moved down to layer 1 (potentials.overlap): it is a
+# function of sigma, not of geometry. This module still asks the question "do
+# these two overlap?", so it imports the answer downward, which is legal and is
+# the direction the ladder wants.
+from .potentials.overlap import overlap_radius
 
 if TYPE_CHECKING:
     from .neighbors import CellList
@@ -32,26 +39,21 @@ if TYPE_CHECKING:
 # the raw neighbour result every weighting mode consumes. dists/idxs are
 # whatever the container returned (scipy gives float64/intp), so they are
 # typed as the arrays they are used as, not re-cast at runtime.
-RawNeighbors: TypeAlias = tuple[FloatArray, FloatArray, IntArray, "BoolArray | None"]
+#: (coords, dists, idxs, keep_mask, species) for the trials that survived the
+#: overlap filter. The last two are PER-TRIAL COLUMNS carried through the same
+#: `[good]` filter as the coordinates: `keep_mask` marks the removal shadow, and
+#: `species` the drawn type of each trial (M19). Both are None when the caller
+#: passed none. They are threaded here rather than reconstructed by the caller
+#: because only this function knows which trials survived, and matching survivors
+#: back up by coordinate is exactly the identification M21 forbids.
+RawNeighbors: TypeAlias = tuple[
+    FloatArray, FloatArray, IntArray, "BoolArray | None", "IntArray | None"
+]
 
-# The single overlap convention for the whole package. Two centres overlap iff
-# their separation is at most `sigma - OVERLAP_TOL`; a pair at exactly sigma is a
-# valid (non-overlapping) edge. Every overlap / adjacency test routes through the
-# two helpers below so there is one implementation, not four literals that differ
-# on a measure-zero set.
-OVERLAP_TOL = 1e-12
-
-
-def overlap_radius(sigma: float) -> float:
-    """The largest separation that still counts as overlapping, i.e. the radius
-    to hand a `query_ball_point` / `query_pairs` overlap search so that a pair at
-    exactly sigma is excluded from the overlap set."""
-    return sigma - OVERLAP_TOL
-
-
-def overlaps(d: FloatArray | float, sigma: float) -> BoolArray:
-    """Boolean overlap indicator for separations `d` against diameter `sigma`."""
-    return np.asarray(d, dtype=float) <= sigma - OVERLAP_TOL
+# The overlap convention itself now lives one layer down, in
+# `potentials/overlap.py`, and is imported above -- see that module for why it is
+# layer 1. This module owns DISTANCES; it does not own the floor those distances
+# are compared against.
 
 
 def query_saturating(
@@ -129,6 +131,46 @@ def assert_no_overlap(
     )
 
 
+def inside_pore(
+    coords: FloatArray, ens: EnsembleSpec, samp: SamplerSpec
+) -> BoolArray | bool | None:
+    """Which centres satisfy a confining hard wall. None when there is no pore.
+
+    `coords` is (M, dim) or a single (dim,) point; the return follows -- an
+    array for the first, a plain bool for the second. A sphere of radius
+    `samp.radius` must keep its CENTRE off the wall by that radius, which is why
+    the clearance is the configured particle radius and not a hardcoded 0.5.
+
+    THREE COPIES BECAME ONE (S2.11). This lived as `MC_engine._inside_pore`
+    (L6), was duplicated verbatim for single points as
+    `runner._inside_pore_seed` (L7), and was stated a third time as bounds by a
+    `MC_engine._pore_bounds` that nothing called. Two live copies of a hard-wall
+    test is the kind of duplication that does not announce itself: they agree
+    until one is edited, and the symptom is seeded configurations seated inside
+    a wall that the engine then refuses to move, which reads as a sampling
+    problem rather than a geometry one.
+
+    It belongs HERE because that is the layer both callers can see -- the
+    ladder's own instruction when a shared thing forces an upward import. It is
+    also simply true: a wall test asks where a particle is, which is what this
+    module is for, and it reads no energy.
+    """
+    if ens.pore_geometry is None:
+        return None
+    a = np.atleast_2d(np.asarray(coords, float))
+    cl = samp.radius
+    if ens.pore_geometry == "slit":
+        assert ens.pore_H is not None  # config validation pairs geometry+size
+        z0 = (ens.box - ens.pore_H) / 2.0
+        z = a[:, 2]
+        ok = (z >= z0 + cl) & (z <= z0 + ens.pore_H - cl)
+    else:
+        assert ens.pore_R is not None  # config validation pairs geometry+size
+        c = ens.box / 2.0
+        ok = np.hypot(a[:, 0] - c, a[:, 1] - c) <= (ens.pore_R - cl)
+    return ok if np.ndim(coords) > 1 else bool(ok[0])
+
+
 def wrap(coords: FloatArray, side: float | FloatArray) -> FloatArray:
     """Map coordinates into the primary periodic image [0, side)."""
     return np.mod(coords, side)
@@ -166,6 +208,32 @@ def indices_in_cavity(
     return np.nonzero(mask)[0]
 
 
+def _admissible(
+    distances: FloatArray,
+    indices: IntArray,
+    lower_cutoff: float,
+    species: IntArray | None,
+    core_floor: FloatArray | None,
+    container: Any,
+) -> BoolArray:
+    """Which trials clear the overlap floor: scalar, or per pair type (A1.4).
+
+    The scalar branch is `np.all(distances >= lower_cutoff, axis=1)` unchanged --
+    same expression, same order -- so an untyped run is bit-identical.
+
+    The typed branch compares each pair against `core_floor[t_trial, t_neigh]`.
+    `container.species` supplies the neighbour types by SLOT id, which is what
+    `indices` holds, so no coordinate is consulted. Pad columns carry an infinite
+    distance and clear any finite floor, so padding stays neutral exactly as it
+    does in the scalar test.
+    """
+    if species is None or core_floor is None:
+        return np.all(distances >= lower_cutoff, axis=1)
+    nt = container.species_at(indices)
+    floors = np.asarray(core_floor)[np.asarray(species)[:, None], nt]
+    return np.all(distances >= floors, axis=1)
+
+
 def find_neighbors_pair(
     cl: CellList | None,
     trials: FloatArray,
@@ -176,6 +244,9 @@ def find_neighbors_pair(
     keep_mask: BoolArray | None = None,
     valid: BoolArray | None = None,
     dists_needed: bool = True,
+    trial_species: IntArray | None = None,
+    member_species: IntArray | None = None,
+    core_floor: FloatArray | None = None,
 ) -> tuple[RawNeighbors | None, RawNeighbors | None]:
     """`find_neighbors` for the trial cloud and the removed members in ONE query.
 
@@ -209,20 +280,43 @@ def find_neighbors_pair(
                 no_neigh,
                 keep_mask=keep_mask,
                 valid=valid,
+                species=trial_species,
+                core_floor=core_floor,
             ),
-            find_neighbors(None, members, lower_cutoff, upper_cutoff, no_neigh),
+            find_neighbors(
+                None,
+                members,
+                lower_cutoff,
+                upper_cutoff,
+                no_neigh,
+                species=member_species,
+                core_floor=core_floor,
+            ),
         )
     nt = len(trials)
     both = np.vstack((trials, members)) if len(members) else trials
     distances, indices = cl.query(both, upper_cutoff, min_only=not dists_needed)
-    ok = np.all(distances >= lower_cutoff, axis=1)
+    # trials and members are queried together, so the floor test is applied to
+    # the two blocks with their own type columns and then split.
+    _tspc = trial_species
+    _mspc = member_species
+    if _tspc is not None and core_floor is not None:
+        both_spc = (
+            np.concatenate([_tspc, _mspc])
+            if _mspc is not None and len(members)
+            else _tspc
+        )
+    else:
+        both_spc = None
+    ok = _admissible(distances, indices, lower_cutoff, both_spc, core_floor, cl)
 
     good = ok[:nt]
     if valid is not None:
         good = good & np.asarray(valid, bool)
     if np.any(good):
         km = keep_mask[good] if keep_mask is not None else None
-        raw_t = trials[good], distances[:nt][good], indices[:nt][good], km
+        spc = trial_species[good] if trial_species is not None else None
+        raw_t = trials[good], distances[:nt][good], indices[:nt][good], km, spc
     else:
         raw_t = None
 
@@ -231,7 +325,8 @@ def find_neighbors_pair(
     gm = ok[nt:]
     if not np.any(gm):
         return raw_t, None
-    return raw_t, (members[gm], distances[nt:][gm], indices[nt:][gm], None)
+    m_spc = member_species[gm] if member_species is not None else None
+    return raw_t, (members[gm], distances[nt:][gm], indices[nt:][gm], None, m_spc)
 
 
 def find_neighbors(
@@ -243,12 +338,16 @@ def find_neighbors(
     keep_mask: BoolArray | None = None,
     valid: BoolArray | None = None,
     saturation_requery: bool = False,
+    species: IntArray | None = None,
+    core_floor: FloatArray | None = None,
 ) -> RawNeighbors | None:
     """Query each trial's neighbours within `upper_cutoff`, drop any trial that
     overlaps the system (a neighbour closer than `lower_cutoff`), and return the
     surviving raw arrays. Weighting is the caller's job.
 
-    Returns (coords, dists, idxs, keep_mask) or None if nothing survives.
+    Returns (coords, dists, idxs, keep_mask, species) or None if nothing
+    survives; `keep_mask` and `species` are per-trial columns filtered by the
+    same survivor mask as the coordinates (see `RawNeighbors`).
     `dists` and `idxs` are (N, k) with the kd-tree's inf / N padding kept,
     exactly as the weighting code downstream expects. Overlap detection is safe
     at any k (the k nearest already include any overlap), but an energy summed
@@ -258,6 +357,15 @@ def find_neighbors(
     from that sum; the hard-core path leaves it off, since its weight ignores the
     distances entirely. When the fixed-k query is already unsaturated the columns
     are identical either way, so the flag is a no-op below ordinary density.
+
+    THE OVERLAP FLOOR IS PER PAIR WHEN `core_floor` IS GIVEN (A1.4). A trial is
+    admissible when no neighbour sits closer than the floor for THAT pair of
+    types, `core_floor[trial_type, neighbour_type]`, rather than closer than one
+    scalar. Both arguments are needed together: the trial types come from
+    `species` and the neighbour types from the container's own species column, so
+    this is the only place both are in hand at once. Without the table the test
+    is the scalar one, bit for bit -- and with a single type whose floor is that
+    same scalar, the two agree by construction.
 
     `kdtree` may instead be a `neighbors.CellList`. It answers a radius query, so
     its neighbour list is complete by construction and `saturation_requery` has
@@ -271,13 +379,16 @@ def find_neighbors(
             kdtree = None  # empty system: the None path, exactly
         else:
             distances, indices = kdtree.query(trial_mols, upper_cutoff)
-            good = np.all(distances >= lower_cutoff, axis=1)
+            good = _admissible(
+                distances, indices, lower_cutoff, species, core_floor, kdtree
+            )
             if valid is not None:
                 good = good & np.asarray(valid, bool)
             if not np.any(good):
                 return None
             km = keep_mask[good] if keep_mask is not None else None
-            return trial_mols[good], distances[good], indices[good], km
+            spc = species[good] if species is not None else None
+            return trial_mols[good], distances[good], indices[good], km, spc
     if kdtree is None:
         # empty system: nothing to overlap and no neighbours. Every trial is
         # admissible with padded (infinite-distance) neighbour rows, so the
@@ -291,7 +402,8 @@ def find_neighbors(
         dists = np.full((int(good.sum()), no_neigh), np.inf)
         idxs = np.zeros((int(good.sum()), no_neigh), dtype=int)
         km = keep_mask[good] if keep_mask is not None else None
-        return trial_mols[good], dists, idxs, km
+        spc = species[good] if species is not None else None
+        return trial_mols[good], dists, idxs, km, spc
     if saturation_requery:
         distances, indices = query_saturating(
             kdtree, trial_mols, no_neigh, upper_cutoff
@@ -310,7 +422,8 @@ def find_neighbors(
     dists = distances[good]
     idxs = indices[good]
     km = keep_mask[good] if keep_mask is not None else None
-    return coords, dists, idxs, km
+    spc = species[good] if species is not None else None
+    return coords, dists, idxs, km, spc
 
 
 def indices_in_cavity_cl(

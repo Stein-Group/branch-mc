@@ -1,0 +1,67 @@
+# Xe and Kr as a reduced two-species file. The real-guest arm of the same
+# workstream that ff/species_binary_reduced.yaml is the fictional arm of.
+#
+# Every number here is FF-A divided through by the Xe-Xe self-pair, so this file
+# and ff/forcefield_A.yaml describe the same physics in different units. It is
+# DERIVED, not transcribed:
+#
+#   sigma_Kr = 3.636 / 4.1   = 0.886829268292683
+#   eps_Kr   = 166.4 / 221.0 = 0.7529411764705882
+#   rc       = 12.0 / 4.1    = 2.9268292682926833
+#   T*(298 K)= 298 / 221.0   = 1.3484162895927603   <- goes in params.json, not here
+#
+# test_species_file.py::test_xekr_reduced_matches_forcefield_a re-derives all of
+# them from ff/forcefield_A.yaml and compares, so this file cannot drift away
+# from the anchor without the suite noticing. Regenerate rather than retype:
+#
+#   python -m scripts.mof.units ff/forcefield_A.yaml --T 298
+#
+# Why a reduced copy at all, when the MOF path already reduces FF-A on the fly:
+# because the pure-fluid multispecies engine takes a species file and has no
+# framework, no reference type and no kelvin anywhere. Keeping this file reduced
+# means the fictional runs and the Xe/Kr runs go through exactly one code path,
+# with only the numbers changing. Nothing is pinned to sigma* = 1 by the loader;
+# Xe lands there because that is the scale these numbers were divided by, and
+# that fact is recorded here rather than implied.
+#
+# The core floor is FF-A's measured c (P0.6), NOT the 0.9 the fictional files
+# use. It is a property of the force field and the temperature and it was
+# measured, so it travels with the numbers it was measured for.
+#
+# k_XeKr = 0 is the anchor: FF-A states plain Lorentz-Berthelot, RASPA2 accepts
+# the same statement, and that is what keeps the external validation route open.
+# A run at non-zero k is a different model and gets its own file.
+
+schema: 2
+name: species-xekr-reduced
+units: reduced
+
+mixing: lorentz-berthelot-kij
+
+interaction:
+  form: lennard-jones-12-6
+  rc: 2.9268292682926833
+  shifted: false
+  tail_correction: false
+
+core_floor:
+  c: 0.7155
+
+aux: none
+
+species:
+  status: confirmed
+  Xe:
+    sigma: 1.0
+    epsilon: 1.0
+    lambda: 1.0
+    symbol: Xe
+  Kr:
+    sigma: 0.886829268292683
+    epsilon: 0.7529411764705882
+    lambda: 1.0
+    symbol: Kr
+
+k_ij:
+  Xe:
+    Kr: 0.0

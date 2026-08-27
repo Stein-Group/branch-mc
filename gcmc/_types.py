@@ -30,4 +30,9 @@ class NeighborQueryable(Protocol):
     (radius `query` with the same padding convention). Structural typing here
     keeps geometry container-agnostic, which is exactly the design intent."""
 
-    def query(self, *args: object, **kwargs: object) -> object: ...
+    def query(self, *args: object, **kwargs: object) -> object:
+        """Neighbours of one or more points. Signature is intentionally loose:
+        a `cKDTree` and a `CellList` both satisfy this and take different
+        keywords, and the point of the protocol is that callers can hold either.
+        """
+        ...

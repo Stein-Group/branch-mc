@@ -31,7 +31,7 @@ import numpy as np
 
 from .._types import FloatArray, IntArray
 from .base import Potential, register
-from .pair_table import PairTable, table_pair_energy
+from .pair_table import PairTable, table_pair_energy, table_pair_energy_vec
 
 
 @register("lj_table")
@@ -68,6 +68,10 @@ class LennardJonesTable(Potential):
         upper_cutoff: float = 2.5,
         **_ignored: Any,
     ) -> LennardJonesTable:
+        """Registry factory. `**_ignored` absorbs the constants other potentials
+        take (volume for the bulk tail, the g3 table) so `make_potential` can
+        forward one keyword set to any registered mode; this one has no tail, by
+        design (see the module docstring)."""
         return cls(
             beta=beta, table=table, trial_type=trial_type, upper_cutoff=upper_cutoff
         )
@@ -90,6 +94,87 @@ class LennardJonesTable(Potential):
             m = nt == t
             out[m] = table_pair_energy(r[m], self.trial_type, int(t), self.table)
         return out
+
+    def pair_u_grid(
+        self,
+        r: FloatArray,
+        trial_types: IntArray,
+        neighbour_types: IntArray,
+    ) -> FloatArray:
+        """Per-pair energy for a whole trial CLOUD of mixed types.
+
+        `r` is (N, k), `trial_types` is (N,) and `neighbour_types` is (N, k).
+        Returns (N, k).
+
+        WHY THIS EXISTS ALONGSIDE `_pair_u`. That method takes one
+        `self.trial_type` for every row, which is right for the MOF path -- one
+        guest is inserted at a time. The exchange move in `MC_engine.advance`
+        weights an entire trial cloud in one call, and after P3 each trial in
+        that cloud carries its OWN drawn species. A per-instance `trial_type`
+        cannot express that, and building one potential object per type would
+        mean N table lookups and a Python loop over trials in the hot path.
+
+        One gather over the whole block, not a loop over type combinations:
+        `table_pair_energy_vec` fancy-indexes the pair tables, so the pair
+        parameters come out as arrays and the arithmetic is identical to the
+        scalar form. That matters more than it looks -- the same grouping loop in
+        `branch._intra_lj_factor` runs once per CLIQUE, and it cost 53 s on one
+        matrix point before being replaced by this gather.
+        """
+        r = np.asarray(r, float)
+        tt = np.asarray(trial_types, int)
+        nt = np.asarray(neighbour_types, int)
+        # ONE gather over the whole (N, k) block: `sigma[si, sj]` fancy-indexes
+        # the pair tables, so this is the same arithmetic `table_pair_energy` does
+        # with no loop over type combinations. The per-row trial type broadcasts
+        # across the k columns.
+        return table_pair_energy_vec(
+            r, np.broadcast_to(tt[:, None], r.shape), nt, self.table
+        )
+
+    def weight_cloud(
+        self,
+        dists: FloatArray,
+        trial_types: IntArray,
+        neighbour_types: IntArray,
+    ) -> FloatArray:
+        """Per-trial Boltzmann factor for a cloud of mixed types.
+
+        The row-product analogue of `weight_pair` on a (N, k) input, with each
+        row weighted by its own trial type. Pads (inf distance) give u = 0 and a
+        factor of 1, exactly as in `weight_pair`, so a saturating query's padding
+        stays neutral.
+        """
+        d = np.asarray(dists, float)
+        g = np.ones_like(d)
+        inside = d < self.upper_cutoff
+        if np.any(inside):
+            u = self.pair_u_grid(d, trial_types, neighbour_types)
+            with np.errstate(over="ignore"):
+                g[inside] = np.exp(-self.beta * u[inside])
+        return np.prod(g, axis=1) if g.ndim == 2 else g
+
+    def total_energy_typed(
+        self,
+        dists: FloatArray,
+        trial_type: int,
+        neighbour_types: IntArray,
+    ) -> float:
+        """`total_energy` for one particle of a stated type.
+
+        The instance's own `trial_type` is deliberately NOT used: the engine's
+        translate and swap moves ask about a particle already in the box, whose
+        type comes from the cell list rather than from how this object was built.
+        Passing it explicitly is what stops those two paths silently reading the
+        type of whatever was inserted last.
+        """
+        d = np.asarray(dists, float)
+        keep = (d < self.upper_cutoff) & (d > 0)
+        if not keep.any():
+            return 0.0
+        nt = np.asarray(neighbour_types, int)[keep]
+        tt = np.full(nt.shape, int(trial_type), dtype=int)
+        return float(np.sum(self.pair_u_grid(d[keep][None, :], tt[:1], nt[None, :])))
 
     def weight_pair(
         self,

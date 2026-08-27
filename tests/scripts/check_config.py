@@ -16,7 +16,9 @@ import numpy as np
 
 MODE = sys.argv[1]
 HERE = os.path.dirname(os.path.abspath(__file__))
-ORIG = os.path.join(HERE, "..", "..", "orig")
+from _frozen import add_orig_to_path
+
+ORIG = str(add_orig_to_path())  # R1: resolved from $ORIG_ROOT or the tag
 
 ARGV = {
     "lj3d": [
@@ -135,7 +137,6 @@ PARAMS = {
 }
 
 sys.argv = ["orig"] + ARGV[MODE]
-sys.path.insert(0, ORIG)
 if MODE == "aux3d":
     os.chdir(ORIG)
 import cav_n_d_3d_g3_LJ as orig

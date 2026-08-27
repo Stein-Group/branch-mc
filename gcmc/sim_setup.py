@@ -20,7 +20,20 @@ of this block is examples/schema.json, which validation uses.
   "_comment":   str,                                 # OPTIONAL anywhere; any key starting with
                                                      #   "_" is ignored, so a params file can
                                                      #   carry its own explanation
-  "auxiliary":  {"type": "pmf" | "short_range",      # OPTIONAL block; omit = no aux
+  "potential":  {"main": "hard_core" | "lennard_jones",   # required
+                 "T": float,                         # required iff main == lennard_jones (reduced T*)
+                 "tail": bool,                       # default true; lennard_jones only
+                 "species_file": str},               # OPTIONAL. Present = TYPED multi-species mode:
+                                                     #   path to a schema-2 `units: reduced` species yaml
+                                                     #   (ff/species_*.yaml). It owns sigma, epsilon,
+                                                     #   lambda, p_trial, symbol, k_ij, rc, core_floor.c
+                                                     #   and the auxiliary, so run.radius,
+                                                     #   run.lower_cutoff, run.upper_cutoff and the
+                                                     #   whole `auxiliary` block are then FORBIDDEN.
+                                                     #   Absent = single-species scalar mode, unchanged.
+
+  "auxiliary":  {"type": "pmf" | "short_range",      # OPTIONAL block; omit = no aux. Forbidden in
+                                                     #   typed mode: the species file states `aux`.
                  "g3_csv": str,                      # pmf only; required iff 3D
                  "cutoff": float,                    # short_range only, required for it:
                                                      #   the proposal/selection radius, e.g. 1.5.
@@ -46,7 +59,14 @@ of this block is examples/schema.json, which validation uses.
 
   "ensemble":   {"dimension": 2 | 3,                 # required
                  "type": "muVT" | "NVT" | "QA" | "confined",   # default muVT
-                 "mu": float,                        # muVT: exactly one of mu or ONE target_* key
+                 "mu": float,                        # muVT: exactly one of mu or ONE target_* key.
+                                                     #   TYPED mode: a MAP {species: float}, one entry per
+                                                     #   species, and z_s = exp(beta mu_s)/lambda_s^dim
+                 "fugacity": {str: float},           # TYPED only: z_s = beta f_s. lambda is not consulted
+                 "z": {str: float},                  # TYPED only: the activity z_s directly
+                                                     #   mu / fugacity / z are MUTUALLY EXCLUSIVE routes;
+                                                     #   exactly one, with no species missing or unknown.
+                                                     #   Typed mode takes no target_* and no sweep.
                  "target_eta" | "target_density" | "target_N",  # controller drives mu to it; not with sweep
                  "N": int | "packing_fraction": float,         # NVT only, exactly one; mu/sweep forbidden
                  "pore": {"geometry": "slit" | "cylinder",     # confined only
@@ -81,6 +101,15 @@ of this block is examples/schema.json, which validation uses.
                                                      #   the loss window in time, not in rows. Only worth
                                                      #   setting for tiny sampling_window; measured, the log
                                                      #   is 0.02% of runtime at the default cadence
+                 "log_columns": list,                # which COLUMN GROUPS the run log carries. The set is
+                 "log_drop": list,                   #   a function of the run -- a column is written when
+                                                     #   the run can put a nonzero value in it -- and these
+                                                     #   two narrow it further. Groups: core and species are
+                                                     #   forced; state, moves, clique, clique_acc optional.
+                                                     #   log_columns lists what to keep, log_drop what to
+                                                     #   remove; giving both raises. Default is every group
+                                                     #   the run can fill, which for a single-species muVT
+                                                     #   run is exactly the historical layout.
                  "seed": int, "initial_config": str,
                                                      #   a path (file or equilibrated library), or the
                                                      #   literal token "grid" / "grid:<eta>" to bootstrap
@@ -193,6 +222,7 @@ import math
 from dataclasses import dataclass
 
 from . import cell_plan
+from .species import SpeciesSpec, build_species_spec, one_route
 
 log = logging.getLogger(__name__)
 
@@ -247,7 +277,25 @@ def _gamma_dict(pmf: bool, reweight: bool, two_dim: bool) -> dict[int, float]:
 
 
 _MAIN = {"hard_core", "lennard_jones"}
-_SAMPLERS = {"metropolis", "rosenbluth", "branch", "reweight", "channel"}
+# R16: `channel_cyclic` is its own sampler, not a value of `channel_length`.
+# The two share a dynamic program and nothing else; the cyclic rod lifts the
+# locality guard, pays a full minimum-image pair pass, and sizes its trial count
+# per move from the orientation. Naming it here makes the cost visible at the
+# config surface instead of hiding it in a length string.
+_SAMPLERS = {
+    "metropolis",
+    "rosenbluth",
+    "branch",
+    "reweight",
+    "channel",
+    "channel_cyclic",
+}
+
+#: Spellings of `channel_length` that used to select the cyclic rod. They are
+#: refused now rather than aliased: a params file saying "full" and meaning
+#: "topologically different, much costlier move" is exactly the surface R16
+#: removes. Kept as data so the error can name what was typed.
+_LEGACY_CYCLIC_SPELLINGS = ("cyclic", "full", "box", "full_box", "span")
 
 
 def _derive_potential_type(potential: str, bias: str | None, sampler: str) -> str:
@@ -262,12 +310,79 @@ def _derive_potential_type(potential: str, bias: str | None, sampler: str) -> st
     if potential == "lennard_jones":
         if bias == "pmf":
             return "ljaux"
-        if sampler in ("branch", "channel"):
+        if sampler in ("branch", "channel", "channel_cyclic"):
             return "ljbranch"
         return "lj"
     if bias == "pmf":
         return "aux"
     return "hard_sphere"
+
+
+def _short_range_unsupported(
+    *, lj: bool, sampler: str, qa: bool, pore: bool
+) -> str | None:
+    """Why the short-range auxiliary cannot be used here, or None if it can.
+
+    The support matrix for the dual-cutoff auxiliary, stated once. It returns a
+    SENTENCE rather than raising, because its two callers do different things
+    with the same verdict: a per-run `auxiliary` block is a request and an
+    unsupported one raises this text, while a typed species file is a force field
+    and instead logs it and runs with the auxiliary off. Both readings are honest
+    only if they agree about what is supported, which one function guarantees and
+    two copies would not.
+
+    Every entry is a combination that is meaningless or untested, not one that is
+    known wrong, and each is a separate cheap relaxation later. The reason is
+    spelt out in each message because these are the guards a user actually hits.
+    """
+    if not lj:
+        return (
+            "auxiliary.type='short_range' needs potential.main='lennard_jones'. "
+            "It shortens an interaction range, and a hard core has no range to "
+            "shorten -- its exclusion floor IS the interaction, so there is "
+            "nothing to propose with and nothing to correct."
+        )
+    if sampler not in ("channel", "channel_cyclic"):
+        return (
+            f"auxiliary.type='short_range' is supported for "
+            f"sampler.type='channel' only (got {sampler!r}). The saving is in "
+            f"the transfer-matrix sweep, whose DP window width IS the "
+            f"interaction radius. 'branch' would gain almost nothing: its clique "
+            f"adjacency is built at the overlap floor, not at the cutoff, so the "
+            f"enumeration cost does not shrink. 'metropolis' has a single trial "
+            f"and no selection, so there is no proposal bias to divide out. "
+            f"'rosenbluth' would be correct and is a clean later extension, but "
+            f"its per-trial weight is a vector operation, not a combinatorial one."
+        )
+    # 2D IS supported. The sweep is dimension-agnostic (it sorts on axis 0 and
+    # takes full Euclidean distances), the trial body is an oriented rectangle
+    # instead of a cuboid, and the periodic guard already carries (dim-1) widths.
+    # tests/unit/test_channel_2d.py pins the 2D sweeps against brute-force clique
+    # enumeration and the 2D engine against the exact P(N=0)/P(N=1) ratio, for
+    # both the fixed and the cyclic rod.
+    #
+    # WHAT 2D DOES NOT INHERIT, and it is worth knowing before trusting a number:
+    # that engine-level 2D check is HARD-CORE only. 2D + LJ + channel runs and
+    # gives a plausible density, but it has never been validated against a
+    # reference at the engine level, in either direction. The auxiliary is exact
+    # relative to whatever the 2D LJ channel already samples -- its own gate is
+    # aux-on == aux-off -- so it cannot make that worse, but it cannot vouch for
+    # it either. 2D LJ metropolis does run, so a reference for closing that gap
+    # exists.
+    if qa:
+        return (
+            "auxiliary.type='short_range' does not support the QA frozen matrix: "
+            "frozen obstacles must be dropped from the LJ sum in the member "
+            "weights, the full-potential energy AND the new correction term, and "
+            "QA + channel is not a supported combination to begin with."
+        )
+    if pore:
+        return (
+            "auxiliary.type='short_range' does not support a confining pore yet. "
+            "The algebra carries over (the tail is already disabled in a pore, so "
+            "the correction adds cleanly), but pore + channel is untested."
+        )
+    return None
 
 
 def _as_bool(value: object, name: str) -> bool:
@@ -393,6 +508,8 @@ class Config:
     traj_every: int
     checkpoint_every: int
     log_flush_interval: float
+    log_columns: tuple[str, ...] | None
+    log_drop: tuple[str, ...] | None
     initial_config: str | None
     # quenched-annealed matrix: frozen obstacle positions the fluid cannot
     # overlap but which are never inserted/deleted/moved/counted. Default empty
@@ -432,6 +549,47 @@ class Config:
     # oriented rod, any orientation, exact PBC
     # (the periodic guard is lifted; the sweep
     # uses minimum-image distances + retention)
+    # Everything species-indexed for a typed multi-species run (P2), or None for
+    # the single-species scalar path, which is then bit-identical to before. When
+    # set, it -- not the scalar radius / lower_cutoff / upper_cutoff / volume_of_
+    # molecule fields -- is the authority on sigma, epsilon, the pair floors, the
+    # truncation, the auxiliary and the per-species state point.
+    species: SpeciesSpec | None = None
+
+    @property
+    def n_species(self) -> int:
+        """1 for a single-species run, so callers need no None check."""
+        return 1 if self.species is None else self.species.n
+
+    @property
+    def species_identity(self) -> tuple[str, ...] | None:
+        """The typed half of the run fingerprint (M10, M11), or None.
+
+        Carries the species-file hash (so k_ij, sigma, epsilon, the core floor,
+        rc and the auxiliary multiplier are all covered by one digest), the route
+        taken, and per species the thermal wavelength and the activity. Two runs
+        whose lambdas differ are different experiments and must never share a
+        directory, even when the recorded mu is the same number.
+        """
+        s = self.species
+        if s is None:
+            return None
+        return (
+            f"file={s.sha256}",
+            f"route={s.route}",
+            *(
+                f"{n}:lam={format(float(lam), '.12g')}:z={format(float(z), '.12g')}"
+                for n, lam, z in zip(s.names, s.lam, s.z)
+            ),
+        )
+
+    def packing_fraction(self, counts: object) -> float:
+        """eta from a particle count: `sum_s n_s v_s / V` when typed (P2), and
+        `n v / V` with the single molecular volume otherwise. One entry point, so
+        a caller cannot pick the wrong convention."""
+        if self.species is not None:
+            return self.species.packing_fraction(counts, self.total_volume)
+        return float(counts) * self.volume_of_molecule / self.total_volume  # type: ignore[arg-type]
 
     @property
     def box_dims(self) -> list[float]:
@@ -466,6 +624,68 @@ class Config:
         from .potentials import make_potential
 
         uc, d = self.upper_cutoff, self.diameter
+        # THE TYPED ENERGY. Which samplers can integrate a species file, and why
+        # the answer is per-SAMPLER rather than per potential_type.
+        #
+        # `potential_type` collapses `branch`, `channel` and `channel_cyclic` into
+        # one tag, `ljbranch`, because they share a proposal shape. They do NOT
+        # share a clique kernel, and that is what decides this:
+        #
+        #   rosenbluth      supported. Per-pair weights and per-pair overlap
+        #                   floors, gated by the reduction and discrimination
+        #                   tests in tests/engine/test_typed_energy.py.
+        #   channel         supported. `ChannelSweepMS` / `ChannelSweepLJMS`
+        #                   conflict pairs at c*sigma_ij and weight in-window
+        #                   pairs by the per-pair 12-6 energy. Those classes were
+        #                   written for the MOF path and unit-tested there; what
+        #                   was missing was `make_sweep` selecting them.
+        #   branch          supported. `count_and_sample` and
+        #                   `ljbranch_weight_sum` now build adjacency at the
+        #                   per-pair floor and evaluate the intra-clique factor
+        #                   from the pair table. The clique ENUMERATION was
+        #                   already type-blind (P5), which is why this was a small
+        #                   change to the graph and the pair energy rather than to
+        #                   the DP.
+        #   channel_cyclic  supported. The per-pair floor and the pair table are
+        #                   OPTIONS on the cyclic sweeps rather than a seventh and
+        #                   eighth class -- cyclic and multi-species are
+        #                   independent properties of the conflict graph, and the
+        #                   class lattice could not compose them. That is the graph
+        #                   half of R7.
+        #
+        # An energetically DEGENERATE species file is allowed through every
+        # sampler: one sigma, one epsilon and one core floor throughout means the
+        # single-sigma potential represents that mixture exactly, the components
+        # differing only in activity, which the engine does carry. Not a loophole
+        # -- it is the true condition, and it is what the M21 arbiter runs on.
+        if self.species is not None and self.potential_type in ("lj", "ljbranch"):
+
+            def _all_one(table: Any) -> bool:
+                flat = [float(v) for row in table for v in row]
+                return all(abs(v - flat[0]) <= 1e-12 for v in flat)
+
+            _degenerate = (
+                _all_one(self.species.sigma)
+                and _all_one(self.species.eps)
+                and _all_one(self.species.core_floor)
+            )
+            # The table potential is returned for EVERY typed run, degenerate or
+            # not. On a degenerate file it is numerically the scalar potential --
+            # `table_pair_energy` at one sigma and one epsilon reduces to
+            # `lj_pair_energy` bit for bit, which `test_pair_table.py` pins -- so
+            # there is nothing to gain by branching, and one real thing to lose:
+            # the degenerate file is the ONLY case in which the table path can be
+            # checked against the untyped chain, and routing it around the table
+            # would make that reduction gate untestable.
+            from .potentials import make_potential as _mp
+
+            return _mp(
+                "lj_table",
+                beta=self.beta,
+                table=self.species.table,
+                trial_type=0,
+                upper_cutoff=uc,
+            )
         match self.potential_type:
             case "hard_sphere":
                 return make_potential("hard_sphere", diameter=d, upper_cutoff=uc)
@@ -521,7 +741,7 @@ def from_params(p: dict[str, Any]) -> Config:
 
     # ---- main potential ----
     pot = p["potential"]
-    _check(pot, {"main", "T", "tail"}, {"main"})
+    _check(pot, {"main", "T", "tail", "species_file"}, {"main"})
     main = pot["main"]
     if main not in _MAIN:
         raise ValueError(f"unknown main potential {main!r}; allowed {sorted(_MAIN)}")
@@ -530,6 +750,18 @@ def from_params(p: dict[str, Any]) -> Config:
         raise ValueError("Lennard-Jones requires potential.T")
     if not lj and "T" in pot:
         raise ValueError("only Lennard-Jones takes potential.T")
+    # One switch selects the whole typed (multi-species) path (P2). Present means
+    # sigma, epsilon, lambda, p_trial, the core floor, rc and the auxiliary all
+    # come from that file and may not be restated in `run`; absent means the
+    # existing single-species scalar mode, unchanged down to the last bit.
+    species_file = pot.get("species_file")
+    typed = species_file is not None
+    if typed and not lj:
+        raise ValueError(
+            f"potential.species_file describes a Lennard-Jones mixture "
+            f"(interaction.form: lennard-jones-12-6), so potential.main must be "
+            f"'lennard_jones', not {main!r}"
+        )
 
     # ---- sampler ----
     smp = p["sampler"]
@@ -551,8 +783,10 @@ def from_params(p: dict[str, Any]) -> Config:
     if sampler not in _SAMPLERS:
         raise ValueError(f"unknown sampler {sampler!r}; allowed {sorted(_SAMPLERS)}")
     metropolis = sampler == "metropolis"
-    branch = sampler in ("branch", "channel")
-    channel = sampler == "channel"
+    # Both rod kinds are channel samplers: they take the same cavity algebra and
+    # the same DP. Only the mask policy and the guard differ (R16).
+    branch = sampler in ("branch", "channel", "channel_cyclic")
+    channel = sampler in ("channel", "channel_cyclic")
     reweight = sampler == "reweight"
     # full_repacking (default False) is the XOR opposite of the old use_depth:
     # instead of a fixed depth, an exchange repacks the whole cavity, removing
@@ -580,6 +814,8 @@ def from_params(p: dict[str, Any]) -> Config:
         ens,
         {
             "mu",
+            "fugacity",
+            "z",
             "sweep",
             "dimension",
             "box",
@@ -593,6 +829,22 @@ def from_params(p: dict[str, Any]) -> Config:
         },
         {"dimension"},
     )
+    # `fugacity` and `z` are the two non-mu state-point routes of M10 and exist
+    # only in typed mode; `mu` doubles as the scalar single-species route and the
+    # typed map route, told apart by whether a species file is present.
+    _typed_routes = [k for k in ("fugacity", "z") if k in ens]
+    if _typed_routes and not typed:
+        raise ValueError(
+            f"ensemble.{_typed_routes[0]} is a typed multi-species state-point "
+            "route and needs potential.species_file; a single-species run states "
+            "a scalar ensemble.mu"
+        )
+    if not typed and isinstance(ens.get("mu"), dict):
+        raise ValueError(
+            "ensemble.mu is a map (one entry per species) but no "
+            "potential.species_file was given, so there are no species to index. "
+            "State a scalar mu, or add the species file."
+        )
     dim = int(ens["dimension"])
     target_count = None  # set below iff a muVT target is requested
     _target_spec = None  # (kind, value) for a muVT target, finalized post-volume
@@ -673,7 +925,47 @@ def from_params(p: dict[str, Any]) -> Config:
         # NVT: fixed particle number, no chemical potential. Target given as an
         # exact integer N, or as a packing fraction converted to the nearest
         # integer N (held exactly thereafter). mu is meaningless here.
-        if "mu" in ens or "sweep" in ens:
+        #
+        # ---- typed + NVT is the SEMI-GRAND ensemble, and it was unreachable ---
+        #
+        # It was neither supported nor refused before S4 phase 14.
+        # `build_species_spec` calls `one_route`, which demands
+        # ensemble.mu/fugacity/z for any typed run -- including this branch,
+        # which refused `mu` outright. So a typed NVT params file died with "a
+        # typed run needs exactly one state-point route: ensemble.mu", doing what
+        # it said produced "NVT takes no 'mu'", and the two messages sent the
+        # reader back and forth with no reachable configuration between them.
+        #
+        # WHAT THE ENSEMBLE ACTUALLY IS, because the first fix here got it wrong
+        # and refused the combination on the grounds that "a mixture's canonical
+        # state point is one count per species". That is true of the canonical
+        # ensemble and this is not it. NVT in this engine forces `choice =
+        # "repack"`: the only move removes k particles and inserts k, and a typed
+        # insertion DRAWS its species and carries `z_s` in the one-body weight.
+        # So total N is conserved exactly while composition relaxes under the
+        # activity ratio -- which is the SEMI-GRAND ensemble, the standard
+        # instrument for exactly this problem. Nothing needed inventing; the
+        # combination only needed to stop being refused by two validators at
+        # once.
+        #
+        # `mu` is therefore MEANINGFUL for a typed NVT run and meaningless for a
+        # single-species one, where it is the same number for every particle and
+        # cancels in the repack. Hence the split below rather than one rule.
+        if typed:
+            if "sweep" in ens:
+                raise ValueError(
+                    "ensemble.sweep is the scalar-mu sweep and a typed run has "
+                    "one mu per species; sweep a typed state point by giving a "
+                    "LIST OF MAPS to ensemble.mu/.fugacity/.z and launching with "
+                    "gcmc.launcher"
+                )
+            # Exactly one route, named error if not -- the same call the muVT
+            # branch makes, so the two ensembles state a typed state point the
+            # same way. Only the RATIO of activities does any work here, since N
+            # is fixed; the common factor cancels in the repack exactly as the
+            # single-species prefactor does.
+            one_route(ens)
+        elif "mu" in ens or "sweep" in ens:
             raise ValueError("NVT takes no 'mu'/'sweep' (N is fixed, mu undefined)")
         has_n, has_pf = "N" in ens, "packing_fraction" in ens
         if has_n == has_pf:
@@ -705,7 +997,27 @@ def from_params(p: dict[str, Any]) -> Config:
         targeting = len(target_keys) == 1
         has_mu, has_sweep = "mu" in ens, "sweep" in ens
 
-        if targeting:
+        if typed:
+            # The typed state point is n numbers, one per species, and it is
+            # validated by gcmc.species once beta is known (search: "typed
+            # species spec"). What is settled here is what typed mode does NOT
+            # take.
+            if targeting:
+                raise ValueError(
+                    f"ensemble.{target_keys[0]} drives one scalar mu, but a typed "
+                    "run has one mu per species and composition is an output of "
+                    "the chemical potentials, never an input (M2). Give "
+                    "ensemble.mu / .fugacity / .z as a map instead."
+                )
+            if has_sweep:
+                raise ValueError(
+                    "ensemble.sweep is the scalar-mu sweep. Sweep a typed state "
+                    "point by giving a LIST OF MAPS to ensemble.mu/.fugacity/.z "
+                    "and launching with gcmc.launcher, which expands it."
+                )
+            one_route(ens)  # exactly one route, named error if not
+            mu = None  # finalized from the species spec below
+        elif targeting:
             if has_sweep:
                 raise ValueError("a target and a 'sweep' are mutually exclusive")
             for k in ("target_eta", "target_density", "target_N"):
@@ -750,6 +1062,16 @@ def from_params(p: dict[str, Any]) -> Config:
     #                  back out in the acceptance. Takes no g3 table and no gamma
     #                  schedule -- there is no exponent to tune, only a radius.
     aux_block = p.get("auxiliary")
+    if typed and aux_block is not None:
+        raise ValueError(
+            "the `auxiliary` block is the single-species auxiliary. In typed mode "
+            "the auxiliary is stated in the species file as a per-pair multiplier "
+            "(`aux: {multiplier: a}`, giving a*sigma_ij per M12), or `aux: none`, "
+            "or `aux: {control: true}` for the exact no-op arm. Two places to "
+            "state one cutoff is the bug class the config exists to prevent. The "
+            "pmf bias is separately out of scope: its g3 table is three-body and "
+            "breaks the pair factorisation the transfer-matrix sweep depends on."
+        )
     aux_type = None if aux_block is None else aux_block.get("type")
     pmf = aux_type == "pmf"
     short_range = aux_type == "short_range"
@@ -823,8 +1145,30 @@ def from_params(p: dict[str, Any]) -> Config:
             "control_window",
             "sweep_label",
             "log_flush_interval",
+            "log_columns",
+            "log_drop",
         },
     )
+
+    # In typed mode sigma comes from the species file, the exclusion floor is
+    # c*sigma_ij and the truncation is interaction.rc, all per pair. Letting the
+    # run restate any of them as one scalar is how a config ends up with two
+    # competing definitions of the core floor, which cost a session before; the
+    # config is written so it is impossible to state one.
+    if typed:
+        _owned = {
+            "radius": "sigma comes from the species file, per species",
+            "lower_cutoff": "the floor is core_floor.c * sigma_ij, per pair",
+            "upper_cutoff": "the truncation is interaction.rc in the species file",
+        }
+        _stated = sorted(set(_owned) & set(run))
+        if _stated:
+            raise ValueError(
+                "run key(s) "
+                + ", ".join(f"{k!r} ({_owned[k]})" for k in _stated)
+                + " are owned by the species file in typed mode; remove them "
+                "from `run` or drop potential.species_file"
+            )
 
     # Deprecated run keys: accepted and warned for one release, then removed
     # (parallel_input_plan.md D5). They are IGNORED, not honoured -- keeping them
@@ -872,7 +1216,12 @@ def from_params(p: dict[str, Any]) -> Config:
         raise ValueError("reweight (psi6) is a 2D method; use dimension 2")
     if pmf and lj and two_dim:
         raise ValueError("the Lennard-Jones + pmf auxiliary mode is 3D only")
-    if pmf and lj and "g3_csv" not in aux_block:
+    # `pmf` can only be true when an auxiliary block was supplied, but that
+    # invariant lives in how `pmf` is derived rather than in the types, so the
+    # checker cannot see it. Binding it to a non-optional name states the
+    # invariant once and lets every guard below read plainly.
+    aux: dict[str, Any] = aux_block if aux_block is not None else {}
+    if pmf and lj and "g3_csv" not in aux:
         raise ValueError("Lennard-Jones + pmf requires auxiliary.g3_csv")
     if pmf and branch:
         raise ValueError("branch takes no auxiliary potential")
@@ -880,68 +1229,133 @@ def from_params(p: dict[str, Any]) -> Config:
         raise ValueError(
             "reweight uses psi6, not a pmf auxiliary; remove the auxiliary block"
         )
-    if pmf and not two_dim and "g3_csv" not in aux_block:
+    # M15: fail at the earliest layer that can see the problem. This guard lived
+    # in `MC_engine._advance_metropolis`, which meant the validator ACCEPTED the
+    # combination and the engine refused it -- after the run directory was
+    # created, the log opened and the first window begun. The feature matrix
+    # found it on its first run, as a point that passed validation and then
+    # raised.
+    #
+    # Only the HARD-CORE pmf auxiliary is refused. LJ + pmf (`ljaux`) is
+    # supported under metropolis and is not an approximation: with a single
+    # trial the selection bias cancels identically, so metropolis + pmf IS
+    # metropolis on the plain LJ potential, and the engine unwraps it to exactly
+    # that.
+    # M15 again, and a worse case than the one below it. `_advance_metropolis`
+    # is not typed-aware in ANY respect, and measured on the tree three separate
+    # things go wrong at once, all of them SILENTLY:
+    #
+    #   1. `moves.draw_move` returns "swap" for n_species > 1, and the loop
+    #      dispatched on `if move / if add / else`, so every swap proposal was
+    #      executed as a DELETION. Measured over one window: 15 removes and 14
+    #      swaps drawn, remove_step recorded 29.
+    #   2. The pair energy is `lj_pair_energy`, which is sigma = epsilon = 1.
+    #      The species file's per-pair sigma, epsilon and k_ij are never read, so
+    #      the mixture is sampled as if it were one species.
+    #   3. `state.species` is never updated alongside `state.positions`, so the
+    #      two desync on the first accepted insertion or deletion -- 43 positions
+    #      against 40 labels after a single window.
+    #
+    # None of the three raises. The run completes, the counters look ordinary,
+    # and the isotherm is wrong. Five feature-matrix points exercised this and
+    # reported PASS.
+    #
+    # So the combination is refused until the typed metropolis path exists, and
+    # refused HERE rather than patched in the engine: half-implementing the swap
+    # on top of a species-blind energy would fix the visible defect and leave the
+    # two that produce plausible numbers.
+    if typed and metropolis:
+        raise ValueError(
+            "the metropolis sampler is not multi-species: it reads no per-pair "
+            "sigma/epsilon/k_ij, proposes no identity swap, and does not carry "
+            "the species column, so a typed run through it would silently "
+            "sample a single-species system. Use sampler.type='rosenbluth' or "
+            "'branch' for a species file, or drop potential.species_file for a "
+            "single-species metropolis run."
+        )
+    # ---- typed + PARALLEL is refused until P7 wires it -------------------
+    #
+    # Same class of defect as typed + metropolis above, found the same way (by
+    # running it rather than reading it), and it reported PASS in the feature
+    # matrix for the same reason: the numbers are the numbers of a perfectly
+    # valid run, just not the run that was requested.
+    #
+    # `gcmc/parallel.py` contains no species draw, no `p_trial`, no identity
+    # swap and no `species_draw_correction` -- grep it. The cell kernel is
+    # single-species, so every insertion is type 0. Measured on a three-species
+    # request at box 16 over four windows: N grew 453 -> 788 and the composition
+    # was (N, 0, 0) throughout. What ran was a valid single-species run of
+    # species A at species A's activity; what was asked for was a mixture.
+    #
+    # The structural half of P7 does exist -- `grid_up_nd` splits a species
+    # column and the reassembly puts it back, and S4 fixed the writeback that
+    # dropped it -- so the plumbing is ready for the kernel. Only the kernel is
+    # missing, which is exactly what P7 is.
+    #
+    # Refused HERE rather than half-wired in the kernel, for the reason the
+    # metropolis guard gives: adding the species draw on top of a species-blind
+    # energy and a missing swap would fix the visible symptom (the composition
+    # stops being (N, 0, 0)) and leave the two that produce plausible numbers.
+    if typed and parallel:
+        raise ValueError(
+            "run.kind='parallel' is not multi-species yet (P7): the cell kernel "
+            "in gcmc/parallel.py draws no species, proposes no identity swap and "
+            "reads no per-pair sigma/epsilon, so a typed parallel run inserts "
+            "everything as the first species and silently samples a "
+            "single-species system at that species' activity. The species column "
+            "IS carried through the decomposition and the reassembly, so what is "
+            "missing is the cell kernel, not the plumbing. Use run.kind='single' "
+            "for a species file, or drop potential.species_file."
+        )
+    if pmf and metropolis and not lj:
+        raise ValueError(
+            "metropolis with a hard-core pmf auxiliary is not implemented; the "
+            "pmf bias enters through the trial-cloud selection, and metropolis "
+            "draws a single trial with no selection to bias. Use "
+            "sampler.type='rosenbluth' for pmf runs, or drop the auxiliary "
+            "block for plain hard-core metropolis."
+        )
+    if pmf and not two_dim and "g3_csv" not in aux:
         raise ValueError("3D pmf auxiliary requires auxiliary.g3_csv")
 
     # ---- short-range auxiliary support matrix -----------------------------
-    # Deliberately narrow. Every rejection below is a combination that is either
+    # Deliberately narrow. Every rejection is a combination that is either
     # meaningless or simply untested; each is a separate, cheap relaxation later,
-    # and refusing them now is what keeps "validated" honest. The reason is spelt
-    # out in each message because these are the guards a user will actually hit.
+    # and refusing them now is what keeps "validated" honest.
+    #
+    # The matrix itself lives in `_short_range_unsupported`, ONE function, because
+    # there are two callers: a per-run `auxiliary` block, which is a request and
+    # is refused when unsupported, and a typed species file, which is a force
+    # field and instead drops the auxiliary with a warning (see the typed section
+    # above for why the two differ). Two copies of a support matrix is two
+    # matrices, and the one that gets a new case added is not the other one.
     if short_range:
-        if not lj:
-            raise ValueError(
-                "auxiliary.type='short_range' needs potential.main="
-                "'lennard_jones'. It shortens an interaction range, and a hard "
-                "core has no range to shorten -- its exclusion floor IS the "
-                "interaction, so there is nothing to propose with and nothing "
-                "to correct."
-            )
-        if sampler != "channel":
-            raise ValueError(
-                f"auxiliary.type='short_range' is supported for "
-                f"sampler.type='channel' only (got {sampler!r}). The saving is "
-                f"in the transfer-matrix sweep, whose DP window width IS the "
-                f"interaction radius. 'branch' would gain almost nothing: its "
-                f"clique adjacency is built at the overlap floor, not at the "
-                f"cutoff, so the enumeration cost does not shrink. 'metropolis' "
-                f"has a single trial and no selection, so there is no proposal "
-                f"bias to divide out. 'rosenbluth' would be correct and is a "
-                f"clean later extension, but its per-trial weight is a vector "
-                f"operation, not a combinatorial one."
-            )
-        # 2D IS supported. The sweep is dimension-agnostic (it sorts on axis 0
-        # and takes full Euclidean distances), the trial body is an oriented
-        # rectangle instead of a cuboid, and the periodic guard already carries
-        # (dim-1) widths. tests/unit/test_channel_2d.py pins the 2D sweeps
-        # against brute-force clique enumeration and the 2D engine against the
-        # exact P(N=0)/P(N=1) ratio, for both the fixed and the cyclic rod.
-        #
-        # WHAT 2D DOES NOT INHERIT, and it is worth knowing before trusting a
-        # number: that engine-level 2D check is HARD-CORE only. 2D + LJ + channel
-        # runs and gives a plausible density, but it has never been validated
-        # against a reference at the engine level, in either direction. The
-        # auxiliary is exact relative to whatever the 2D LJ channel already
-        # samples -- its own gate is aux-on == aux-off -- so it cannot make that
-        # worse, but it cannot vouch for it either. 2D LJ metropolis does run, so
-        # a reference for closing that gap exists.
-        if qa:
-            raise ValueError(
-                "auxiliary.type='short_range' does not support the QA frozen "
-                "matrix: frozen obstacles must be dropped from the LJ sum in "
-                "the member weights, the full-potential energy AND the new "
-                "correction term, and QA + channel is not a supported "
-                "combination to begin with."
-            )
-        if _pore_geometry is not None:
-            raise ValueError(
-                "auxiliary.type='short_range' does not support a confining pore "
-                "yet. The algebra carries over (the tail is already disabled in "
-                "a pore, so the correction adds cleanly), but pore + channel is "
-                "untested."
-            )
+        _unsupported = _short_range_unsupported(
+            lj=lj, sampler=sampler, qa=qa, pore=_pore_geometry is not None
+        )
+        if _unsupported is not None:
+            raise ValueError(_unsupported)
         # The numeric guard needs lower_cutoff and uc, which are resolved later;
         # it lives immediately after them (search: "short-range auxiliary radius").
+    # The log's column selection. Validated HERE rather than in the runner so a
+    # typo is refused before the run directory exists -- M15, fail at the
+    # earliest layer that can see the problem. `select_columns` owns the rules
+    # (the two keys are mutually exclusive, the forced groups cannot be dropped,
+    # an unknown name raises); this call is what makes them apply at parse time.
+    _log_cols = run.get("log_columns")
+    _log_drop = run.get("log_drop")
+    for _key, _val in (("log_columns", _log_cols), ("log_drop", _log_drop)):
+        if _val is not None and not isinstance(_val, (list, tuple)):
+            raise ValueError(
+                f"run.{_key} is a LIST of column-group names, got {type(_val).__name__}"
+            )
+    from .runner import select_columns as _select_columns
+
+    _select_columns(
+        [],
+        include=None if _log_cols is None else tuple(_log_cols),
+        drop=None if _log_drop is None else tuple(_log_drop),
+    )
     if float(run.get("log_flush_interval", 0.0)) < 0.0:
         raise ValueError(
             f"run.log_flush_interval is a time floor between log flushes in "
@@ -998,7 +1412,79 @@ def from_params(p: dict[str, Any]) -> Config:
     else:
         box = default_side(two_dim, parallel)
 
-    radius = float(run.get("radius", 0.5))
+    # ---- typed species spec ------------------------------------------------
+    # Needs beta (above) and the dimension; everything geometric below then
+    # derives from it instead of from run.radius / run.lower_cutoff.
+    species: SpeciesSpec | None = None
+    if typed:
+        species = build_species_spec(str(species_file), ens, beta=beta, dimension=dim)
+        mu = float(species.mu[0])
+        # ---- the TYPED short-range auxiliary (M12, P5) ---------------------
+        #
+        # THE DEFECT THIS CLOSES. `species.aux_cutoff` is the (T, T) matrix
+        # `a * sigma_ij` built from the species file's `aux: {multiplier: a}`,
+        # and until S4 nothing outside `species.py` read it. The engine's
+        # selection radius comes from `pot_spec.aux_cutoff`, which only the
+        # per-run `auxiliary` block sets and which a typed run may not use -- so
+        # a species file could declare an auxiliary, pass every range check in
+        # `species_file`, print itself in the run header, and be ignored. The
+        # shipped `ff/species_three_reduced.yaml` declares `multiplier: 1.6` and
+        # every typed run in the feature matrix was proposing at the full cutoff.
+        #
+        # Not a wrong answer -- the auxiliary is a proposal bias and dropping it
+        # samples the same distribution, more slowly -- which is exactly why it
+        # could sit there. A declared knob that does nothing is the failure mode
+        # this file exists to refuse.
+        #
+        # WHY THE SCALAR MAX AND NOT THE PER-PAIR MATRIX. P5 asks for masks built
+        # at `aux_cutoff_ij`. The scalar `max_ij aux_cutoff_ij` is used instead,
+        # for now, and it is the conservative direction: every pair is proposed
+        # into at a radius at least its own, so no pair is proposed at less than
+        # the algebra assumes, and the correction is the same difference of two
+        # radii the untyped path takes. Going per-pair is a SPEED refinement (the
+        # DP window narrows for the small pairs) and needs a per-pair split
+        # energy; it is not a correctness step, and doing it first would have
+        # meant landing the correction and the optimisation in one commit.
+        _typed_aux = species.aux_cutoff
+        if _typed_aux is not None:
+            _aux_why = _short_range_unsupported(
+                lj=lj, sampler=sampler, qa=qa, pore=_pore_geometry is not None
+            )
+            if _aux_why is None:
+                short_range = True
+                aux_cutoff = species.max_aux_cutoff
+            else:
+                # WARN AND RUN, rather than raise. The per-run `auxiliary` block
+                # is a request and an unsupported one is refused (see the support
+                # matrix below); a species file is a FORCE FIELD, shared across
+                # every run that uses that model, so refusing every branch or
+                # pore run because the file mentions an auxiliary would make the
+                # file unusable for the runs it is otherwise right for. Dropping
+                # the auxiliary is safe -- it is a proposal bias -- so this is
+                # the same shape as the LJ tail being disabled in a pore: say so
+                # in the log and continue.
+                log.warning(
+                    "species file declares an auxiliary (aux_cutoff_ij up to "
+                    "%.4f) but this run does not use one: %s. The auxiliary is a "
+                    "proposal radius, so the sampled distribution is unaffected; "
+                    "only the speed-up is lost.",
+                    float(_typed_aux.max()),
+                    _aux_why,
+                )
+
+    # `radius`, `diameter` and `lower_cutoff` are scalars in a typed run only as
+    # CONSERVATIVE STAND-INS for the legacy geometric guards (pore gaps, cell
+    # pitch floors, buffer minima, the periodic guard): each takes the largest
+    # value over species or pairs, so a guard that passes on the stand-in passes
+    # on every pair. Nothing physical reads them in typed mode -- the hot path
+    # reads `species.table` and `species.core_floor` per pair -- and P3 asserts
+    # that. Taking the max rather than a species-0 value is the whole point: a
+    # stand-in that is not an upper bound would let a guard pass for the small
+    # species and be violated by the large one.
+    if species is not None:
+        radius = 0.5 * float(species.sigma_self.max())
+    else:
+        radius = float(run.get("radius", 0.5))
     diameter = 2.0 * radius  # physical particle size / LJ sigma
     disk = math.pi * radius * radius
     # One exclusion floor for the whole run. Hard cores exclude at the diameter.
@@ -1010,7 +1496,10 @@ def from_params(p: dict[str, Any]) -> Config:
     # value depended on the sampler (0.85 for plain LJ, 0.9 for branch/channel),
     # so metropolis and the biased samplers converged to different densities.
     _lower_default = 0.9 if lj else diameter
-    lower_cutoff = float(run.get("lower_cutoff", _lower_default))
+    if species is not None:
+        lower_cutoff = species.max_core_floor
+    else:
+        lower_cutoff = float(run.get("lower_cutoff", _lower_default))
     r_squared = lower_cutoff * lower_cutoff
 
     channel_cyclic = False
@@ -1040,21 +1529,26 @@ def from_params(p: dict[str, Any]) -> Config:
                 f"is one oriented cuboid, so it has one length; per-axis lists "
                 f"apply to run.cell_length (parallel decomposition), not here."
             )
-        # "cyclic" is the canonical spelling: the rod runs wall to wall, so its
-        # two ends meet through the periodic boundary and the transfer-matrix
-        # sweep closes on itself (ChannelSweepCyclic scores that seam with true
-        # minimum-image distances instead of an axial window). The four legacy
-        # spellings are still accepted so existing params files keep working;
-        # they are exactly equivalent, and because the parser collapses all of
-        # them to channel_length = 0.0 the run identity does not record which
-        # word was typed. See test_channel_cyclic_spellings_share_one_run_id.
-        channel_cyclic = isinstance(_clen, str) and _clen.strip().lower() in (
-            "cyclic",
-            "full",  # legacy
-            "box",  # legacy
-            "full_box",  # legacy
-            "span",  # legacy
-        )
+        # The cyclic rod runs wall to wall, so its two ends meet through the
+        # periodic boundary and the transfer-matrix sweep closes on itself
+        # (ChannelSweepCyclic scores that seam with true minimum-image distances
+        # instead of an axial window).
+        #
+        # R16: the rod kind comes from the SAMPLER, not from this field, and the
+        # four legacy spellings are REFUSED. The text here claimed for two stages
+        # that they were "still accepted so existing params files keep working",
+        # directly above the line that rejects them -- which is how three slow
+        # tests came to be erroring on a retired spelling while reading as though
+        # they were measuring physics. A comment that contradicts the line under
+        # it is worse than none, because it is what a reader checks first.
+        if isinstance(_clen, str) and _clen.strip().lower() in _LEGACY_CYCLIC_SPELLINGS:
+            raise ValueError(
+                f"sampler.channel_length = {_clen!r} used to select the cyclic "
+                f"wall-to-wall rod. It is a different move, not a length, so it "
+                f'is now its own sampler: set sampler.type = "channel_cyclic" '
+                f"and drop channel_length."
+            )
+        channel_cyclic = sampler == "channel_cyclic"
         channel_width = float(smp.get("channel_width", 0.0))
         if not (diameter <= channel_width <= 2.0 * diameter + 1e-9):
             raise ValueError(
@@ -1140,7 +1634,9 @@ def from_params(p: dict[str, Any]) -> Config:
             trial_density = round((n_trials * unit) / span, 3)
 
     no_neigh = int(run.get("no_neigh", 40 if two_dim else 75))
-    if "upper_cutoff" in run:
+    if species is not None:
+        uc = species.rc
+    elif "upper_cutoff" in run:
         uc = float(run["upper_cutoff"])
     elif reweight:
         uc = 3.0 * radius
@@ -1158,6 +1654,12 @@ def from_params(p: dict[str, Any]) -> Config:
     else:
         vol_mol = (4.0 / 3.0) * math.pi * radius**3
         total_vol = float(_sides[0] * _sides[1] * _sides[2])
+    # Typed: the packing fraction is sum_s n_s v_s / V and the per-species v_s
+    # lives on the spec. The scalar kept here is the largest species' volume, so
+    # `eta` computed from it is an upper bound rather than a wrong number; use
+    # Config.packing_fraction, which routes to the per-species sum when typed.
+    if species is not None:
+        vol_mol = float(species.volume_of_molecule.max())
 
     # NVT target as an exact integer N
     target_n = None
@@ -1192,6 +1694,31 @@ def from_params(p: dict[str, Any]) -> Config:
     lj_tail_on = bool(pot.get("tail", True))
     if "tail" in pot and not lj:
         raise ValueError("potential.tail applies to lennard_jones only")
+    # A SPECIES FILE MEANS NO TAIL, and the file itself already says so:
+    # `species_file.load_forcefield` refuses `interaction.tail_correction: true`
+    # outright ("no-tail on both sides"). But `potential.tail` defaults to True
+    # here, so a typed run was picking up a tail its own force field had
+    # forbidden -- and picking up the WRONG one: `lj_tail_pref` below is derived
+    # at sigma = epsilon = 1, while the mixture tail is
+    # sum_ij x_i x_j f(sigma_ij, eps_ij), a composition-dependent quantity that
+    # changes as the run's composition moves.
+    #
+    # So it is forced off for typed runs, and an explicit `tail: true` raises
+    # rather than being silently overridden -- the same shape as the pore/QA case
+    # a few lines below, and for the same reason: a tail integral that does not
+    # describe the system is not a small correction, it is an N^2 energy the
+    # system does not have.
+    if typed and lj:
+        if pot.get("tail") is True:
+            raise ValueError(
+                "potential.tail: true is not available for a species file. The "
+                "mean-field tail for a mixture is composition-dependent "
+                "(sum_ij x_i x_j over the pair table) and is not implemented; "
+                "the species-file format forbids tail corrections on its own "
+                "side too (interaction.tail_correction must be false). Remove "
+                "potential.tail or set it false."
+            )
+        lj_tail_on = False
     # The bulk tail correction assumes a uniform fluid with g(r)=1 beyond rc
     # filling all space. In a pore or a quenched-annealed matrix the accessible
     # volume is neither uniform nor space-filling, so that integral is simply
@@ -1380,11 +1907,30 @@ def from_params(p: dict[str, Any]) -> Config:
                 f"gives {n_trials} trial spheres. Raise trial_density (or trials) "
                 f"so at least one sphere is placed"
             )
-        if branch and n_trials < _depth + 1:
+        # THE FLOOR IS THE DEPTH PATH'S, NOT THE BRANCH SAMPLERS'. It read
+        # `if branch and ...`, so `rosenbluth` was exempt -- and rosenbluth takes
+        # the same depth path in `advance`, where a remove claims `depth+1` trial
+        # slots via `rng.choice(n_trials, size=n_remove, replace=False)`. Every
+        # accepted-but-impossible combination died there:
+        #
+        #     depth 1, trials 1     depth 2, trials <= 2     depth 3, trials <= 3
+        #
+        # measured, and it is not a tail like the cyclic rod's short chord (S4
+        # phase 2) -- the first exchange proposal of the first window raises. So
+        # the validator accepted a configuration that could not survive one
+        # window, which is the one thing tier 2's green is supposed to mean it
+        # cannot do. Nothing in the matrix covers it because every rosenbluth
+        # point there is generated with a trial pool comfortably above its depth.
+        #
+        # Found while looking for a typed reference sampler for P8's speedup
+        # claim: `rosenbluth` with `trials: 1` is metropolis in all but name and
+        # is what the typed+metropolis refusal points at, so it is exactly the
+        # configuration a reader following that message would write next.
+        if n_trials < _depth + 1:
             raise ValueError(
-                f"branch/channel needs at least depth+1={_depth + 1} trial "
-                f"spheres to place a depth-{_depth} move, but only {n_trials} "
-                f"were requested; raise trials or trial_density"
+                f"{sampler} needs at least depth+1={_depth + 1} trial spheres to "
+                f"place a depth-{_depth} move, but only {n_trials} were "
+                f"requested; raise trials or trial_density, or lower depth"
             )
 
     assert mu is not None  # finalized above (explicit, target seed, or NVT 0.0)
@@ -1496,15 +2042,18 @@ def from_params(p: dict[str, Any]) -> Config:
             cell_length_sides = _plan.cell_length
             cell_length = min(_plan.cell_length)
 
-        # Accuracy, not correctness: the depth>=1 cell proposal carries a bias
-        # set by the cell/cavity ratio (+19% at 2.7 cavity widths, +0.9 +/- 0.6%
-        # at 10; cell_unify_plan.md U3). Warn with the number so an operator can
-        # price it; never refuse, because the ratio is a choice, not an error.
-        # The depth>=1 cell-proposal caveat is reported ONCE, by
-        # describe_parallel on stdout. It used to be a log.warning here, which
-        # fired on every from_params call -- the launcher builds a config to size
-        # the core budget before it launches anything, so a single sweep printed
-        # it three times before the run even started.
+        # R17 (2026-08): the depth>=1 cell proposal was believed to carry a
+        # density bias set by the cell/cavity ratio (+19% at 2.7 cavity widths;
+        # cell_unify_plan.md U3), on the reasoning that the decomposition
+        # satisfied global but not detailed balance. Later runs did not
+        # reproduce the bias and detailed balance does hold, so the caveat is
+        # gone and parallel is exact at every depth.
+        #
+        # `describe_parallel` still REPORTS the shortest cell in cavity widths.
+        # That is now a performance figure, not an accuracy one: a small ratio
+        # means more border work per live cell. Kept because it is useful for
+        # sizing a job, and because a number an operator already recognises is
+        # cheaper to reinterpret than to remove and reintroduce.
 
     _raw_seed = run.get("seed")
     if isinstance(_raw_seed, (list, tuple)):
@@ -1525,6 +2074,7 @@ def from_params(p: dict[str, Any]) -> Config:
         target_n=target_n,
         box=box,
         box_sides=box_sides,
+        species=species,
         target_count=target_count,
         control_gain=float(run.get("control_gain", 0.5)),
         control_gain_tau=float(run.get("control_gain_tau", 20.0)),
@@ -1558,7 +2108,11 @@ def from_params(p: dict[str, Any]) -> Config:
             if aux_block is not None and "delta_eta" in aux_block
             else None
         ),
-        g3_csv=(aux_block.get("g3_csv") if pmf and not two_dim else None),
+        g3_csv=(
+            aux_block.get("g3_csv")
+            if pmf and not two_dim and aux_block is not None
+            else None
+        ),
         aux_cutoff=aux_cutoff,
         two_dim=two_dim,
         parallel=parallel,
@@ -1591,6 +2145,8 @@ def from_params(p: dict[str, Any]) -> Config:
         traj_every=int(run.get("traj_every", 0)),
         checkpoint_every=int(run.get("checkpoint_every", 1)),
         log_flush_interval=float(run.get("log_flush_interval", 0.0)),
+        log_columns=None if _log_cols is None else tuple(_log_cols),
+        log_drop=None if _log_drop is None else tuple(_log_drop),
         initial_config=run.get("initial_config"),
         matrix_config=run.get("matrix_config"),
         sweep_label=run.get("sweep_label"),

@@ -32,6 +32,13 @@ def zero_counters() -> dict[str, int]:
         "repack_step": 0,
         "repack_attempt": 0,
         "repack_accept": 0,
+        # IDENTITY SWAP (M8/M9). Proposed only when there is more than one
+        # species; on a single-species run these stay at 0, which is what makes
+        # them safe to add without moving any existing counter stream. `swap_step`
+        # counts proposals that reached the acceptance test -- a swap has no
+        # geometric way to fail before it, so there is no separate `*_attempt`.
+        "swap_step": 0,
+        "swap_accept": 0,
     }
 
 

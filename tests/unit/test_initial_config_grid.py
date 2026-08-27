@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 from scipy.spatial import cKDTree
 
-from gcmc import runner
+from gcmc import config_specs, geometry, runner
 from gcmc.sim_setup import from_params
 
 _RNG = lambda: np.random.default_rng(0)  # noqa: E731
@@ -145,7 +145,14 @@ def test_confined_grid_stays_inside_the_pore():
     cfg = _cfg(ens={"type": "confined", "pore": {"geometry": "slit", "H": 6.0}})
     pos = runner._init_config(cfg, _RNG())
     assert len(pos) > 0
-    assert all(runner._inside_pore_seed(p, cfg) for p in pos)
+    # `geometry.inside_pore` is the ONE pore predicate now (S2.11). This test
+    # previously called `runner._inside_pore_seed`, a verbatim duplicate of it --
+    # so it was asserting that the seeder agreed with its own copy of the rule,
+    # which it could not fail to do. Against the shared predicate it asserts what
+    # it is named for.
+    ens = config_specs.ensemble_spec(cfg)
+    samp = config_specs.sampler_spec(cfg)
+    assert all(geometry.inside_pore(p, ens, samp) for p in pos)
 
 
 @pytest.mark.parametrize(
@@ -198,7 +205,7 @@ def _assert_partitions(cfg, pos, rng):
     from gcmc import decomposition
 
     dim = cfg.dimension
-    cells, rest = decomposition.grid_up_nd(
+    cells, rest, _ = decomposition.grid_up_nd(
         pos, cfg.box_dims, cfg.cell_dims, cfg.buffer, rng, dim, n_ax=cfg.cell_counts
     )
     owned = [c[0] for c in cells if len(c[0])] + ([rest] if len(rest) else [])

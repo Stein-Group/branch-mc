@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 from scipy.spatial import cKDTree
 
-from gcmc import MC_engine, sim_setup
+from gcmc import MC_engine, config_specs, sim_setup
 from gcmc.state import ChainState
 
 # Slow tier: both tests are statistical (correlation tolerances 0.03-0.04 need
@@ -72,7 +72,7 @@ def _make(seed):
     }
     cfg = sim_setup.from_params(p)
     pot = cfg.build_potential()
-    w = MC_engine.make_weigher(cfg, pot)
+    w = MC_engine.make_weigher(config_specs.kernel_spec(cfg), pot)
     st = ChainState.fresh(DIM, seed=seed)
     st.positions = np.empty((0, DIM))
     return cfg, pot, w, st

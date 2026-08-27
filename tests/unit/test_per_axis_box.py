@@ -22,7 +22,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gcmc import MC_engine
+from gcmc import MC_engine, config_specs
 from gcmc.hash_fingerprint import run_id
 from gcmc.sim_setup import from_params
 from gcmc.state import ChainState
@@ -44,7 +44,7 @@ def _p(box, sampler="metropolis", extra_ens=None, extra_run=None):
 def _run(params, seed, windows):
     cfg = from_params(params)
     pot = cfg.build_potential()
-    wgh = MC_engine.make_weigher(cfg, pot)
+    wgh = MC_engine.make_weigher(config_specs.kernel_spec(cfg), pot)
     st = ChainState.fresh(cfg.dimension, seed=seed)
     for _ in range(windows):
         MC_engine.advance(st, cfg, pot, wgh)
@@ -106,11 +106,26 @@ def _branch_params(box):
     }
 
 
-def test_orthorhombic_rejected_for_sweep_sampler():
-    # the scalar-box branch config is valid; only the orthorhombic box is refused
-    from_params(_branch_params(10.0))
-    with pytest.raises(ValueError, match="orthorhombic"):
-        from_params(_branch_params([10.0, 10.0, 6.0]))
+def test_orthorhombic_accepted_for_sweep_sampler():
+    """A per-axis box is a general feature now, not a metropolis-only one.
+
+    It used to be refused for the sweep samplers, which placed their trial
+    bodies against a scalar side. Every sampler and the parallel decomposition
+    now take wrap, insertion range and volume through box_dims, so the guard
+    that used to fire here is gone. The one surviving exception is a confined
+    pore, whose slab/cylinder geometry is defined inside a cubic cell; that is
+    the next test.
+    """
+    cfg = from_params(_branch_params([10.0, 10.0, 6.0]))
+    assert tuple(cfg.box_dims) == (10.0, 10.0, 6.0)
+
+
+def test_orthorhombic_still_rejected_for_a_confined_pore():
+    p = _branch_params([10.0, 10.0, 6.0])
+    p["ensemble"]["type"] = "confined"
+    p["ensemble"]["pore"] = {"geometry": "slit", "H": 4.0}
+    with pytest.raises(ValueError, match="cubic"):
+        from_params(p)
 
 
 def test_orthorhombic_rejected_for_parallel():

@@ -74,9 +74,10 @@ ARGV = {
     ],
 }
 HERE = os.path.dirname(os.path.abspath(__file__))
-ORIG = os.path.join(HERE, "..", "..", "orig")
+from _frozen import add_orig_to_path
+
+ORIG = str(add_orig_to_path())  # R1: resolved from $ORIG_ROOT or the tag
 sys.argv = ["orig"] + ARGV[MODE]
-sys.path.insert(0, ORIG)
 if MODE == "aux3d":
     os.chdir(ORIG)  # g3_analysis_data.csv is loaded relative to cwd at import
 import cav_n_d_3d_g3_LJ as orig
@@ -138,7 +139,7 @@ o_set, o_km = orig.find_neighbors_fast(
 assert o_set is not None, "reference produced no surviving trials; adjust inputs"
 
 raw = geometry.find_neighbors(tree, trials, lower, upper, nn, keep_mask=keep.copy())
-coords, dists, idxs, km = raw
+coords, dists, idxs, km, _spc = raw
 
 if MODE == "lj3d":
     pot = LennardJones(

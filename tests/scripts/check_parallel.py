@@ -24,7 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
 
 from gcmc import MC_engine as engine
-from gcmc import parallel
+from gcmc import config_specs, parallel
 from gcmc.sim_setup import from_params
 from gcmc.state import ChainState, zero_counters
 
@@ -69,7 +69,7 @@ def run_parallel(n_win):
     }
     cfg = from_params(p)
     pot = cfg.build_potential()
-    w = parallel.make_weigher(cfg, pot)
+    w = parallel.make_weigher(config_specs.kernel_spec(cfg), pot)
     st = _state(150, 68)
     etas, last = [], None
     for _ in range(n_win):
@@ -97,7 +97,7 @@ def run_serial(n_win):
     }
     cfg = from_params(p)
     pot = cfg.build_potential()
-    w = engine.make_weigher(cfg, pot)
+    w = engine.make_weigher(config_specs.kernel_spec(cfg), pot)
     st = _state(60, 38)
     etas = []
     for _ in range(n_win):
@@ -142,7 +142,7 @@ def _run3d(sampler_block, n_win=4):
     }
     cfg = from_params(p)
     pot = cfg.build_potential()
-    w = parallel.make_weigher(cfg, pot)
+    w = parallel.make_weigher(config_specs.kernel_spec(cfg), pot)
     rng = np.random.default_rng(0)
     st = ChainState(
         positions=rng.uniform(1.0, 23.0, size=(120, 3)),

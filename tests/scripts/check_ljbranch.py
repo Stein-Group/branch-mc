@@ -133,7 +133,7 @@ for _trial in range(8):
     w = carried_weights(pool, rest, box)
     for k in (1, 2, 3, 4, 5):  # past the old depth-3 cap
         logW, terms = brute_force_logW(pool, w, rest, k, box)
-        logW2, count, _ = branch.ljbranch_weight_sum(
+        logW2, count, _, _ = branch.ljbranch_weight_sum(
             pool, w, k, LOWER, box, RC, BETA, rng=None
         )
         if not np.isfinite(logW) and not np.isfinite(logW2):
@@ -170,7 +170,7 @@ draws = 30000
 draw_rng = np.random.default_rng(7)
 tally = dict.fromkeys(terms, 0)
 for _ in range(draws):
-    _, _, chosen = branch.ljbranch_weight_sum(
+    _, _, chosen, _ = branch.ljbranch_weight_sum(
         pool, w, K, LOWER, box, RC, BETA, rng=draw_rng
     )
     combo = tuple(sorted(key[tuple(np.round(p, 9))] for p in chosen))
@@ -189,7 +189,9 @@ box = 50.0
 # two points ~25 apart: overlapping under no rule, far beyond any cavity span
 pool = np.array([[1.0, 1.0, 1.0], [26.0, 1.0, 1.0]])
 w = np.array([1.0, 1.0])  # rest empty -> unit weights
-logW, count, _ = branch.ljbranch_weight_sum(pool, w, 2, LOWER, box, RC, BETA, rng=None)
+logW, count, _, _ = branch.ljbranch_weight_sum(
+    pool, w, 2, LOWER, box, RC, BETA, rng=None
+)
 # one 2-clique exists; both far beyond RC so intra factor is exactly 1 -> W = 1
 ok = (count == 1) and abs(np.exp(logW) - 1.0) < 1e-12
 print(f"     2-cliques found: {count}, W: {np.exp(logW):.6f}")

@@ -127,6 +127,7 @@ class CellList:
         "n_matrix",
         "n_rebuilds",
         "nc",
+        "species",
     )
 
     # ------------------------------------------------------------------ build
@@ -169,6 +170,16 @@ class CellList:
         self._coordsT = np.zeros((self.dim, cap), dtype=np.float64)
         self.active = np.zeros(cap, dtype=bool)
         self.is_matrix = np.zeros(cap, dtype=bool)
+        # Slot-aligned species column (P3). int64 so it indexes the (T, T)
+        # core-floor and pair tables without a cast on the hot path. All-zero is
+        # the single-species case -- type 0 is the one guest -- so a single-species
+        # run reads the same values it would have read before this column existed.
+        #
+        # Deliberately NOT folded into `is_matrix`: that flag means "enters the
+        # overlap test but never the energy sum, and is never inserted, removed,
+        # moved or counted", which is orthogonal to which species something is.
+        # A framework atom has a species too.
+        self.species = np.zeros(cap, dtype=np.int64)
         self._cell = np.zeros(cap, dtype=np.int64)
         self._in_csr = np.zeros(cap, dtype=bool)
         # `_indexed`: the slot has a row in `_sorted`. `_visible`: that row still
@@ -200,12 +211,21 @@ class CellList:
         cutoff: float,
         matrix: FloatArray | None = None,
         pending_threshold: int = PENDING_THRESHOLD,
+        species: IntArray | None = None,
+        matrix_species: IntArray | int | None = None,
     ) -> CellList:
         """Build from a fluid configuration plus optional frozen obstacles.
 
         Obstacles take the lowest slots so `is_matrix` is a prefix, then the
         fluid, so slot i of the fluid is `n_matrix + i` at build time. The engine
         never relies on that beyond the build; it tracks slots explicitly.
+
+        `species` is the fluid's type column and `matrix_species` the framework's;
+        both default to type 0, which reproduces the single-species build exactly.
+        They are separate arguments because the two blocks are inserted
+        separately and a single concatenated column would have to encode the
+        obstacles-first ordering, making a caller's correctness depend on knowing
+        that ordering.
         """
         positions = np.asarray(positions, float).reshape(-1, dim)
         n_mat = 0 if matrix is None else len(matrix)
@@ -213,8 +233,12 @@ class CellList:
         cap = max(2 * n, n + 1024, 16)
         cl = cls(box, dim, cutoff, capacity=cap, pending_threshold=pending_threshold)
         if n_mat:
-            cl.bulk_insert(np.asarray(matrix, float).reshape(-1, dim), matrix=True)
-        cl.bulk_insert(positions)
+            cl.bulk_insert(
+                np.asarray(matrix, float).reshape(-1, dim),
+                matrix=True,
+                species=matrix_species,
+            )
+        cl.bulk_insert(positions, species=species)
         cl.rebuild()
         return cl
 
@@ -249,6 +273,7 @@ class CellList:
         for name in (
             "active",
             "is_matrix",
+            "species",
             "_cell",
             "_in_csr",
             "_indexed",
@@ -273,13 +298,24 @@ class CellList:
             self._n_slots = s + 1
         return s
 
-    def bulk_insert(self, points: FloatArray, matrix: bool = False) -> IntArray:
+    def bulk_insert(
+        self,
+        points: FloatArray,
+        matrix: bool = False,
+        species: IntArray | int | None = None,
+    ) -> IntArray:
         """Insert many points at once (build path). Returns the slot ids.
 
         Vectorised on purpose: the per-window rebuild inserts every particle, and
         a Python loop over `insert` costs 0.3 s at N = 15,000, which would swamp
         everything the refactor saves. Slots are taken as one contiguous block off
         the free list, so `from_positions` hands out slots in input order.
+
+        `species` is a per-point type column, one scalar for all of them, or None
+        for the single-species default of type 0. A column of the wrong length is
+        an error rather than a broadcast: silently recycling species across
+        particles is exactly the bug that would surface as a wrong isotherm three
+        phases later.
         """
         points = np.mod(np.asarray(points, float).reshape(-1, self.dim), self.box)
         n = len(points)
@@ -296,6 +332,17 @@ class CellList:
         self._cell[slots] = self._cell_ids(points)
         self.active[slots] = True
         self.is_matrix[slots] = bool(matrix)
+        if species is None:
+            self.species[slots] = 0
+        elif np.isscalar(species):
+            self.species[slots] = int(species)  # type: ignore[arg-type]
+        else:
+            col = np.asarray(species, dtype=np.int64).ravel()
+            if len(col) != n:
+                raise ValueError(
+                    f"species column has {len(col)} entries for {n} points"
+                )
+            self.species[slots] = col
         if matrix:
             self.n_matrix += n
         self._in_csr[slots] = False
@@ -308,16 +355,27 @@ class CellList:
         return slots
 
     def insert(
-        self, point: FloatArray, matrix: bool = False, _defer: bool = False
+        self,
+        point: FloatArray,
+        matrix: bool = False,
+        species: int = 0,
+        _defer: bool = False,
     ) -> int:
         """Insert one point; returns its slot id. May trigger a CSR rebuild, which
-        reclaims tombstoned slots -- see the module note on slot lifetime."""
+        reclaims tombstoned slots -- see the module note on slot lifetime.
+
+        The species is written unconditionally, not left at whatever the slot's
+        previous tenant was: a reclaimed slot carries a stale species otherwise,
+        and that is the one way this column can go wrong without any test of the
+        cell list itself noticing.
+        """
         s = self._alloc()
         p = np.mod(np.asarray(point, float), self.box)
         self._coordsT[:, s] = p
         self._cell[s] = int(self._cell_ids(p)[0])
         self.active[s] = True
         self.is_matrix[s] = bool(matrix)
+        self.species[s] = int(species)
         if matrix:
             self.n_matrix += 1
         self._in_csr[s] = False
@@ -867,6 +925,19 @@ class CellList:
         value never changes a weight."""
         i = np.minimum(np.asarray(idxs), self._capacity - 1)
         return self.is_matrix[i]
+
+    def species_at(self, idxs: IntArray) -> IntArray:
+        """Species id for each returned neighbour index, with the pad index
+        clamped, exactly as `matrix_at` does.
+
+        The clamp is safe for the same reason: pads carry an infinite distance, so
+        whichever species they read can never reach a weight or an overlap
+        verdict. Reading through this accessor rather than `self.species[idxs]`
+        directly is what keeps that true at call sites that have not thought
+        about pads.
+        """
+        i = np.minimum(np.asarray(idxs), self._capacity - 1)
+        return self.species[i]
 
     def active_slots(self) -> IntArray:
         """Ascending slot ids of every active particle (fluid AND matrix);

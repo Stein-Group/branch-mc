@@ -182,8 +182,14 @@ def test_widom_henry_selectivity_lands_near_the_paper(setup):
     field, table, red = setup["field"], setup["table"], setup["red"]
     beta = 1.0 / red.T_star  # reduced beta = 1 / T*
     rng = np.random.default_rng(3)
-    k_xe = widom_henry(field, table.index("Xe"), beta, rng, n_samples=30000)["henry_star"]
-    k_kr = widom_henry(field, table.index("Kr"), beta, rng, n_samples=30000)["henry_star"]
+    k_xe = widom_henry(field, table.index("Xe"), beta, rng, n_samples=30000)[
+        "henry_star"
+    ]
+    k_kr = widom_henry(field, table.index("Kr"), beta, rng, n_samples=30000)[
+        "henry_star"
+    ]
     assert k_xe > k_kr > 0  # Xe binds harder, both accessible
     selectivity = k_xe / k_kr
-    assert 6.0 < selectivity < 18.0, f"Xe/Kr Henry selectivity {selectivity:.1f} off the paper's range"
+    assert 6.0 < selectivity < 18.0, (
+        f"Xe/Kr Henry selectivity {selectivity:.1f} off the paper's range"
+    )

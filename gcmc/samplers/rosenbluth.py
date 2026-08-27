@@ -46,6 +46,12 @@ def select_forward(
 
     sum_arr = np.empty(n_atoms, dtype=float)
     c_coords, c_ew, c_cos, c_sin, c_ct = [], [], [], [], []
+    # The chosen atoms' SPECIES and their POOL ROWS travel out with them (M19,
+    # M21). Collected alongside the five historical columns rather than recovered
+    # afterwards, because this loop deletes and masks the pool between levels: a
+    # row number read from the shrunken pool means nothing, and identifying the
+    # chosen atoms by coordinate is exactly what M21 forbids.
+    c_spc, c_row = [], []
 
     for i in range(n_atoms):
         gamma = gamma_schedule[min(i + 1, 9)]
@@ -69,6 +75,8 @@ def select_forward(
         c_cos.append(cos)
         c_sin.append(sin)
         c_ct.append(ct)
+        c_spc.append(int(pool.species[chosen_index]))
+        c_row.append(int(pool.pool_row[chosen_index]))
 
         if i == n_atoms - 1:
             break
@@ -94,6 +102,9 @@ def select_forward(
         np.array(c_cos),
         np.array(c_sin),
         np.array(c_ct),
+        None,
+        np.array(c_spc, dtype=np.int64),
+        np.array(c_row, dtype=np.int64),
     )
     return chosen, sum_arr
 

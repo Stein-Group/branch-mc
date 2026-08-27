@@ -16,6 +16,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from gcmc import MC_engine as engine
+from gcmc import config_specs
 from gcmc.sim_setup import from_params
 from gcmc.state import ChainState
 
@@ -36,7 +37,7 @@ def run(branch, nwin=NW):
     }
     cfg = from_params(p)
     pot = cfg.build_potential()
-    w = engine.make_weigher(cfg, pot)
+    w = engine.make_weigher(config_specs.kernel_spec(cfg), pot)
     st = ChainState.fresh(3, seed=1)
     st.positions = np.random.default_rng(2).uniform(1, 19, size=(40, 3))
     return [engine.advance(st, cfg, pot, w)["packing_fraction"] for _ in range(nwin)]

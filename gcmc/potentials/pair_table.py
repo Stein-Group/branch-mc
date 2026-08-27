@@ -32,13 +32,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .._types import FloatArray
+from .._types import FloatArray, IntArray
+from . import overlap
 from .lennard_jones import _lj_from_ir6
-
-# The overlap tolerance in geometry.py, repeated as a module constant so the
-# floor arithmetic here reads the same convention without importing the whole
-# geometry module into a potential.
-_OVERLAP_TOL = 1e-12
 
 
 @dataclass(frozen=True)
@@ -92,6 +88,12 @@ class PairTable:
         )
 
     def index(self, type_name: str) -> int:
+        """Row/column index of a type name in every table here.
+
+        Raises ValueError on an unknown name rather than returning -1: a
+        negative index would silently address the LAST type, giving a plausible
+        energy for the wrong pair.
+        """
         return self.types.index(type_name)
 
 
@@ -119,6 +121,33 @@ def table_pair_energy(d: FloatArray, ti: int, tj: int, table: PairTable) -> Floa
     return table.eps[ti, tj] * _lj_from_ir6(ir6)
 
 
+def table_pair_energy_vec(
+    d: FloatArray, si: IntArray, sj: IntArray, table: PairTable
+) -> FloatArray:
+    """Per-pair energy for ARRAYS of type ids, one pair per element.
+
+    `table_pair_energy` takes two scalar type ids, which forces a caller with a
+    mixed set of pairs to group by type combination and loop. That is fine once
+    per trial cloud and expensive once per CLIQUE: `ljbranch_weight_sum`
+    enumerates every k-clique and asks for its intra-clique energy, so a Python
+    loop over type pairs there is a loop inside the clique enumeration. Measured
+    on the feature matrix, the grouped version cost 53 s on one depth-4 QA point;
+    this gather brings the whole tier-2 run back under the budget.
+
+    `si` and `sj` are INDEX arrays and were annotated `FloatArray`, which is
+    not merely imprecise: numpy refuses a float array as a fancy index, so the
+    annotation described a call that cannot run. Corrected at S4, when the
+    typed dual-cutoff correction became the second caller and mypy said so.
+
+    `sigma[si, sj]` is a fancy-index gather, so the pair parameters come out as
+    arrays and the arithmetic is the same expression `table_pair_energy` uses, in
+    the same order -- which is what makes it bit-identical rather than merely
+    close. `test_pair_table.py` asserts that against the scalar form.
+    """
+    ir6 = (table.sigma[si, sj] / np.asarray(d, float)) ** 6
+    return table.eps[si, sj] * _lj_from_ir6(ir6)
+
+
 def pair_floor(ti: int, tj: int, table: PairTable) -> float:
     """The per-pair overlap radius c * sigma_ij to hand geometry.overlaps (A1.4).
 
@@ -133,6 +162,13 @@ def pair_floor(ti: int, tj: int, table: PairTable) -> float:
 def overlaps_table(
     d: FloatArray | float, ti: int, tj: int, table: PairTable
 ) -> np.ndarray:
-    """Per-pair overlap indicator, the same convention as geometry.overlaps but
-    with the pair floor: d <= c*sigma_ij - 1e-12."""
-    return np.asarray(d, float) <= table.core_floor[ti, tj] - _OVERLAP_TOL
+    """Per-pair overlap indicator, delegating to `geometry.pair_overlaps`.
+
+    Kept as a thin wrapper rather than reimplemented: the invariant is that the
+    overlap comparison exists once, in geometry.py, and the pair floor changes
+    only which number is handed to it. This module used to repeat the tolerance
+    as a local constant to avoid importing geometry into a potential; geometry
+    imports nothing but numpy at module scope (its one scipy use is a local
+    import), so that cost was imaginary and the second copy was not.
+    """
+    return overlap.pair_overlaps(d, ti, tj, table.core_floor)

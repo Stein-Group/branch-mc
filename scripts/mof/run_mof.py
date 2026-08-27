@@ -204,6 +204,12 @@ def run_mof(spec: MofRunSpec) -> MofRunResult:
             "sweep_accepts",
             "sweep_k_mean",
             "sweep_k_max",
+            # The auxiliary correction's COUNT, not just its moments. A mean and
+            # an sd of 0 are what a correct no-op arm reports AND what a
+            # correction that never ran reports, so without this column the
+            # control arm cannot be told from a vacuous one -- which is how the
+            # `rc_aux is not None and rc_sel < rc` short-circuit went unnoticed.
+            "aux_corr_n",
             "aux_corr_mean",
             "aux_corr_sd",
         ]
@@ -309,6 +315,7 @@ def run_mof(spec: MofRunSpec) -> MofRunResult:
                     int(sweep_stats.get("accepts", 0.0)),
                     f"{(sweep_stats.get('k_sum', 0.0) / n_att if n_att else 0.0):.4g}",
                     int(sweep_stats.get("k_max", 0.0)),
+                    int(n_corr),
                     f"{mean:.6g}",
                     f"{var**0.5:.6g}",
                 ]

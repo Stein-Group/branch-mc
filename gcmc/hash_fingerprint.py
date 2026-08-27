@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .sim_setup import Config
@@ -28,41 +28,28 @@ import dataclasses
 import json
 from dataclasses import dataclass
 
+from . import config_specs
+
 # upper_cutoff and no_neigh are physics-bearing (interaction range, energy
 # truncation), so they are identity. Adding them changes every run id relative
 # to the pre-fix layout; runs produced by the biased engine should not be
 # resumed anyway.
-_IDENTITY_FIELDS = (
-    "potential_type",
-    "sampler",
-    "dimension",
-    "chem_pot",
-    "seed",
-    "box",
-    "box_sides",
-    "cavity_radius",
-    "trial_density",
-    "depth",
-    "branch",
-    "full_repacking",
-    "move_factor",
-    "temp",
-    "rc",
-    "eta",
-    "gamma_max",
-    "delta_eta",
-    "lower_cutoff",
-    "upper_cutoff",
-    "no_neigh",
-    "ensemble_type",
-    "target_n",
-    "pore_geometry",
-    "pore_H",
-    "pore_R",
-    "channel",
-    "channel_length",
-    "channel_width",
-    "aux_cutoff",
+#: The hashed set IS the fields of the three physics sub-configs (R8). Derived
+#: from the CLASSES, never listed: a field is identity-bearing because of the
+#: dataclass it was declared on, not because someone remembered to add it here.
+#: That indirection is the entire fix -- the eight findings in `config_fields`'s
+#: docstring were all produced by maintaining a list.
+#:
+#: `config_fields.PHYSICS` says the same thing as names, and `config_specs`
+#: checks the two against each other at import, so the triangle cannot drift.
+_IDENTITY_FIELDS: tuple[str, ...] = tuple(
+    f.name
+    for cls in (
+        config_specs.PotentialSpec,
+        config_specs.SamplerSpec,
+        config_specs.EnsembleSpec,
+    )
+    for f in dataclasses.fields(cls)
 )
 
 
@@ -81,24 +68,28 @@ def identity_dict(cfg: Config) -> dict[str, object]:
     logging cadence, walltime). Two runs with equal identity dicts are the
     same physical experiment and may share a run directory / resume each
     other; that is the whole contract of the fingerprint."""
-    # channel geometry only identifies a run when the channel sampler is active;
-    # for every other mode these keys are omitted so the fingerprint is unchanged
-    # from before the channel sampler existed.
-    active_channel = getattr(cfg, "channel", False)
-    skip = () if active_channel else ("channel", "channel_length", "channel_width")
-    # the short-range auxiliary radius identifies a run only when that auxiliary
-    # is on; with it off the key is omitted so every fingerprint predating the
-    # auxiliary is byte-for-byte what it was. Note aux_cutoff DOES belong to the
-    # identity when set: it changes the proposal distribution, hence the Markov
-    # chain, even though the sampled ensemble is unchanged by construction.
-    if getattr(cfg, "aux_cutoff", None) is None:
-        skip = (*skip, "aux_cutoff")
-    # box_sides is part of the physics identity only for an orthorhombic box;
-    # cubic runs (box_sides None) omit it so the fingerprint is byte-identical to
-    # before per-axis boxes existed.
-    if getattr(cfg, "box_sides", None) is None:
-        skip = (*skip, "box_sides")
-    return {k: _canon(getattr(cfg, k)) for k in _IDENTITY_FIELDS if k not in skip}
+    # ONE rule, replacing four backward-compatibility special cases.
+    #
+    # Until S2 this function carried bespoke skip logic for `channel`,
+    # `aux_cutoff`, `box_sides` and `species_identity`, each existing so that
+    # runs predating a feature kept byte-identical ids. Meanwhile EIGHT other
+    # inactive keys hashed as literal `null`, because nobody had written a
+    # special case for them. Two conventions, applied by accident of history.
+    #
+    # R9 retires the compatibility requirement, so the rule can be the one that
+    # was always correct: an inactive key is ABSENT, never null. A field that is
+    # None contributes nothing distinguishing, and a run where it is set differs
+    # from one where it is not by the presence of the key itself.
+    #
+    # `False` and `0.0` are NOT None and are hashed. That matters: `tail: false`
+    # must reach the digest, which is the collision S1 found.
+    out: dict[str, Any] = {}
+    for spec in config_specs.physics_specs(cfg):
+        for field in dataclasses.fields(spec):
+            value = getattr(spec, field.name)
+            if value is not None:
+                out[field.name] = _canon(value)
+    return out
 
 
 def _matrix_digest(cfg: Config) -> str:
@@ -161,6 +152,15 @@ def run_paths(cfg: Config, root: str = "runs") -> RunPaths:
     collide never."""
     rid = run_id(cfg)
 
+    # Read the naming inputs off the sub-configs rather than off `cfg` (R8).
+    # Every field this function needs is EnsembleSpec except `sweep_label`,
+    # which is IOSpec -- and that split is the point: a directory name is built
+    # from the state point (what the run IS) plus one presentational label, and
+    # nothing else. Narrowing the read makes that visible instead of leaving it
+    # to be inferred from eleven scattered `cfg.` accesses.
+    ens = config_specs.ensemble_spec(cfg)
+    io = config_specs.io_spec(cfg)
+
     def _fmt(x: float) -> str:
         return format(x, ".4g").replace("-", "m").replace(".", "p")
 
@@ -168,29 +168,28 @@ def run_paths(cfg: Config, root: str = "runs") -> RunPaths:
     # cfg.sweep_label naming the varying axis/axes (e.g. "mu4.3", "depth3",
     # "target_N256", "pore.H7"); use it for ANY mode. Single (non-swept) runs
     # have no label, so fall back to the ensemble's natural variable.
-    label = getattr(cfg, "sweep_label", None)
-    confined = getattr(cfg, "pore_geometry", None) is not None
+    label = io.sweep_label
+    confined = ens.pore_geometry is not None
     if label:
         tag = label.replace("ensemble.", "").replace("sampler.", "").replace("run.", "")
         tag = tag.replace("-", "m").replace(".", "p")
-    elif getattr(cfg, "ensemble_type", "muVT") == "NVT":
-        tag = f"N{cfg.target_n}"
-    elif getattr(cfg, "target_count", None) is not None:
-        assert cfg.target_count is not None
-        tag = "tgtN" + _fmt(cfg.target_count)
+    elif ens.ensemble_type == "NVT":
+        tag = f"N{ens.target_n}"
+    elif ens.target_count is not None:
+        tag = "tgtN" + _fmt(ens.target_count)
     elif confined:
         tag = ""  # the pore prefix below is the descriptor
     else:
-        tag = "mu" + _fmt(cfg.chem_pot)
+        tag = "mu" + _fmt(ens.chem_pot)
     if confined:
         # prefix the pore geometry+size so confined runs are self-describing
-        g = cfg.pore_geometry
+        g = ens.pore_geometry
         if g == "slit":
-            assert cfg.pore_H is not None  # slit config carries H
-            sz = _fmt(cfg.pore_H)
+            assert ens.pore_H is not None  # slit config carries H
+            sz = _fmt(ens.pore_H)
         else:
-            assert cfg.pore_R is not None  # cylinder config carries R
-            sz = _fmt(cfg.pore_R)
+            assert ens.pore_R is not None  # cylinder config carries R
+            sz = _fmt(ens.pore_R)
         prefix = f"{'slit_H' if g == 'slit' else 'cyl_R'}{sz}"
         tag = f"{prefix}_{tag}" if tag else prefix
     if _matrix_digest(cfg):

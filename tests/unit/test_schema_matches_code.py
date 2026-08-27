@@ -123,23 +123,40 @@ def test_docstring_schema_documents_every_key():
     import re
 
     quoted = set(re.findall(r'"([A-Za-z_0-9]+)"', block_txt))
-    # values and nested pore keys are legitimately quoted but are not top-level
-    # params keys, so they are not candidates for the ghost check
+    # Values and nested pore keys are legitimately quoted but are not top-level
+    # params keys, so they are not candidates for the ghost check. Grouped by
+    # which key they are a value OF, because the flat list was the thing that
+    # rotted: six value spellings were added to the docstring and this set was
+    # not, so the check reported them as keys the code would reject.
     values = {
+        # potential.main
         "hard_core",
         "lennard_jones",
+        # auxiliary.type
         "pmf",
+        "short_range",
+        # sampler.type
         "metropolis",
         "rosenbluth",
         "branch",
         "channel",
         "reweight",
+        # sampler.channel_length: "cyclic" is current, the rest legacy synonyms
+        "cyclic",
+        "full",
+        "full_box",
+        "span",
+        # ensemble.type
         "muVT",
         "NVT",
         "QA",
         "confined",
+        # run.kind
         "single",
         "parallel",
+        # run.initial_config
+        "grid",
+        # ensemble.pore, a nested block with its own keys
         "slit",
         "cylinder",
         "geometry",
@@ -147,6 +164,11 @@ def test_docstring_schema_documents_every_key():
         "R",
         "L_z",
     }
+    # Any key starting with an underscore is the annotate-your-own-params
+    # convention: _check() ignores it by prefix, so it is accepted rather than
+    # rejected and cannot be a ghost. Matched by shape, not by listing "_" and
+    # "_comment", so a params file inventing "_why" needs no test change.
+    quoted = {q for q in quoted if not q.startswith("_")}
     ghosts = sorted(quoted - every - values - set(_BLOCKS))
     assert not ghosts, (
         f"sim_setup docstring documents {ghosts}, which from_params would "

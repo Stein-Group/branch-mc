@@ -26,6 +26,7 @@ from __future__ import annotations
 import csv
 
 from scripts.mof.run_mof import MofRunSpec, mof_run_id, run_mof
+from scripts.mof.system_setup import setup_system
 
 FF = "ff/forcefield_A.yaml"
 
@@ -105,3 +106,92 @@ def test_sweep_counters_are_streamed_when_the_sweep_is_on(tmp_path):
     for col in ("sweep_attempts", "sweep_accepts", "sweep_k_mean", "sweep_k_max"):
         assert col in rows[0], f"{col} missing from the stream"
     assert sum(int(row["sweep_attempts"]) for row in rows) == 3 * len(rows)
+
+
+def test_the_mof_no_op_auxiliary_reproduces_the_auxiliary_off_chain(tmp_path):
+    """`sweep_rc_aux == rc` must be an exact no-op, in the MOF driver too.
+
+    The third place this gate was missing. `_channel_move_ms` guarded the
+    correction on `rc_aux is not None and rc_sel < rc`, so the spec this file
+    already calls `noop` never reached the correction it was meant to control --
+    the same shape as the bulk engine's `aux_on = ljbranch and rc_sel < uc` and
+    the typed `aux: {control: true}` returning no cutoff at all. The flag now
+    reads `rc_aux is not None`, so the correction runs, its value is exactly zero
+    (both splits are the same sum over the same pairs), and the chain must be the
+    auxiliary-off chain.
+
+    WHAT IS COMPARED, AND WHY IT IS THE STREAM. The driver's chain state is not
+    returned, so the per-window CSV is the observable: it carries N per species,
+    the energy decomposition and the sweep counters, which is a strictly richer
+    record than the counter stream this file's other tests read. Every column of
+    every row must match. Comparing floats for equality is correct here rather
+    than sloppy: the claim is bit-identity, and the two runs execute the same
+    arithmetic in the same order with the same seed, so a mismatch of one ulp is
+    the finding, not noise.
+
+    The two runs still have DIFFERENT run ids, which is what
+    `test_the_auxiliary_is_part_of_the_run_identity` above requires -- the
+    auxiliary is identity-bearing even when it is a no-op, because a leg that
+    resumed across it would splice two chains. So they get separate directories
+    and neither reads the other's checkpoint.
+    """
+    # rc comes from the SYSTEM, not the force-field file, and the difference is a
+    # finding in its own right. `MofRunSpec.sweep_rc_aux` is compared against
+    # `fieldobj.rc`, which is REDUCED (2.927 for this force field); the file's
+    # `interaction.rc` is 12.0 Angstrom. The spec field carries no unit in its
+    # name or its comment, and `test_the_auxiliary_is_part_of_the_run_identity`
+    # above calls 2.5 the "noop" spec -- 2.5 reduced against 2.927 reduced is a
+    # real short-range auxiliary, not a no-op. That test only compares run ids, so
+    # the mislabel cost it nothing; a control arm built on the same reading would
+    # have compared two auxiliaries and called their agreement a no-op.
+    rc = setup_system(FF, 298.0, bulk_box=30.0, reference="Xe").field.rc
+
+    off = run_mof(_spec(tmp_path / "off", sweep_moves_per_window=2, sweep_L_long=2.0))
+    noop = run_mof(
+        _spec(
+            tmp_path / "noop",
+            sweep_moves_per_window=2,
+            sweep_L_long=2.0,
+            sweep_rc_aux=rc,
+        )
+    )
+
+    # `wall_s` and the cumulative evaluation counters are the clock, not the
+    # chain. Everything else -- occupancies, the energy decomposition, the sweep
+    # counters, the auxiliary's own moments -- is chain state and is compared.
+    # `wall_s` is the clock. `aux_corr_n` is the diagnostic whose PRESENCE is the
+    # difference between the two arms -- the off arm evaluates none by definition
+    # -- so it is asserted directly above rather than compared. `aux_corr_mean`
+    # and `aux_corr_sd` stay IN the comparison: both arms must report 0, which is
+    # the exactness claim, and dropping them would remove the assertion that the
+    # correction really was zero and not merely rounded to it in the log.
+    volatile = {"wall_s", "aux_corr_n"}
+    # NON-VACUITY FIRST. A correction that never ran reports mean 0 and sd 0,
+    # exactly as a correct no-op does, so the count is what separates the two.
+    # Asserted before the comparison, because otherwise the comparison below
+    # passes hardest when the thing under test did not happen.
+    ran = sum(int(r["aux_corr_n"]) for r in _rows(noop))
+    assert ran > 0, (
+        "the no-op auxiliary evaluated the correction 0 times, so the "
+        "bit-identity below is a comparison of two auxiliary-off chains. Check "
+        "that the correction is not guarded on rc_sel < rc."
+    )
+    assert sum(int(r["aux_corr_n"]) for r in _rows(off)) == 0, (
+        "the auxiliary-OFF arm evaluated a correction; the two arms are not "
+        "what they say they are"
+    )
+    rows_off = [{k: v for k, v in r.items() if k not in volatile} for r in _rows(off)]
+    rows_noop = [{k: v for k, v in r.items() if k not in volatile} for r in _rows(noop)]
+    assert rows_off, "no windows streamed"
+    assert len(rows_off) == len(rows_noop), (
+        f"{len(rows_off)} windows without the auxiliary, {len(rows_noop)} with "
+        "the no-op one"
+    )
+    for i, (a, b) in enumerate(zip(rows_off, rows_noop)):
+        differing = {k: (a[k], b[k]) for k in a if a[k] != b[k]}
+        assert not differing, (
+            f"window {i} differs between the auxiliary-off run and the no-op "
+            f"auxiliary: {differing}. At sweep_rc_aux == rc the correction is a "
+            "difference of two identical sums, so any difference here means it is "
+            "not being added where the algebra puts it."
+        )

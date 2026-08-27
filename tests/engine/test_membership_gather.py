@@ -18,15 +18,18 @@ import time
 import numpy as np
 import pytest
 
-from gcmc.geometry import indices_in_cavity, indices_in_cavity_cl
-from gcmc.neighbors import CellList
-from gcmc.samplers.channel import (
-    cuboid_members,
+# S2: body geometry lives at layer 2 now.
+from gcmc.body import (
     cuboid_members_cl,
     random_rotation_matrix,
     ray_box_chord,
     rod_members_full,
     rod_members_full_cl,
+)
+from gcmc.geometry import indices_in_cavity, indices_in_cavity_cl
+from gcmc.neighbors import CellList
+from gcmc.samplers.channel import (
+    cuboid_members,
 )
 
 N_BODIES = 1000

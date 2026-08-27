@@ -98,8 +98,28 @@ def calculate_order_parameter(
     """Bridge: gather neighbour displacements under PBC and dispatch by
     dimensionality. 2D returns (cos_sum, sin_sum, counts); 3D returns Q6**gamma.
     """
-    n_data = kdtree.data.shape[0]
     ndim = coords.shape[1]
+    if kdtree is None:
+        # EMPTY ENVIRONMENT. `MC_engine.advance` passes `tree = cl if cl.n_active
+        # else None`, so an empty exclusion set arrives here as None with fully
+        # padded neighbour rows, and this dereferenced `.data` on it. That is why
+        # a psi6 run could not start from an empty box, and why it ran perfectly
+        # well once seeded -- the cell-list port itself was fine.
+        #
+        # Zero phasor sums with zero counts is not a fallback, it is what the
+        # existing convention already says: `psi6_magnitude` divides by `counts`
+        # and maps the resulting 0/0 to the 0.3 liquid floor, which is exactly
+        # how a particle with no neighbours is treated when the system is
+        # non-empty. Returning zeros here makes the empty system agree with the
+        # sparse one rather than inventing a second rule for it.
+        n = coords.shape[0]
+        z = np.zeros(n, dtype=float)
+        if ndim == 2:
+            return z, z.copy(), z.copy()
+        if ndim == 3:
+            return np.full(n, 0.3**gamma)
+        raise ValueError(f"unsupported dimensionality {ndim}")
+    n_data = kdtree.data.shape[0]
     box = (
         np.array([side_of_box] * ndim)
         if np.isscalar(side_of_box)

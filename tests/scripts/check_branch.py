@@ -24,8 +24,9 @@ sys.argv = [
     "1.0",
 ]
 HERE = os.path.dirname(os.path.abspath(__file__))
-ORIG = os.path.join(HERE, "..", "..", "orig")
-sys.path.insert(0, ORIG)
+from _frozen import add_orig_to_path
+
+ORIG = str(add_orig_to_path())  # R1: resolved from $ORIG_ROOT or the tag
 import cav_n_d_3d_g3_LJ as orig
 
 sys.path.insert(0, os.path.join(HERE, "..", ".."))

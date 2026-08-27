@@ -31,12 +31,22 @@ be checked rather than assumed.
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 
 import _harness as H
 import numpy as np
 import pytest
 
 from gcmc import MC_engine
+
+# R1: this module's oracle is the frozen stage-A engine, which lives in tag
+# v2-engineA rather than in the tree. Skipped as a module when it is absent --
+# tier 3 does the `git worktree add` and runs these for real.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import _frozen
+
+_frozen.skip_module_without(_frozen.ENGINEA)
 
 
 def _check_against_reference(mode, engine):

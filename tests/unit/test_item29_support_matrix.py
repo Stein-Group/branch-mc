@@ -16,6 +16,15 @@ def _raises(p):
     raise AssertionError(f"expected ValueError for {p}")
 
 
+def _builds(p):
+    """The other half of a support matrix: what it says IS supported must build.
+
+    Without this, a row that gets widened later leaves a test asserting the old
+    rejection, and the only symptom is a failing suite months afterwards.
+    """
+    return from_params(p)
+
+
 def test_reweight_constraints():
     # reweight is hard-core, 2D, serial only
     _raises(
@@ -52,8 +61,13 @@ def test_channel_constraints():
         "channel_length": 6.0,
         "channel_width": 1.5,
     }
-    # 2D
-    _raises(
+    # 2D IS supported: the sweep sorts on axis 0 and takes full Euclidean
+    # distances, so it is dimension-agnostic; the trial body is an oriented
+    # rectangle rather than a cuboid. test_channel_2d.py pins the geometry
+    # against brute-force clique enumeration. Hard-core only at the engine
+    # level -- 2D + LJ + channel runs but has never been validated against a
+    # reference, which is a gap in the physics, not in this matrix.
+    _builds(
         {
             "potential": {"main": "hard_core"},
             "ensemble": {"mu": 2.0, "dimension": 2, "box": 12.0},

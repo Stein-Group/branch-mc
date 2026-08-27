@@ -235,7 +235,9 @@ def test_loop_reduces_to_the_henry_limit(env):
     beta = 1.0 / red.T_star
 
     # K* from Widom (same quantity V1 uses)
-    kstar = widom_henry(field, xe, beta, np.random.default_rng(0), n_samples=60000)["henry_star"]
+    kstar = widom_henry(field, xe, beta, np.random.default_rng(0), n_samples=60000)[
+        "henry_star"
+    ]
 
     # a genuinely dilute activity so the Henry (linear) regime holds
     z_star = 5.0e-6
@@ -247,9 +249,20 @@ def test_loop_reduces_to_the_henry_limit(env):
     ns = []
     for _ in range(120):
         res = advance_metropolis_mof(
-            pos, rng, field=field, table=table, guest_type=xe, beta=beta, z_star=z_star,
-            box=box, volume=volume, n_cells=8.0, upper_cutoff=field.rc,
-            move_factor=1.0, n_neigh=40, window=60,
+            pos,
+            rng,
+            field=field,
+            table=table,
+            guest_type=xe,
+            beta=beta,
+            z_star=z_star,
+            box=box,
+            volume=volume,
+            n_cells=8.0,
+            upper_cutoff=field.rc,
+            move_factor=1.0,
+            n_neigh=40,
+            window=60,
         )
         pos = res.positions
         ns.append(res.n)

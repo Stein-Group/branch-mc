@@ -173,6 +173,8 @@ def write_frame(
     box: float | Sequence[float],
     info: dict[str, Any],
     append: bool,
+    species: IntArray | None = None,
+    symbols: Sequence[str] | None = None,
 ) -> None:
     """Write one configuration to the extxyz trajectory.
 
@@ -180,6 +182,17 @@ def write_frame(
     save-last-frame mode). append=True adds the frame to a growing trajectory.
     The caller (runner) decides which from the single `traj_every` knob:
     traj_every == 0 -> overwrite (last frame only); traj_every >= 1 -> append.
+
+    SPECIES (P6). With `species` and `symbols` given, each particle is written
+    under its own element symbol from the species file, so a frame is a valid
+    warm start for the same model. Every particle used to be written as "H"
+    whatever it was, which made a typed trajectory unreadable back into species
+    -- the coordinates survived and the composition did not.
+
+    Left at "H" when `species` is None, which is the single-species case. That is
+    not laziness: `tests/engine/test_stageA_traj_identity.py` compares trajectory
+    files against frozen references, and a symbol change would move every one of
+    them for no gain -- a one-species run has nothing to disambiguate.
     """
     pos = np.asarray(positions, dtype=float)
     if two_dim:
@@ -209,7 +222,29 @@ def write_frame(
         cell = [float(b[0])] * 3
     else:
         cell = [float(x) for x in b]
-    atoms = Atoms("H" * len(pos), positions=pos, cell=cell, pbc=pbc)
+    atom_symbols: str | list[str]
+    if species is None:
+        atom_symbols = "H" * len(pos)
+    else:
+        if symbols is None:
+            raise ValueError(
+                "write_frame was given a species column but no symbol table; "
+                "the type ids alone cannot be written as element symbols"
+            )
+        col = np.asarray(species, dtype=np.int64).reshape(-1)
+        if len(col) != len(pos):
+            raise ValueError(
+                f"write_frame: {len(col)} species labels for {len(pos)} "
+                "positions. The two must come from the same slot order or the "
+                "frame mislabels every particle."
+            )
+        if len(col) and (col.min() < 0 or col.max() >= len(symbols)):
+            raise ValueError(
+                f"write_frame: species ids span [{col.min()}, {col.max()}] but "
+                f"the symbol table has {len(symbols)} entries"
+            )
+        atom_symbols = [symbols[int(t)] for t in col]
+    atoms = Atoms(atom_symbols, positions=pos, cell=cell, pbc=pbc)
     for k, v in info.items():
         atoms.info[k] = v
     ase_write(paths.trajectory, atoms, format="extxyz", append=append)
@@ -460,6 +495,78 @@ def load_matrix(path: str | Path, dimension: int) -> FloatArray:
         )
     # plain coordinate file (x y z per line), same as load_config_file
     return load_config_file(path, dimension)
+
+
+def load_config_species(
+    path: str | Path,
+    *,
+    symbols: Sequence[str],
+    n_expected: int,
+) -> IntArray:
+    """Read the species column of a warm-start frame back into type ids (P6).
+
+    THE OTHER HALF OF `write_frame`'s symbols. Both directions used to lose
+    species: `write_frame` labelled every particle "H", and every reader called
+    `get_positions()` and discarded `get_chemical_symbols()`. A warm start
+    therefore restored the coordinates of a mixture and none of its composition,
+    which is worse than failing -- the run continues and reports a pure
+    species-0 system at the density of a mixture.
+
+    `symbols` is the species file's own per-type symbol tuple, so the mapping
+    that reads a frame is the mapping that wrote it.
+
+    THREE THINGS RAISE RATHER THAN GUESSING, and each is a silent wrong answer
+    otherwise:
+
+      * a symbol not in the file. Naming it and listing the known ones, never a
+        silent type 0 -- a typo in one row would otherwise move one particle to
+        the wrong species and nothing would say so.
+      * a bare coordinate table (no symbols at all). Composition cannot be
+        inferred from coordinates, so "all species 0" is a guess dressed as a
+        default.
+      * a count that disagrees with the positions already loaded. The two are
+        read from the same file, so a mismatch means the file changed underneath
+        or the parse took different frames -- either way the labels would not
+        belong to the coordinates.
+
+    Duplicate symbols cannot reach here: `species_file` refuses a file where two
+    types share one, with the reason being exactly this round trip.
+    """
+    path = Path(path)
+    table = {str(sym): i for i, sym in enumerate(symbols)}
+    if len(table) != len(symbols):
+        raise ValueError(
+            f"the symbol table has duplicates ({list(symbols)}), so a frame "
+            "cannot be read back into types unambiguously"
+        )
+    try:
+        from ase.io import read as ase_read
+
+        atoms = ase_read(str(path), index="-1")
+    except Exception as exc:
+        raise ValueError(
+            f"{path}: could not be parsed as (extended) XYZ, so it carries no "
+            f"species column ({exc}). A typed run cannot warm-start from a bare "
+            f"coordinate table: composition is not recoverable from positions, "
+            f"and defaulting every particle to {symbols[0]!r} would be a guess. "
+            f"Use a trajectory frame written by this code."
+        ) from None
+    assert not isinstance(atoms, list)  # a single frame was requested
+    found = [str(x) for x in atoms.get_chemical_symbols()]
+    if len(found) != n_expected:
+        raise ValueError(
+            f"{path}: {len(found)} symbols for {n_expected} positions loaded "
+            "from the same file; the labels would not belong to the coordinates"
+        )
+    unknown = sorted({sym for sym in found if sym not in table})
+    if unknown:
+        raise ValueError(
+            f"{path}: symbol(s) {unknown} are not species of this model. Known "
+            f"symbols: {sorted(table)}. A frame written for a different force "
+            f"field is not a warm start for this one, and mapping the unknown "
+            f"ones to type 0 would silently change the composition."
+        )
+    return np.asarray([table[sym] for sym in found], dtype=np.int64)
 
 
 def load_config_file(path: str | Path, dimension: int) -> FloatArray:

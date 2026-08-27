@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 
 from gcmc import MC_engine as engine
-from gcmc import parallel
+from gcmc import config_specs, parallel
 from gcmc.sim_setup import from_params
 from gcmc.state import ChainState, zero_counters
 
@@ -71,9 +71,9 @@ def _equilibrium_eta(advance, cfg, st, n_win, n_tail):
     honest bars, never on a flat tolerance)."""
     pot = cfg.build_potential()
     w = (
-        parallel.make_weigher(cfg, pot)
+        parallel.make_weigher(config_specs.kernel_spec(cfg), pot)
         if advance is parallel.advance_parallel
-        else engine.make_weigher(cfg, pot)
+        else engine.make_weigher(config_specs.kernel_spec(cfg), pot)
     )
     etas = []
     for _ in range(n_win):
@@ -158,7 +158,7 @@ def test_cell_list_invariants_hold(dim, sampler, monkeypatch):
     }
     cfg = from_params(p)
     pot = cfg.build_potential()
-    w = parallel.make_weigher(cfg, pot)
+    w = parallel.make_weigher(config_specs.kernel_spec(cfg), pot)
     st = _state(60 if dim == 2 else 200, dim, 23.0)
     for _ in range(3):
         out = parallel.advance_parallel(st, cfg, pot, w)
@@ -189,7 +189,7 @@ def test_lj_cell_list_invariants_hold(monkeypatch):
     }
     cfg = from_params(p)
     pot = cfg.build_potential()
-    w = parallel.make_weigher(cfg, pot)
+    w = parallel.make_weigher(config_specs.kernel_spec(cfg), pot)
     st = _state(150, 3, 23.0)
     for _ in range(3):
         out = parallel.advance_parallel(st, cfg, pot, w)

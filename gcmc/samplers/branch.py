@@ -26,25 +26,58 @@ from scipy.spatial import KDTree
 
 from .._types import RNG as _RNG
 from .._types import BoolArray, FloatArray, IntArray
-from ..geometry import overlap_radius
 from ..potentials.lennard_jones import lj_pair_energy
+from ..potentials.overlap import overlap_radius
+from ..potentials.pair_table import PairTable, table_pair_energy_vec
 
 
 def _build_adj(
-    centers: FloatArray, overlap_distance: float, box: FloatArray
+    centers: FloatArray,
+    overlap_distance: float,
+    box: FloatArray,
+    species: IntArray | None = None,
+    floor: FloatArray | None = None,
 ) -> tuple[BoolArray, FloatArray]:
     """Compatibility ("non-conflict") adjacency of the trial cloud: adj[i, j]
     is True iff trials i and j do NOT overlap under the periodic minimum image,
     so a non-overlapping k-subset of trials is exactly a k-clique of this
     graph. Built once per pool from a kd-tree pair query (this is pool-local,
     O(pool size), and deliberately outside the engine's cell-list rule).
-    Returns (adj, wrapped centers)."""
+    Returns (adj, wrapped centers).
+
+    TYPED (`species` and `floor` given, A1.4): two trials conflict below the
+    PER-PAIR floor `c*sigma_ij` between their species, not below one scalar. The
+    kd-tree is queried at the LARGEST floor present -- a superset of the real
+    conflicts -- and each returned pair is then tested against its own floor. The
+    same two-step the multi-species sweep uses for its eviction window, and for
+    the same reason: a single query radius must not be allowed to drop a
+    conflicting pair before it is tested.
+    """
     n = len(centers)
     shifted = np.mod(centers, box)
     tree = KDTree(shifted, boxsize=box)
-    pairs = tree.query_pairs(r=overlap_radius(overlap_distance), output_type="ndarray")
     adj = np.ones((n, n), dtype=bool)
     np.fill_diagonal(adj, False)
+    if species is None or floor is None:
+        pairs = tree.query_pairs(
+            r=overlap_radius(overlap_distance), output_type="ndarray"
+        )
+    else:
+        spc = np.asarray(species, dtype=np.int64)
+        fl = np.asarray(floor, dtype=np.float64)
+        present = np.unique(spc[:n]) if n else np.zeros(0, dtype=np.int64)
+        if not len(present):
+            return adj, shifted
+        r_max = overlap_radius(float(fl[np.ix_(present, present)].max()))
+        pairs = tree.query_pairs(r=r_max, output_type="ndarray")
+        if len(pairs) > 0:
+            d = shifted[pairs[:, 0]] - shifted[pairs[:, 1]]
+            d -= np.round(d / box) * box
+            r = np.sqrt((d**2).sum(axis=1))
+            # `overlap_radius` takes an array of floors as readily as one
+            # diameter, which is exactly what a per-pair test needs
+            keep = r <= overlap_radius(fl[spc[pairs[:, 0]], spc[pairs[:, 1]]])
+            pairs = pairs[keep]
     if len(pairs) > 0:
         adj[pairs[:, 0], pairs[:, 1]] = False
         adj[pairs[:, 1], pairs[:, 0]] = False
@@ -299,6 +332,8 @@ def count_and_sample(
     *,
     box_lengths: float | FloatArray,
     rng: _RNG | None = None,
+    species: IntArray | None = None,
+    floor: FloatArray | None = None,
 ) -> tuple[int, Sequence[int] | None]:
     """Count non-overlapping k-disk configurations and return one example.
     Adjacency means a pair is closer than `overlap_distance` (the exclusion
@@ -310,15 +345,23 @@ def count_and_sample(
     rng-free path keeps the original's deterministic lowest-in-order witness and
     exists only for the `orig/` count-parity check -- do not sample with it. The
     witness is NOT uniform (measured: at k = 3 over a third of the cliques are
-    unreachable at any vertex labelling), which biased the equilibrium density."""
+    unreachable at any vertex labelling), which biased the equilibrium density.
+
+    TYPED (`species` and `floor`): conflict is decided by the PER-PAIR floor
+    `c*sigma_ij`. Only the adjacency changes -- the counting and the uniform draw
+    over cliques are graph operations and know nothing about species, which is
+    what `multispecies_plan.md` P5 means by the DP being type-blind once the
+    conflict graph is built."""
     centers = np.asarray(centers, dtype=np.float64)
     n = len(centers)
     box = _parse_box(box_lengths, centers.shape[1] if n > 0 else 1)
     if k <= 0 or n < k:
         return 0, None
     if k == 1:
+        # one disk has no pair, so no overlap floor is consulted at all and the
+        # typed and untyped answers are identical by construction
         return n, ((int(rng.integers(n)) if rng is not None else 0,) if n > 0 else None)
-    adj, _ = _build_adj(centers, overlap_distance, box)
+    adj, _ = _build_adj(centers, overlap_distance, box, species, floor)
     if rng is not None:
         return _uniform_from_adj(adj, k, rng)
     return _count_from_adj(adj, k)
@@ -397,11 +440,23 @@ def _enumerate_cliques(adj: BoolArray, k: int) -> Iterator[tuple[int, ...]]:
 
 
 def _intra_lj_factor(
-    members: FloatArray, box: FloatArray, rc: float, beta: float
+    members: FloatArray,
+    box: FloatArray,
+    rc: float,
+    beta: float,
+    member_species: IntArray | None = None,
+    table: PairTable | None = None,
 ) -> float:
     """exp(-beta * LJ energy among `members`): pairs within rc, minimum image.
     Returns 1.0 for fewer than two members (no pairs), so depth-0 weights are
-    exactly the carried single-particle weight with nothing added."""
+    exactly the carried single-particle weight with nothing added.
+
+    TYPED (`member_species` and `table` given): each pair's energy is the
+    per-pair 12-6 form for the two species, grouped by species pair so the table
+    is read once per occupied combination rather than once per pair. At one
+    species with a unit table this is `lj_pair_energy` bit for bit, which is what
+    keeps the single-species clique weights unchanged.
+    """
     m = len(members)
     if m < 2:
         return 1.0
@@ -409,10 +464,24 @@ def _intra_lj_factor(
     dvec = members[ii] - members[jj]
     dvec -= np.round(dvec / box) * box
     r = np.sqrt((dvec**2).sum(axis=1))
-    r = r[(r < rc) & (r > 0)]
-    if r.size == 0:
+    inside = (r < rc) & (r > 0)
+    if not inside.any():
         return 1.0
-    u = float(np.sum(lj_pair_energy(r)))
+    if member_species is None or table is None:
+        u = float(np.sum(lj_pair_energy(r[inside])))
+    else:
+        # ONE gather, no grouping loop. This function is called once per CLIQUE
+        # and `ljbranch_weight_sum` enumerates every clique, so a Python loop over
+        # type combinations here sits inside the enumeration: it cost 53 s on a
+        # single depth-4 QA matrix point before this was vectorised.
+        spc = np.asarray(member_species, dtype=np.int64)
+        u = float(
+            np.sum(
+                table_pair_energy_vec(
+                    r[inside], spc[ii][inside], spc[jj][inside], table
+                )
+            )
+        )
     return float(np.exp(-beta * u))
 
 
@@ -426,7 +495,10 @@ def ljbranch_weight_sum(
     beta: float,
     *,
     rng: _RNG | None = None,
-) -> tuple[float, int, FloatArray | None]:
+    species: IntArray | None = None,
+    floor: FloatArray | None = None,
+    table: PairTable | None = None,
+) -> tuple[float, int, FloatArray | None, list[int] | None]:
     """Sum the Boltzmann weights of every non-overlapping k-clique.
 
     Adjacency is non-overlap at `lower` (the same graph the hard-core counter
@@ -439,23 +511,54 @@ def ljbranch_weight_sum(
     weight and its member centres are returned (the forward / insertion use);
     otherwise `chosen` is None (the reverse use needs only the sum).
 
-    Returns (logW, count, chosen_coords_or_None); (-inf, 0, None) if no clique
-    exists.
+    Returns (logW, count, chosen_coords_or_None, chosen_rows_or_None);
+    (-inf, 0, None, None) if no clique exists.
+
+    THE FOURTH RETURN VALUE, added at S3 with a deliberate re-baseline of the
+    locked-body hash. `chosen_rows` is the drawn clique's row indices into
+    `centers`. The typed insert path needs them: the species of an inserted atom
+    is the species of the pool row it came from, and M21 decides provenance by
+    row and explicitly never by comparing coordinates -- a reselected member and
+    a trial atom that lands on it are indistinguishable by position.
+
+    Recovering them outside this function would have meant either an exact-float
+    coordinate lookup (the identification M21 forbids) or a second copy of the
+    clique enumeration. `idx` is already computed on every iteration; the change
+    is to stop throwing it away.
+
+    Nothing about the weights or the draw moved. The reservoir test, its rng
+    consumption and the accumulation order are untouched, and the counter digests
+    are the evidence: 13/13 unchanged across this commit.
+
+    TYPED (`species`, `floor` and `table`). Two things become per-pair, and they
+    are the same two the multi-species sweep overrides: conflict is decided at
+    `c*sigma_ij` rather than one `lower`, and the intra-clique factor is the
+    per-pair 12-6 energy rather than the single-type one. `member_weights` needs
+    no change -- the caller already folds the species-aware member-vs-system
+    factor into it, exactly as it folds the single-type one.
+
+    The clique ENUMERATION is untouched and type-blind, which is the whole reason
+    this is a small change: once the conflict graph carries the species
+    information, counting and drawing cliques is a graph operation.
     """
     centers = np.asarray(centers, float)
     member_weights = np.asarray(member_weights, float)
     box = _parse_box(box, centers.shape[1] if len(centers) else 1)
-    adj, _ = _build_adj(centers, lower, box)
+    adj, _ = _build_adj(centers, lower, box, species, floor)
+    spc = None if species is None else np.asarray(species, dtype=np.int64)
     logW = -np.inf
     count = 0
     chosen = None
+    chosen_rows = None
     for clique in _enumerate_cliques(adj, k):
         idx = list(clique)
         wprod = float(np.prod(member_weights[idx]))
         if wprod <= 0.0:
             continue
         members = centers[idx]
-        w = wprod * _intra_lj_factor(members, box, rc, beta)
+        w = wprod * _intra_lj_factor(
+            members, box, rc, beta, None if spc is None else spc[idx], table
+        )
         if w <= 0.0:
             continue
         count += 1
@@ -465,7 +568,8 @@ def ljbranch_weight_sum(
         # probability w / W_running = exp(logw - new_logW)
         if rng is not None and (logw - new_logW) >= np.log(rng.uniform(0.0, 1.0)):
             chosen = members
+            chosen_rows = idx
         logW = new_logW
     if count == 0:
-        return -np.inf, 0, None
-    return float(logW), count, chosen
+        return -np.inf, 0, None, None
+    return float(logW), count, chosen, chosen_rows

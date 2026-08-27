@@ -246,8 +246,30 @@ class Aux3D(Potential):
         the tuple here rather than a bare array."""
         # needs_geometry contract: these are only optional in the shared base
         # signature; every geometry-aware call site supplies them.
-        assert coords is not None and idxs is not None and kdtree is not None
+        assert coords is not None and idxs is not None
         N, k = dists.shape
+        if kdtree is None:
+            # EMPTY ENVIRONMENT. `MC_engine.advance` passes `tree = cl if
+            # cl.n_active else None`, so an empty exclusion set -- no fluid left
+            # and no frozen matrix -- arrives here as None with fully padded
+            # neighbour rows. Every other weigher handles that already: an
+            # infinite distance contributes zero energy and unit weight. This one
+            # asserted instead, which is why a QA or low-density pmf run died on
+            # its first window rather than on anything to do with the auxiliary.
+            #
+            # The no-neighbour limit is not a special case of the physics, it IS
+            # the physics: this bias is a THREE-BODY factor over (r, cos theta)
+            # triplets, and with no neighbours there is no triplet. The product
+            # below runs over an empty set, and an empty product is 1.
+            #
+            # The reference neighbour is undefined, and NaN says so rather than a
+            # placeholder saying something false. Zero would be worse than
+            # undefined: `weight_pair` builds `vec_BA = ref - trial`, so a zero
+            # reference is not neutral -- it is a real direction pointing at the
+            # origin, and the per-pair recompute would apply a definite bias
+            # derived from nothing. `weight_pair` reads the NaN and takes the
+            # same no-bias branch.
+            return np.ones(N), np.full((N, coords.shape[1]), np.nan)
         box = np.array([self.side, self.side, self.side])
         n_data = kdtree.data.shape[0]
         safe = np.minimum(idxs, n_data - 1)
@@ -284,6 +306,13 @@ class Aux3D(Potential):
         assert trial_coords is not None and ref_coords is not None
         assert chosen_coord is not None
         sq = np.asarray(r, dtype=float)
+        # No reference neighbour: `weight_bulk` marks the empty-environment case
+        # with NaN. Same reasoning as there -- no triplet, so no three-body bias,
+        # so unit weight. Checked before the arithmetic because a NaN direction
+        # would otherwise reach `_interp` as a NaN (r, cos) pair.
+        no_ref = ~np.isfinite(np.atleast_2d(ref_coords)).all(axis=1)
+        if no_ref.all():
+            return np.ones(np.atleast_1d(sq).shape[0])
         vec_BA = ref_coords - trial_coords
         vec_BA -= self.side * np.round(vec_BA / self.side)
         vec_BC = chosen_coord - trial_coords
@@ -297,7 +326,8 @@ class Aux3D(Potential):
         g3 = np.where(g3 < self.min_g3, self.min_g3, g3)
         if gamma != 1.0:
             g3 = g3**gamma
-        return g3
+        # rows whose reference neighbour was undefined carry no bias
+        return np.where(no_ref, 1.0, g3)
 
     def pairwise(
         self,

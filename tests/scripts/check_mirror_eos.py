@@ -48,9 +48,10 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-from gcmc import MC_engine as engine  # noqa: E402
-from gcmc.sim_setup import from_params  # noqa: E402
-from gcmc.state import ChainState  # noqa: E402
+from gcmc import MC_engine as engine
+from gcmc import config_specs
+from gcmc.sim_setup import from_params
+from gcmc.state import ChainState
 
 BOX = 10.0
 MU = 1.0
@@ -79,10 +80,13 @@ def run(kind, *, depth=0, trials=30, side=2.0, nwin=600, win=200, seed=1):
         }
     )
     pot = cfg.build_potential()
-    weigher = engine.make_weigher(cfg, pot)
+    weigher = engine.make_weigher(config_specs.kernel_spec(cfg), pot)
     state = ChainState.fresh(2, seed=seed)
     state.positions = np.empty((0, 2))
-    series = [engine.advance(state, cfg, pot, weigher)["packing_fraction"] for _ in range(nwin)]
+    series = [
+        engine.advance(state, cfg, pot, weigher)["packing_fraction"]
+        for _ in range(nwin)
+    ]
 
     # the chain must never manufacture an overlap either
     pts = state.positions
@@ -101,10 +105,13 @@ def run(kind, *, depth=0, trials=30, side=2.0, nwin=600, win=200, seed=1):
 def main(argv):
     nwin = 2200 if (argv and argv[0] == "full") else 400
     cases = [
-        ("metropolis", dict(kind="metropolis")),
-        ("rosenbluth d1", dict(kind="rosenbluth", depth=1, trials=30, side=2.0)),
-        ("branch d1", dict(kind="branch", depth=1, trials=30, side=2.0)),
-        ("branch d2", dict(kind="branch", depth=2, trials=40, side=3.0)),
+        ("metropolis", {"kind": "metropolis"}),
+        (
+            "rosenbluth d1",
+            {"kind": "rosenbluth", "depth": 1, "trials": 30, "side": 2.0},
+        ),
+        ("branch d1", {"kind": "branch", "depth": 1, "trials": 30, "side": 2.0}),
+        ("branch d2", {"kind": "branch", "depth": 2, "trials": 40, "side": 3.0}),
     ]
     results = {}
     for label, kwargs in cases:

@@ -1,0 +1,68 @@
+# Three asymmetric species, reduced units. The test-suite model (M13).
+#
+# Three is the smallest number that catches "the second species is special"
+# bugs, so every physics gate in multispecies_plan.md runs against this file. It
+# is deliberately awkward in every axis at once:
+#
+#   sigma      all three differ, and none is 1, so nothing is silently pinned
+#   epsilon    all three differ
+#   lambda     all three differ and none is 1, so a dropped lambda moves mu
+#   p_trial    non-uniform, so a missing species-draw correction shows up as a
+#              composition that tracks p_s instead of z_s (Gate P5)
+#   k_ij       one pair weakened, one strengthened, one left at Lorentz-Berthelot
+#   symbol     species names are not element names, so the name/symbol mapping
+#              is exercised rather than accidentally trivial (P6)
+#
+# The widest pair is B-B at sigma_ij = 1.15, so the auxiliary multiplier is
+# bound by 1.6 * 1.15 = 1.84 < rc = 2.5 (M12), with margin left to raise it.
+#
+# Nothing here is transcribed from a source, so `confirmed` means only that the
+# numbers are the model's own definition rather than a copy of someone else's.
+
+schema: 2
+name: species-three-reduced
+units: reduced
+
+mixing: lorentz-berthelot-kij
+
+interaction:
+  form: lennard-jones-12-6
+  rc: 2.5
+  shifted: false
+  tail_correction: false
+
+core_floor:
+  c: 0.9
+
+aux:
+  multiplier: 1.6
+
+species:
+  status: confirmed
+  A:
+    sigma: 1.0
+    epsilon: 1.0
+    lambda: 1.0
+    p_trial: 0.4
+    symbol: Ne
+  B:
+    sigma: 1.15
+    epsilon: 0.8
+    lambda: 1.25
+    p_trial: 0.35
+    symbol: Ar
+  C:
+    sigma: 0.9
+    epsilon: 1.3
+    lambda: 0.8
+    p_trial: 0.25
+    symbol: Kr
+
+# eps_ij = (1 - k_ij) sqrt(eps_i eps_j). Positive weakens, negative strengthens,
+# absent is zero. A-C is left absent on purpose: the default path has to be
+# exercised alongside the stated one.
+k_ij:
+  A:
+    B: 0.25
+  B:
+    C: -0.15

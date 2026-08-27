@@ -21,7 +21,18 @@ from pathlib import Path
 import pytest
 
 _SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
-_ROOT = _SCRIPTS.parent.parent  # repo root (holds gcmc/, orig/)
+_ROOT = _SCRIPTS.parent.parent  # repo root (holds gcmc/, data/)
+
+# R1: the frozen original lives in tag v0-original, not in the tree. Skipping
+# HERE -- once, at module level -- is the only correct place to do it: the check
+# scripts run as SUBPROCESSES, where a skip raised inside one is just a non-zero
+# exit that this harness would report as a failure. The message carries the two
+# commands that make this module run.
+sys.path.insert(0, str(_SCRIPTS))
+from _frozen import INSTRUCTIONS, orig_root
+
+if orig_root() is None:
+    pytest.skip(INSTRUCTIONS, allow_module_level=True)
 
 _ARGV_RE = re.compile(r"ARGV\s*=\s*\{(.*?)\n\}", re.S)
 
@@ -30,11 +41,6 @@ _ARGV_RE = re.compile(r"ARGV\s*=\s*\{(.*?)\n\}", re.S)
 # tier; strict=False so a future fix reports XPASS instead of breaking the run.
 # Each reason is a standing finding recorded in modernize_plan.md.
 _KNOWN_FAIL = {
-    "check_cli.py": (
-        "launcher sweep API changed in modernization: expand_sweep no longer "
-        "expands ensemble.sweep and launch_sweep's core budget is now an int, "
-        "not a value list. check_cli still drives the old API."
-    ),
     # check_parallel's 2D-only divergence was resolved by decision, not by
     # restoring the guard: the parallel engine now supports 3D deliberately
     # (cell_unify_plan.md U0, Dipesh GO 2026-07-14). The script and

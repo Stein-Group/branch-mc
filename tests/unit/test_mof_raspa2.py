@@ -175,7 +175,9 @@ def test_two_guests_in_adjacent_channels_do_not_interact():
     second = pair["guest_framework"] - one
     assert pair["guest_framework"] == pytest.approx(one + second, rel=1e-12)
     assert second < 0  # the other channel binds too
-    assert abs(second - one) / abs(one) < 0.05  # and near-equivalently, as symmetry requires
+    assert (
+        abs(second - one) / abs(one) < 0.05
+    )  # and near-equivalently, as symmetry requires
 
 
 @pytest.mark.skipif(not HAVE_RASPA2, reason=f"no RASPA2 build at {RASPA_DIR}")

@@ -41,8 +41,10 @@ from typing import Any
 import numpy as np
 from scipy.spatial import cKDTree
 
+from . import moves
 from ._types import FloatArray, IntArray
 from .mof_field import FrameworkField
+from .potentials import overlap
 from .potentials.lj_table import LennardJonesTable
 from .potentials.pair_table import PairTable
 
@@ -111,9 +113,9 @@ def _guest_guest_energy(
     if d.size == 0:
         return 0.0, False, 0
     neigh = np.asarray(other_species, int)[idx]
-    # per-pair floor c*sigma_ij between the trial type and each neighbour's type
-    floor = table.core_floor[trial_species][neigh]
-    if (d <= floor - 1e-12).any():
+    # per-pair floor c*sigma_ij between the trial type and each neighbour's type,
+    # compared in geometry so the convention lives in exactly one place
+    if overlap.pair_overlaps(d, trial_species, neigh, table.core_floor).any():
         return 0.0, True, int(d.size)
     u = pot.total_energy(d, neighbour_types=neigh)
     return u, False, int(d.size)
@@ -173,12 +175,13 @@ def advance_metropolis_mof(
     )
 
 
-# multi-species move split (A4.2): swap is carved out of the translate budget so
-# insertion and deletion keep equal probability (the grand-canonical ratio
-# derivation below assumes P(add) == P(remove)). At one species the loop takes the
-# three-way single-species split instead, so no swap probability ever enters.
-_MS_MOVES = ["move", "add", "remove", "swap"]
-_MS_PROBS = [0.4, 0.2, 0.2, 0.2]
+# The move split now lives in gcmc/moves.py (M8), so the main engine and this
+# loop cannot drift apart on it. Re-exported under the old private names because
+# tests and the golden pin refer to them, and because the reason they are what
+# they are -- swap carved out of the translate budget so P(add) == P(remove) --
+# is documented there rather than twice.
+_MS_MOVES = moves.MS_MOVES
+_MS_PROBS = moves.MS_PROBS
 
 
 def mof_energy_decomposition(
@@ -352,10 +355,7 @@ def advance_metropolis_mof_ms(
     step = 0
     while step < window:
         N = len(pos)
-        if n_species == 1:
-            choice = rng.choice(["move", "add", "remove"], p=[0.5, 0.25, 0.25])
-        else:
-            choice = rng.choice(_MS_MOVES, p=_MS_PROBS)
+        choice = moves.draw_move(rng, n_species)
 
         # ----- translate ----- (species-agnostic selection: uniform over all N)
         if choice == "move":
@@ -416,8 +416,7 @@ def advance_metropolis_mof_ms(
                 continue
             j = int(rng.integers(N))
             s = int(spc[j])
-            others_t = [t for t in guest_types if t != s]
-            s_new = others_t[0] if len(others_t) == 1 else int(rng.choice(others_t))
+            s_new = moves.draw_swap_target(rng, s, guest_types)
             point = pos[j]
             without = np.delete(pos, j, axis=0)
             without_s = np.delete(spc, j)

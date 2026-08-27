@@ -28,6 +28,7 @@ import math
 import numpy as np
 
 from ._types import FloatArray, IntArray
+from .potentials import overlap
 from .potentials.lj_table import LennardJonesTable
 from .potentials.pair_table import PairTable
 
@@ -122,7 +123,10 @@ class FrameworkField:
             dr = cp[:, None, :] - self.pos[None, :, :]
             dr -= box * np.round(dr / box)
             d2 = np.einsum("cij,cij->ci", dr, dr)
-            thr = floor[gt, self.types] - 1e-12
+            # squared distances, so this needs the THRESHOLD rather than the
+            # verdict; geometry.overlap_radius is that threshold, applied per
+            # framework type. Same number pair_overlaps compares against.
+            thr = overlap.overlap_radius(floor[gt, self.types])
             out[c0 : c0 + len(cp)] = (d2 <= (thr * thr)[None, :]).any(axis=1)
         return out
 
@@ -151,9 +155,12 @@ class FrameworkField:
         d = _mic_dists(point, self.pos, self.box)
         if len(d) == 0:
             return False
-        floor = self.table.core_floor[int(guest_type)][self.types]
-        # geometry.OVERLAP_TOL = 1e-12; excludes strictly below the floor only
-        return bool((d <= floor - 1e-12).any())
+        # one comparison, in geometry: excludes strictly below the floor only
+        return bool(
+            overlap.pair_overlaps(
+                d, int(guest_type), self.types, self.table.core_floor
+            ).any()
+        )
 
 
 def widom_henry(

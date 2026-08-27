@@ -21,10 +21,14 @@ from scipy.spatial import cKDTree
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORK = os.path.join(HERE, "..", "..")
 sys.path.insert(0, WORK)
-ORIG = os.path.join(WORK, "orig")
-sys.path.insert(0, ORIG)
+from _frozen import add_orig_to_path
 
-from gcmc import decomposition as D
+ORIG = str(add_orig_to_path())  # R1: resolved from $ORIG_ROOT or the tag
+
+# The verbatim 2D transcript moved out of the package in S1: the engine never
+# called it, so it is test support, not shipping code. `grid_up_nd` and `Cell`
+# stayed behind in gcmc/decomposition.py, which is what the engine runs.
+import _legacy_decomposition as D
 
 # ---- build the original helpers in isolation -------------------------------
 with open(os.path.join(ORIG, "cav_n_d_3d_g3_LJ.py")) as _f:

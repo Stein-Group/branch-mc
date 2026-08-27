@@ -20,12 +20,23 @@ Test-only code, so scipy is used freely as the overlap oracle.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import _harness as H
 import numpy as np
 import pytest
 from scipy.spatial import cKDTree
 
 from gcmc import MC_engine
+
+# R1: this module's oracle is the frozen stage-A engine, which lives in tag
+# v2-engineA rather than in the tree. Skipped as a module when it is absent --
+# tier 3 does the `git worktree add` and runs these for real.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import _frozen
+
+_frozen.skip_module_without(_frozen.ENGINEA)
 
 
 # --------------------------------------------------------------- 1. invariants

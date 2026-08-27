@@ -33,6 +33,7 @@ import pytest
 from scipy.optimize import brentq
 
 from gcmc import MC_engine as engine
+from gcmc import config_specs
 from gcmc import sim_setup as config
 from gcmc.state import ChainState
 
@@ -64,7 +65,7 @@ def _run(mu: float, seed: int) -> float:
         }
     )
     pot = cfg.build_potential()
-    w = engine.make_weigher(cfg, pot)
+    w = engine.make_weigher(config_specs.kernel_spec(cfg), pot)
     st = ChainState.fresh(cfg.dimension, seed=seed)
     st.positions = np.random.default_rng(seed).uniform(0, cfg.box, size=(60, 3))
     eta = [engine.advance(st, cfg, pot, w)["packing_fraction"] for _ in range(WINDOWS)]

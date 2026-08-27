@@ -86,9 +86,7 @@ def isosteric_heat(
     return float(R_KJ_PER_MOL_K * q_st_kelvin)
 
 
-def summarize_series(
-    series: np.ndarray, n_blocks: int = 20
-) -> dict[str, float]:
+def summarize_series(series: np.ndarray, n_blocks: int = 20) -> dict[str, float]:
     """Mean + blocked stderr of the equilibrated tail, with the Geweke cut."""
     x = np.asarray(series, float)
     cut = geweke_burnin(x)

@@ -181,7 +181,9 @@ def test_gate1_table_energy_matches_ref_energy_on_a_real_config():
 
     ff = load_forcefield(FF_A)
     red = reduce_tables(ff, 298.0)
-    t = PairTable.from_reduced(red.types, red.n_guests, red.sigma_star, red.eps_star, ff.core_floor_c)
+    t = PairTable.from_reduced(
+        red.types, red.n_guests, red.sigma_star, red.eps_star, ff.core_floor_c
+    )
     xe, kr = t.index("Xe"), t.index("Kr")
 
     # a Xe-Kr pair 5.5 A apart in a large box (no periodic wrap in play)

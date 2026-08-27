@@ -81,11 +81,57 @@ _AXES = (
     # cutoff == run.upper_cutoff is the exact no-op, so one launch produces both
     # the tuning curve and the reference it must agree with.
     ("aux_cutoff", "auxiliary", "cutoff"),
+    # THE MODEL AXIS. Every other entry above is a knob of the experiment; this
+    # one sweeps the force field itself, which is what the k_ij demixing series
+    # is: `eps_ij = (1 - k_ij) sqrt(eps_i eps_j)`, and a run at a different k is
+    # a different model rather than the same model at a different setting. The
+    # species file says so itself -- "a run at a different k gets its own file
+    # rather than an override" (M1, `ff/species_binary_reduced.yaml`) -- so the
+    # sweep is over files, and the file's sha256 is already in the run identity,
+    # which is what stops two k values from ever sharing a run directory.
+    ("model", "potential", "species_file"),
+    # THE START AXIS, and it is a convergence instrument rather than a
+    # convenience. A composition at fixed mu can be trapped: measured at
+    # k_AB = 0.5, two samplers from the SAME equimolar start settled on opposite
+    # compositions and neither had converged. The only way to know is to run the
+    # same state point from opposite starts and require them to MEET (the rule
+    # S4 phase 7 wrote down for the M21 arbiter), which means the start is a
+    # swept axis of the experiment and not a fixed input to it.
+    ("start", "run", "initial_config"),
+)
+
+#: Axes whose value is a PATH. The id fragment is the file's stem rather than
+#: the path, so a run directory is `modelbinary_k0.3` and not a flattened
+#: absolute path with slashes in it.
+_FILE_AXES = (
+    ("model", "potential", "species_file"),
+    ("start", "run", "initial_config"),
 )
 
 # nested pore axes (ensemble.pore.{H,R}); handled separately since they live one
 # level deeper than the flat _AXES entries.
 _PORE_AXES = (("poreH", "H"), ("poreR", "R"))
+
+
+def _map_label(val: dict[str, Any]) -> str:
+    """Id fragment for a per-species state point: `{A: -0.05, B: 0.05}` becomes
+    `A-0.05_B0.05`.
+
+    A typed state point is a MAP, and `repr` of a dict carries braces, quotes,
+    colons and spaces -- every one of which is either illegal or awkward in a
+    directory name, and the run directory is how a human finds a run. Rendered in
+    the map's own key order, which is the species file's order, so two runs of one
+    model always render their species the same way round.
+    """
+    return "_".join(f"{k}{_fmt_num(v)}" for k, v in val.items())
+
+
+def _file_label(val: Any) -> str:
+    """Id fragment for a path-valued axis: the stem, with a leading `species_`
+    dropped because every file on that axis carries it and a prefix shared by
+    every value distinguishes nothing."""
+    stem = Path(str(val)).stem
+    return stem[len("species_") :] if stem.startswith("species_") else stem
 
 
 def _as_list(v: Any) -> list[Any]:
@@ -193,8 +239,15 @@ def expand_sweep(
             else:
                 p.setdefault(section, {})[key] = val
             if i in varying and section != "ensemble.pore":
-                shaped = (label, section, key) in _SHAPED_AXES
-                shown = _shaped_label(val) if shaped else val
+                axis = (label, section, key)
+                if axis in _SHAPED_AXES:
+                    shown = _shaped_label(val)
+                elif axis in _FILE_AXES:
+                    shown = _file_label(val)
+                elif isinstance(val, dict):
+                    shown = _map_label(val)
+                else:
+                    shown = val
                 parts.append(f"{label}{shown}")  # pore size is in the dir prefix
         lbl = "_".join(parts)
         if lbl:

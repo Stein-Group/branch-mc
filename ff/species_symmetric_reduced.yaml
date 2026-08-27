@@ -1,0 +1,70 @@
+# Two species IDENTICAL in every respect except their label. Reduced units.
+#
+# THE SYMMETRIC MIXTURE, and it exists because the asymmetric one cannot answer
+# the question it was asked. `species_binary_reduced.yaml` has eps_B = 0.8, so
+# A and B are not interchangeable, and the composition at which the two phases
+# are equally stable is some Delta-mu nobody knows without searching for it. Run
+# off that point and the box does not split -- it fills with whichever phase is
+# more stable. Measured on the cluster at k_AB = 0.5, box 20, fixed N: the
+# composition went from 50:50 to 4:96 over 810 windows and stayed there. Nothing
+# was wrong with the sampler; the state point simply was not a coexistence.
+#
+# Here A and B are the same species wearing two labels, so the A <-> B exchange
+# is an exact symmetry of the Hamiltonian. At EQUAL chemical potentials the
+# coexistence condition is therefore Delta-mu = 0 EXACTLY, by symmetry rather
+# than by search: below the demixing temperature the two coexisting phases are
+# mirror images (x and 1 - x), and a fixed-N box at x = 0.5 has to hold both.
+# That is what puts an interface in the trajectory.
+#
+# So the asymmetry lives entirely in k_AB, which is the axis P8 sweeps:
+#
+#     eps_AB = (1 - k_AB) * sqrt(eps_A * eps_B) = (1 - k_AB) * eps
+#
+# One number, one meaning. k = 0 is Lorentz-Berthelot and cannot demix at all --
+# it is one species with two names -- which makes it the experiment's null arm in
+# the strongest possible sense: any order parameter it reads is measurement
+# noise, not weak demixing.
+#
+# sigma is equal too, so nothing about the sampler's geometry can differ between
+# species: one core floor, one rod width, one auxiliary radius. Any composition
+# or structural effect has to come from the cross term.
+#
+# lambda is 1 for both, so mu means what it has always meant here. p_trial is
+# absent, hence uniform; it is a variance knob only (M6).
+#
+# Nothing here is transcribed from a source, so `confirmed` means only that the
+# numbers are the model's own definition rather than a copy of someone else's.
+
+schema: 2
+name: species-symmetric-reduced
+units: reduced
+
+mixing: lorentz-berthelot-kij
+
+interaction:
+  form: lennard-jones-12-6
+  rc: 2.5
+  shifted: false
+  tail_correction: false
+
+core_floor:
+  c: 0.9
+
+aux: none
+
+species:
+  status: confirmed
+  A:
+    sigma: 1.0
+    epsilon: 1.0
+    lambda: 1.0
+    symbol: Ar
+  B:
+    sigma: 1.0
+    epsilon: 1.0
+    lambda: 1.0
+    symbol: Kr
+
+k_ij:
+  A:
+    B: 0.0

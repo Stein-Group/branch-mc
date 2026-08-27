@@ -37,7 +37,7 @@ import concurrent.futures
 
 import numpy as np
 
-from . import decomposition, geometry, neighbors
+from . import config_specs, decomposition, geometry, neighbors
 from ._types import BoolArray
 from .MC_engine import _lj_energy, _lj_set_energy, _weighted_trials, make_weigher
 from .samplers.branch import count_and_sample
@@ -90,15 +90,47 @@ def _check_cell_list_consistency(cl, main_slots, u_main, border, origin, side, d
     )
 
 
-def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng, n_offset):
+def advance_cell(
+    main,
+    border,
+    origin,
+    n_steps,
+    kern,
+    samp,
+    pot_spec,
+    ens,
+    potential,
+    weigher,
+    rng,
+    n_offset,
+    main_species=None,
+    border_species=None,
+):
     """Advance one cell by n_steps insertion/deletion proposals.
 
     main    : (N, dim) global coordinates of the cell's live molecules
     border  : (M, dim) frozen global coordinates within `buffer` of the cell
     origin  : (dim,)  global lower corner of the cell cube
+    kern    : KernelSpec   -- the precomputed forms (beta, box_dims, r_squared)
+    samp    : SamplerSpec  -- depth, cavity, trial count, move factor
+    pot_spec: PotentialSpec -- the overlap floor, the tail flag, the pmf schedule
+    ens     : EnsembleSpec -- the state point (mu)
     n_offset: global molecule count outside this cell at window start (for the
               LJ tail, which is a system-level quantity)
     Returns (new_main_global, counters).
+
+    FOUR SUB-CONFIGS RATHER THAN `Config` (R8). `advance_parallel` still takes a
+    `Config` -- it must, because `runner` assigns it and `MC_engine.advance` to
+    the same name and calls whichever it got. It projects once, at the top, and
+    what crosses into the workers from there is these four objects.
+
+    That boundary is where the narrowing pays for itself here. Every task tuple
+    is PICKLED to a separate process, so `cfg` was not merely a wide parameter:
+    it was a whole `Config` -- species tables, matrix coordinates, IO paths --
+    serialised once per cell per window, to be read for about twenty numbers.
+    The four specs carry those numbers and nothing else, and `IOSpec` and
+    `ExecutionSpec` never cross at all, which is the structural statement that a
+    cell kernel cannot depend on where the run writes or how many cores it has.
 
     Engineering: ONE persistent `neighbors.CellList` answers every neighbour
     question for the whole cell-window, built once here and updated in place by
@@ -129,28 +161,28 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng, n_
     what keeps the list consistent on every one of the many early `continue`
     exits.
     """
-    dim = 2 if cfg.two_dim else 3
-    box = np.asarray(cfg.box_dims, dtype=np.float64)
+    dim = 2 if kern.two_dim else 3
+    box = np.asarray(kern.box_dims, dtype=np.float64)
     # per-axis box and cell length: cubic gives [L, L, L] / [Lc, Lc, Lc], so
     # every `% side`, min-image and insertion draw stays bit-identical to the old
     # scalar path; anisotropic wraps and tiles per axis.
     side = box
-    L_c = np.broadcast_to(np.asarray(cfg.cell_dims, dtype=np.float64), (dim,))
-    cav = cfg.cavity_radius
-    depth = cfg.depth
-    lower, uc, nn = cfg.lower_cutoff, cfg.upper_cutoff, cfg.no_neigh
-    beta, mu, mf = cfg.beta, cfg.chem_pot, cfg.move_factor
-    n_trials = cfg.no_of_trial_molecules
+    L_c = np.broadcast_to(np.asarray(kern.cell_dims, dtype=np.float64), (dim,))
+    cav = samp.cavity_radius
+    depth = samp.depth
+    lower, uc, nn = pot_spec.lower_cutoff, kern.upper_cutoff, kern.no_neigh
+    beta, mu, mf = kern.beta, ens.chem_pot, samp.move_factor
+    n_trials = samp.no_of_trial_molecules
     v_cell = float(np.prod(L_c))
-    ljaux = cfg.potential_type == "ljaux"
-    lj = cfg.potential_type == "lj" or ljaux
-    branch = cfg.sampler == "branch"
-    if cfg.sampler == "metropolis":
+    ljaux = kern.potential_type == "ljaux"
+    lj = kern.potential_type == "lj" or ljaux
+    branch = samp.sampler == "branch"
+    if samp.sampler == "metropolis":
         n_trials = 1
-    tail = cfg.lj_tail_pref if (lj and cfg.lj_tail_pref) else 0.0
+    tail = pot_spec.lj_tail_pref if (lj and pot_spec.lj_tail_pref) else 0.0
     # the hard-core weight is 1 for every admissible trial and reads no
     # distance, so that path may ask the query for the nearest neighbour only
-    hs_needs_dists = cfg.potential_type != "hard_sphere"
+    hs_needs_dists = kern.potential_type != "hard_sphere"
     c = zero_counters()
 
     u_main = (np.asarray(main, float).reshape(-1, dim) - origin) % side
@@ -164,10 +196,14 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng, n_
     # `lower` is never larger), matching the serial engine's choice.
     n_total = len(u_main) + len(border)
     cl = neighbors.CellList(side, dim, uc, capacity=max(2 * n_total, n_total + 256, 16))
+    # Species travel with the coordinates into the list, exactly as in the serial
+    # engine, so the worker's reorderings cannot scramble them. None means single
+    # species and the list reads type 0 everywhere, which is what it read before
+    # the column existed.
     if len(border):
-        cl.bulk_insert(border)
+        cl.bulk_insert(border, species=border_species)
     main_slots = (
-        cl.bulk_insert(to_global(u_main))
+        cl.bulk_insert(to_global(u_main), species=main_species)
         if len(u_main)
         else np.empty(0, dtype=np.int64)
     )
@@ -387,7 +423,7 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng, n_
                     km = np.empty(0, dtype=bool)
                 else:
                     trial_set, km = _weighted_trials(
-                        raw, cl, cfg, potential, choice, N + n_offset
+                        raw, cl, kern, pot_spec, ens, potential, choice, N + n_offset
                     )
 
                 # removed molecule's own weight
@@ -395,7 +431,14 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng, n_
                     if raw_in is None:
                         continue
                     mol_in_cav, _ = _weighted_trials(
-                        raw_in, cl, cfg, potential, choice, N + n_offset
+                        raw_in,
+                        cl,
+                        kern,
+                        pot_spec,
+                        ens,
+                        potential,
+                        choice,
+                        N + n_offset,
                     )
                     if len(mol_in_cav) != n_remove:
                         continue
@@ -436,8 +479,8 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng, n_
                         weigher,
                         rand=lambda: rng.uniform(0, 1),
                         side=side,
-                        r_squared=cfg.r_squared,
-                        gamma_schedule=cfg.gamma_dict,
+                        r_squared=kern.r_squared,
+                        gamma_schedule=pot_spec.gamma_dict,
                     )
                     if chosen is None or sum_new_arr is None:
                         continue
@@ -475,8 +518,8 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng, n_
                         n_remove,
                         weigher,
                         side=side,
-                        r_squared=cfg.r_squared,
-                        gamma_schedule=cfg.gamma_dict,
+                        r_squared=kern.r_squared,
+                        gamma_schedule=pot_spec.gamma_dict,
                     )
                     sum_current = np.sum(np.log(s_arr))
                     e_u_r_current = np.sum(np.log(e_arr))
@@ -564,7 +607,15 @@ def advance_cell(main, border, origin, n_steps, cfg, potential, weigher, rng, n_
                     cl, main_slots, u_main, border, origin, side, dim
                 )
 
-    return to_global(u_main) if len(u_main) else np.empty((0, dim)), c
+    # The surviving interior, and its species read from the SAME slots, so the two
+    # cannot come apart on the way back to the parent. None in, None out: a
+    # single-species run's return value is what it always was.
+    out_main = to_global(u_main) if len(u_main) else np.empty((0, dim))
+    if main_species is None and border_species is None:
+        out_species = None
+    else:
+        out_species = np.asarray(cl.species[main_slots], dtype=np.int64)
+    return out_main, c, out_species
 
 
 def _run_cell(args):
@@ -572,62 +623,162 @@ def _run_cell(args):
     build the per-cell rng and weigher, run `advance_cell` on this cell's
     interior particles with its frozen border, and return the updated
     interior plus counters."""
-    main, border, origin, n_steps, cfg, potential, n_offset, seed = args
+    (
+        main,
+        border,
+        origin,
+        n_steps,
+        kern,
+        samp,
+        pot_spec,
+        ens,
+        potential,
+        n_offset,
+        seed,
+        main_species,
+        border_species,
+    ) = args
     rng = np.random.default_rng(seed)
-    weigher = make_weigher(cfg, potential)
+    weigher = make_weigher(kern, potential)
     return advance_cell(
-        main, border, origin, n_steps, cfg, potential, weigher, rng, n_offset
+        main,
+        border,
+        origin,
+        n_steps,
+        kern,
+        samp,
+        pot_spec,
+        ens,
+        potential,
+        weigher,
+        rng,
+        n_offset,
+        main_species,
+        border_species,
     )
 
 
 def advance_parallel(state, cfg, potential, weigher):
-    """Advance one window by domain decomposition (2D or 3D)."""
-    if cfg.sampler not in ("rosenbluth", "branch", "metropolis"):
+    """Advance one window by domain decomposition (2D or 3D).
+
+    Keeps `Config` in its signature, deliberately: `runner` binds this or
+    `MC_engine.advance` to the same name and calls whichever it bound, so the
+    two must agree. This is the projection boundary -- `cfg` is read here and
+    nowhere below, and the cells receive sub-configs.
+    """
+    kern = config_specs.kernel_spec(cfg)
+    samp = config_specs.sampler_spec(cfg)
+    pot_spec = config_specs.potential_spec(cfg)
+    ens = config_specs.ensemble_spec(cfg)
+    exe = config_specs.execution_spec(cfg)
+    io_ = config_specs.io_spec(cfg)
+
+    if samp.sampler not in ("rosenbluth", "branch", "metropolis"):
         raise NotImplementedError(
-            f"parallel supports metropolis, rosenbluth, and branch; got {cfg.sampler!r}"
+            "parallel supports metropolis, rosenbluth, and branch; "
+            f"got {samp.sampler!r}"
         )
-    dim = 2 if cfg.two_dim else 3
+    dim = 2 if kern.two_dim else 3
     rng = state.rng
     pos = np.asarray(state.positions, float).reshape(-1, dim)
     n_global = len(pos)
+    # THIS KERNEL IS SINGLE-SPECIES, AND IT SAYS SO RATHER THAN PRETENDING.
+    #
+    # Nothing in this module draws a species, proposes an identity swap or reads
+    # a per-pair sigma -- grep it. So a typed run through here inserts everything
+    # as the first species and produces a perfectly valid single-species chain at
+    # that species' activity, which is why it reported PASS in the feature matrix
+    # while answering a different question from the one asked. Measured on a
+    # three-species request at box 16: N grew 453 -> 788 over four windows with
+    # composition (N, 0, 0) throughout.
+    #
+    # `sim_setup` refuses the combination (search: "not multi-species yet (P7)"),
+    # so this is unreachable through a config. It is stated here anyway because a
+    # test or a script can call `advance_parallel` directly, and the failure it
+    # would get otherwise is a plausible number rather than an error.
+    #
+    # What P7 adds is the CELL KERNEL. The plumbing is already here: `grid_up_nd`
+    # splits a species column, the reassembly below puts it back, and S4 fixed
+    # the writeback that used to drop it whenever the caller had not supplied one.
+    if kern.n_species > 1:
+        raise NotImplementedError(
+            f"advance_parallel is single-species; this config has "
+            f"{kern.n_species}. The cell kernel draws no species and proposes no "
+            "identity swap, so the run would silently sample species 0 only. "
+            "P7 is the stage that wires it; sim_setup refuses the combination."
+        )
 
-    cells, rest = decomposition.grid_up_nd(
-        pos, cfg.box_dims, cfg.cell_dims, cfg.buffer, rng, dim, n_ax=cfg.cell_counts
+    cells, rest, rest_species = decomposition.grid_up_nd(
+        pos,
+        kern.box_dims,
+        kern.cell_dims,
+        exe.buffer,
+        rng,
+        dim,
+        n_ax=exe.cell_counts,
+        species=state.species,
     )
-    n_steps = cfg.sampling_window
+    n_steps = io_.sampling_window
     seeds = rng.integers(0, 2**31 - 1, size=len(cells))
     tasks = [
         (
-            cell[0],
-            cell[1],
-            cell[2],
+            cell.main,
+            cell.border,
+            cell.origin,
             n_steps,
-            cfg,
+            kern,
+            samp,
+            pot_spec,
+            ens,
             potential,
-            n_global - len(cell[0]),
+            n_global - len(cell.main),
             int(s),
+            cell.main_species,
+            cell.border_species,
         )
         for cell, s in zip(cells, seeds)
     ]
 
     total = zero_counters()
     new_mains = []
-    if cfg.n_workers > 1 and len(tasks) > 1 and not IN_PROCESS:
-        with concurrent.futures.ProcessPoolExecutor(max_workers=cfg.n_workers) as ex:
+    new_species = []
+    if exe.n_workers > 1 and len(tasks) > 1 and not IN_PROCESS:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=exe.n_workers) as ex:
             results = list(ex.map(_run_cell, tasks))
     else:
         results = [_run_cell(t) for t in tasks]
-    for new_main, counters in results:
+    for new_main, counters, cell_species in results:
         new_mains.append(new_main)
+        new_species.append(cell_species)
         for k in total:
             total[k] += counters[k]
 
-    parts = [m for m in new_mains if len(m)] + ([rest] if len(rest) else [])
+    # Reassembly: the species column is concatenated in the SAME cell order as the
+    # coordinates, with `rest` last, so a molecule's type follows its coordinates
+    # through the round trip. Cells contributing no molecules are skipped on both
+    # sides together, which is why the two comprehensions share the `len(m)` test
+    # rather than each filtering independently.
+    kept = [(m, sp) for m, sp in zip(new_mains, new_species) if len(m)]
+    parts = [m for m, _ in kept] + ([rest] if len(rest) else [])
     pos = np.vstack(parts) if parts else np.empty((0, dim))
 
+    if state.species is None:
+        spc = None
+    else:
+        spc_parts = [
+            sp if sp is not None else np.zeros(len(m), dtype=np.int64) for m, sp in kept
+        ] + ([rest_species] if len(rest) else [])
+        spc = np.concatenate(spc_parts) if spc_parts else np.empty(0, dtype=np.int64)
+        if len(spc) != len(pos):
+            raise AssertionError(
+                f"decomposition lost species: {len(spc)} types for {len(pos)} "
+                "molecules after reassembly"
+            )
+
     state.positions = pos
-    state.step += cfg.sampling_window * max(1, len(cells))
-    packing = (len(pos) * cfg.volume_of_molecule) / cfg.total_volume
+    state.species = spc
+    state.step += io_.sampling_window * max(1, len(cells))
+    packing = (len(pos) * pot_spec.volume_of_molecule) / kern.total_volume
     return {
         "N": len(pos),
         "packing_fraction": packing,

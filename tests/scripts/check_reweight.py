@@ -21,8 +21,11 @@ from scipy.spatial import cKDTree
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORK = os.path.join(HERE, "..", "..")
-ORIG = os.path.join(WORK, "orig")
+from _frozen import add_orig_to_path
+
+ORIG = str(add_orig_to_path())  # R1: resolved from $ORIG_ROOT or the tag
 sys.path.insert(0, WORK)
+from gcmc import config_specs
 from gcmc.samplers import reweighting as RW
 
 
@@ -137,7 +140,7 @@ cfg = config.from_params(
 )
 assert cfg.box == orig.side_of_box, "box mismatch between engine and original"
 pot = cfg.build_potential()
-w = engine.make_weigher(cfg, pot)
+w = engine.make_weigher(config_specs.kernel_spec(cfg), pot)
 st = ChainState.fresh(2, seed=12345)
 st.positions = seed_config(300, cfg.box, 2)
 me = np.array(

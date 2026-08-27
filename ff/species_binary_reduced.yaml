@@ -1,0 +1,55 @@
+# Two species of the SAME size, different well depths. Reduced units.
+#
+# This is the first production model, and it is deliberately the easiest
+# possible mixture to reason about: sigma_A = sigma_B = 1, so sigma_ij = 1 for
+# every pair, the core floor c*sigma_ij is one number, the channel rod geometry
+# is identical for both species, and the auxiliary cutoff is identical for both
+# species. Nothing about the sampler's geometry can differ between species, so
+# any composition or density effect has to come from the energetics.
+#
+# The asymmetry is therefore entirely in epsilon and in the cross term. k_AB is
+# the axis P8 sweeps: this file is the Lorentz-Berthelot anchor at k = 0, and a
+# run at a different k is a different model, so it gets its own file rather than
+# an override. The run fingerprint carries this file's hash, so the two can never
+# be confused after the fact.
+#
+# lambda is 1 for both, so mu means what it has always meant here. p_trial is
+# absent, hence uniform; it is a variance knob only (M6) and P5 measures the
+# composition's independence of it.
+#
+# Nothing here is transcribed from a source, so `confirmed` means only that the
+# numbers are the model's own definition rather than a copy of someone else's.
+
+schema: 2
+name: species-binary-reduced
+units: reduced
+
+mixing: lorentz-berthelot-kij
+
+interaction:
+  form: lennard-jones-12-6
+  rc: 2.5
+  shifted: false
+  tail_correction: false
+
+core_floor:
+  c: 0.9
+
+aux: none
+
+species:
+  status: confirmed
+  A:
+    sigma: 1.0
+    epsilon: 1.0
+    lambda: 1.0
+    symbol: Ar
+  B:
+    sigma: 1.0
+    epsilon: 0.8
+    lambda: 1.0
+    symbol: Kr
+
+k_ij:
+  A:
+    B: 0.0

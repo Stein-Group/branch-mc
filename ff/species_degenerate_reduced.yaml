@@ -1,0 +1,66 @@
+# THE ARBITER'S MODEL (M21). Three species that are physically indistinguishable,
+# proposed at very uneven rates.
+#
+# This file exists to make one measurement, and every number in it is chosen to
+# make that measurement discriminating rather than to describe a real mixture.
+#
+#   sigma, epsilon    IDENTICAL across all three, so no pair interacts
+#                     differently from any other
+#   lambda            IDENTICAL, so the mu -> z reduction gives all three the
+#                     same activity and no species is thermodynamically favoured
+#   k_ij              absent everywhere, so the Lorentz-Berthelot default applies
+#                     uniformly and cannot break the symmetry
+#   p_trial           0.7 / 0.2 / 0.1 -- as far from uniform as is reasonable
+#
+# The mixture is therefore ONE species wearing three labels. Its stationary
+# composition MUST be uniform, x_s = 1/3, for any p_trial whatsoever, because
+# p_trial is a proposal knob (M6) and a proposal knob cannot move an equilibrium
+# distribution. That is the whole experiment:
+#
+#     correct bookkeeping        ->  x_s = 1/3 within the binomial band
+#     p_s charged per insertion  ->  x_s tracks p_trial, and the discrepancy
+#     (no M21 correction)            grows with how skewed p_trial is
+#
+# Two candidate answers, cleanly separated, with the energies identical by
+# construction so that nothing but the species terms can produce a deviation.
+# That isolation is the point: if the composition comes out wrong here, the fault
+# is in the bookkeeping and cannot be in the activities or the force field.
+#
+# Do NOT reuse this file for anything else. A degenerate mixture is a useless
+# physical model and a perfect instrument.
+
+schema: 2
+name: species-degenerate-reduced
+units: reduced
+
+mixing: lorentz-berthelot-kij
+
+interaction:
+  form: lennard-jones-12-6
+  rc: 2.5
+  shifted: false
+  tail_correction: false
+
+core_floor:
+  c: 0.9
+
+species:
+  status: confirmed
+  A:
+    sigma: 1.0
+    epsilon: 1.0
+    lambda: 1.0
+    p_trial: 0.7
+    symbol: Ne
+  B:
+    sigma: 1.0
+    epsilon: 1.0
+    lambda: 1.0
+    p_trial: 0.2
+    symbol: Ar
+  C:
+    sigma: 1.0
+    epsilon: 1.0
+    lambda: 1.0
+    p_trial: 0.1
+    symbol: Kr

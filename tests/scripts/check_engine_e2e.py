@@ -20,7 +20,9 @@ import numpy as np
 MODE = sys.argv[1]
 MC = int(float(sys.argv[2]))
 HERE = os.path.dirname(os.path.abspath(__file__))
-ORIG = os.path.join(HERE, "..", "..", "orig")
+from _frozen import add_orig_to_path
+
+ORIG = str(add_orig_to_path())  # R1: resolved from $ORIG_ROOT or the tag
 G3 = os.path.join(ORIG, "g3_analysis_data.csv")
 
 ARGV = {
@@ -138,7 +140,6 @@ def seed_config(n, box, dim, seed=999):
 
 # ---- original ----
 sys.argv = ["orig"] + ARGV[MODE]
-sys.path.insert(0, ORIG)
 workdir = tempfile.mkdtemp()
 os.chdir(workdir)
 # aux reads g3_analysis_data.csv from the working directory (3D only, but the
@@ -160,12 +161,13 @@ orig_eta = data[:, 1]
 # ---- engine ----
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
 from gcmc import MC_engine as engine
+from gcmc import config_specs
 from gcmc import sim_setup as config
 from gcmc.state import ChainState
 
 cfg = config.from_params(PARAMS[MODE])
 pot = cfg.build_potential()
-w = engine.make_weigher(cfg, pot)
+w = engine.make_weigher(config_specs.kernel_spec(cfg), pot)
 st = ChainState.fresh(cfg.dimension, seed=12345)
 st.positions = seed_config(SEED_N[MODE], cfg.box, cfg.dimension)
 n_windows = MC // cfg.sampling_window

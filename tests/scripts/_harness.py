@@ -19,7 +19,7 @@ sys.path.insert(
     0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
 
-from gcmc import MC_engine, sim_setup
+from gcmc import MC_engine, config_specs, sim_setup
 from gcmc.state import ChainState
 
 REF = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ref")
@@ -27,19 +27,34 @@ REF = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
 # Frozen engines, for benchmarking against the current one in the same process.
 # The container's clock drifts between runs, so a speedup measured against a
 # stored number is not a measurement; measured back to back, it is.
+import _frozen
+
 ENGINES = {"current": "gcmc", "stageA": "gcmcA", "baseline": "gcmc0"}
 
 
+#: Which tagged artifact each frozen engine name lives in (R1). The packages
+#: themselves are no longer in the tree; only their trajectories are.
+_FROZEN = {"gcmcA": _frozen.ENGINEA, "gcmc0": _frozen.ENGINE0}
+
+
 def load_engine(name):
-    """(sim_setup, MC_engine, ChainState) of a frozen or current package."""
+    """(sim_setup, MC_engine, ChainState) of a frozen or current package.
+
+    A frozen engine is retrieved from its tag rather than the tree. Callers that
+    cannot tolerate a skip should check `_frozen.root(...)` first; everything in
+    the characterisation tier is skipped as a module when the artifact is absent.
+
+    Raises
+    ------
+    _frozen.OrigUnavailable
+        If the named engine's worktree is not available, carrying the two
+        commands that would create it.
+    """
     import importlib
 
     pkg = ENGINES[name]
     if pkg != "gcmc":
-        d = {"gcmcA": "engineA", "gcmc0": "engine0"}[pkg]
-        path = os.path.join(REF, d)
-        if path not in sys.path:
-            sys.path.insert(0, path)
+        _frozen.add_to_path(_FROZEN[pkg])
     importlib.import_module(pkg)
     return (
         importlib.import_module(pkg + ".sim_setup"),
@@ -76,14 +91,59 @@ def cs_mu(rho, radius=0.5):
     return math.log(rho) + mu_ex
 
 
+def _back_translate(params):
+    """Rewrite params into the config surface a FROZEN engine understands.
+
+    A frozen engine is a fixed build of the package from a tag. It cannot parse
+    a config key introduced after it was frozen, so any change to the config
+    surface would otherwise silently break every parity oracle -- and the
+    failure looks like a physics regression, which is the worst possible
+    disguise for a spelling change.
+
+    So surface changes are declared HERE, one entry each, and the frozen engine
+    is handed the spelling it knows. The comparison stays honest because only
+    the spelling is translated: both engines run the same Hamiltonian, the same
+    move set and the same seed.
+
+    An entry may only ever be a RENAME. If a change alters what the engine
+    computes, the oracle must be regenerated rather than translated, and the
+    commit must say so.
+
+    Entries
+    -------
+    R16 (2026-08)
+        The cyclic wall-to-wall rod became `sampler.type = "channel_cyclic"`.
+        Before that it was `sampler.type = "channel"` plus a string
+        `channel_length`. Identical Config apart from the `sampler` string,
+        hence identical chain.
+
+        The emitted spelling is "full", NOT "cyclic". engineA accepts only
+        ("full", "box", "full_box", "span") -- "cyclic" was added later, as the
+        preferred name, and a frozen engine has no idea it exists. This is the
+        general rule for this function: translate into the vocabulary the
+        FROZEN engine had, which is not necessarily the most recent spelling
+        the current engine deprecated.
+    """
+    import copy
+
+    out = copy.deepcopy(params)
+    smp = out.get("sampler", {})
+    if smp.get("type") == "channel_cyclic":
+        smp["type"] = "channel"
+        smp["channel_length"] = "full"
+    return out
+
+
 def build(params, seed, positions=None, matrix=None, engine=None):
     """cfg / potential / weigher / state for a params dict."""
     ss, eng, CS = (sim_setup, MC_engine, ChainState) if engine is None else engine
+    if engine is not None:
+        params = _back_translate(params)
     cfg = ss.from_params(params)
     if matrix is not None:
         cfg = dataclasses.replace(cfg, matrix_positions=np.asarray(matrix, float))
     pot = cfg.build_potential()
-    wgh = eng.make_weigher(cfg, pot)
+    wgh = eng.make_weigher(config_specs.kernel_spec(cfg), pot)
     st = CS.fresh(cfg.dimension, seed=seed)
     if positions is not None:
         st.positions = np.asarray(positions, float)
@@ -149,10 +209,14 @@ REF_MODES = {
         "params": _p(
             _HS,
             {
-                "type": "channel",
+                "type": "channel_cyclic",
                 "depth": 1,
                 "trial_density": 1.0,
-                "channel_length": "full",
+                # R16: this mode was always the CYCLIC wall-to-wall rod --
+                # "full" was one of five aliases for it. The mode name and the
+                # frozen trajectory are unchanged; only the spelling that
+                # selects it is. The Config it builds is identical apart from
+                # `sampler`, so the chain and the npz oracle still match.
                 "channel_width": 1.5,
             },
             {"mu": 3.0, "dimension": 3, "box": 12.0},
@@ -217,10 +281,14 @@ REF_MODES = {
         "params": _p(
             _LJ,
             {
-                "type": "channel",
+                "type": "channel_cyclic",
                 "depth": 1,
                 "trial_density": 0.6,
-                "channel_length": "full",
+                # R16: this mode was always the CYCLIC wall-to-wall rod --
+                # "full" was one of five aliases for it. The mode name and the
+                # frozen trajectory are unchanged; only the spelling that
+                # selects it is. The Config it builds is identical apart from
+                # `sampler`, so the chain and the npz oracle still match.
                 "channel_width": 1.2,
             },
             {"mu": -3.2, "dimension": 3, "box": 12.0},

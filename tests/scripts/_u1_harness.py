@@ -16,7 +16,7 @@ import time
 
 import numpy as np
 
-from gcmc import parallel
+from gcmc import config_specs, parallel
 from gcmc.sim_setup import from_params
 
 # One cell is one core, so cfg.n_workers is the cell count; without this
@@ -115,7 +115,7 @@ def _one_cell(label, seed=12345):
     once. Returns (final_global_positions, counters_tuple)."""
     cfg = from_params(_CASES[label])
     pot = cfg.build_potential()
-    weigher = parallel.make_weigher(cfg, pot)
+    weigher = parallel.make_weigher(config_specs.kernel_spec(cfg), pot)
     dim = 2
     L_c = cfg.cell_length
     rng_geom = np.random.default_rng(seed)
@@ -133,12 +133,15 @@ def _one_cell(label, seed=12345):
             b.append(p)
     border = np.array(b)
     rng = np.random.default_rng(777)
-    out, c = parallel.advance_cell(
+    out, c, _species = parallel.advance_cell(
         main,
         border,
         origin,
         cfg.sampling_window,
-        cfg,
+        config_specs.kernel_spec(cfg),
+        config_specs.sampler_spec(cfg),
+        config_specs.potential_spec(cfg),
+        config_specs.ensemble_spec(cfg),
         pot,
         weigher,
         rng,

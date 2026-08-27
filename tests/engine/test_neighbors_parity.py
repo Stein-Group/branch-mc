@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from scipy.spatial import cKDTree
 
-from gcmc import MC_engine, sim_setup
+from gcmc import MC_engine, config_specs, sim_setup
 from gcmc.neighbors import CellList
 
 
@@ -247,8 +247,17 @@ def test_weights_are_identical_from_either_container(name):
         pytest.skip("no admissible trial")
     assert np.array_equal(raw_kd[0], raw_cl[0]), "surviving trials differ"
 
-    ts_kd, _ = MC_engine._weighted_trials(raw_kd, tree, cfg, pot, "add", len(P), len(P))
-    ts_cl, _ = MC_engine._weighted_trials(raw_cl, cl, cfg, pot, "add", len(P), len(P))
+    specs = (
+        config_specs.kernel_spec(cfg),
+        config_specs.potential_spec(cfg),
+        config_specs.ensemble_spec(cfg),
+    )
+    ts_kd, _ = MC_engine._weighted_trials(
+        raw_kd, tree, *specs, pot, "add", len(P), len(P)
+    )
+    ts_cl, _ = MC_engine._weighted_trials(
+        raw_cl, cl, *specs, pot, "add", len(P), len(P)
+    )
     assert np.array_equal(ts_kd.energy_weight, ts_cl.energy_weight)
     if name == "reweight":
         assert np.array_equal(ts_kd.cossum, ts_cl.cossum)
@@ -272,13 +281,23 @@ def test_hard_sphere_weight_pair_never_sees_a_padded_2d_array():
         }
     )
     pot = cfg.build_potential()
-    assert isinstance(MC_engine.make_weigher(cfg, pot), UniformWeigher)
+    assert isinstance(
+        MC_engine.make_weigher(config_specs.kernel_spec(cfg), pot), UniformWeigher
+    )
 
     coords = np.zeros((4, 3))
     dists = np.array([[1.2, np.inf], [1.4, 2.0], [np.inf, np.inf], [1.1, 1.9]])
     idxs = np.zeros((4, 2), dtype=int)
     ts, _ = MC_engine._weighted_trials(
-        (coords, dists, idxs, None), None, cfg, pot, "add", 4, 4
+        (coords, dists, idxs, None, None),
+        None,
+        config_specs.kernel_spec(cfg),
+        config_specs.potential_spec(cfg),
+        config_specs.ensemble_spec(cfg),
+        pot,
+        "add",
+        4,
+        4,
     )
     assert np.array_equal(ts.energy_weight, np.ones(4))
 

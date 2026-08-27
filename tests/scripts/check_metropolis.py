@@ -17,6 +17,7 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
 from gcmc import MC_engine as engine
+from gcmc import config_specs
 from gcmc.sim_setup import from_params
 from gcmc.state import ChainState
 
@@ -31,7 +32,7 @@ def mean_N(mu, box, dim, radius, nwin=60, tail=25, seed=1, n0=None):
         }
     )
     pot = c.build_potential()
-    w = engine.make_weigher(c, pot)
+    w = engine.make_weigher(config_specs.kernel_spec(c), pot)
     st = ChainState.fresh(dim, seed=seed)
     n0 = n0 if n0 is not None else max(1, int(0.5 * c.total_volume * math.exp(mu)))
     st.positions = np.random.default_rng(seed + 1).uniform(0, box, size=(n0, dim))

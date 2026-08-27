@@ -21,7 +21,7 @@ import math
 import numpy as np
 import pytest
 
-from gcmc import MC_engine, sim_setup
+from gcmc import MC_engine, config_specs, sim_setup
 from gcmc.state import ChainState
 
 # Slow tier: every test here measures an occupancy ratio P(N=0)/P(N=1) by long
@@ -46,7 +46,7 @@ def _sample_pn(sampler_block, steps=N_STEPS, seed=1):
     }
     cfg = sim_setup.from_params(p)
     pot = cfg.build_potential()
-    w = MC_engine.make_weigher(cfg, pot)
+    w = MC_engine.make_weigher(config_specs.kernel_spec(cfg), pot)
     st = ChainState.fresh(DIM, seed=seed)
     st.positions = np.empty((0, DIM))
     counts = {}
@@ -94,10 +94,14 @@ def test_branch_n0_ratio():
 # through the periodic boundary. P0/P1 is a property of the equilibrium
 # distribution alone, so it holds for any move obeying detailed balance: it is the
 # sharpest cheap test that the seam is neither double counted nor dropped.
+# R16: the rod kind comes from the SAMPLER, not from a length. This block said
+# `type: "channel"` with `channel_length: "full"`, which `from_params` has
+# refused since R16 landed -- so both tests below have been erroring, not
+# failing on physics, ever since. Nothing noticed because the slow suite had
+# never been run against this tree.
 _FULL_SPAN = {
-    "type": "channel",
+    "type": "channel_cyclic",
     "trial_density": 2.5,
-    "channel_length": "full",
     "channel_width": 1.0,
 }
 

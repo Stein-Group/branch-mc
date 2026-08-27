@@ -1,0 +1,38 @@
+# The frozen single-species case, written as a species file (M3).
+#
+# This is the reduction anchor. One species at sigma = epsilon = lambda = 1 in a
+# reduced file must give a PairTable whose table_pair_energy_sq is bit-identical
+# to the locked lj_pair_energy_sq, and must drive the typed engine down chains
+# that reproduce the frozen characterisation trajectories bit for bit (Gate P3).
+# If anything in the typed path ever disagrees with the untyped path, this file
+# is how the disagreement is localised.
+#
+# Nothing here is transcribed from a source, so `confirmed` means only that the
+# numbers are the model's own definition rather than a copy of someone else's.
+
+schema: 2
+name: species-one-reduced
+units: reduced
+
+mixing: lorentz-berthelot
+
+interaction:
+  form: lennard-jones-12-6
+  rc: 2.5
+  shifted: false
+  tail_correction: false
+
+# c * sigma_ij is the per-pair overlap floor. 0.9 is the engine's long-standing
+# run.lower_cutoff default at one species, so the typed and untyped paths meet.
+core_floor:
+  c: 0.9
+
+aux: none
+
+species:
+  status: confirmed
+  A:
+    sigma: 1.0
+    epsilon: 1.0
+    lambda: 1.0
+    symbol: Ne
