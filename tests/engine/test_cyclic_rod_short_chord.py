@@ -31,7 +31,8 @@ import _harness as H
 import numpy as np
 import pytest
 
-from gcmc import MC_engine, channel_move
+from gcmc.engine import MC_engine
+from gcmc.proposals import channel_move
 
 _BOX = 12.0
 

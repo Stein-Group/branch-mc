@@ -19,8 +19,10 @@ sys.path.insert(
     0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
 
-from gcmc import MC_engine, config_specs, sim_setup
-from gcmc.state import ChainState
+from gcmc import config_specs
+from gcmc.engine import MC_engine
+from gcmc.run import sim_setup
+from gcmc.system.state import ChainState
 
 REF = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ref")
 

@@ -37,7 +37,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gcmc.moves import species_draw_correction
+from gcmc.proposals.moves import species_draw_correction
 
 # --------------------------------------------------------------- the arbiter
 #
@@ -135,8 +135,11 @@ def _composition(
     mu: float = -0.5,
 ) -> tuple[np.ndarray, float]:
     """Mean composition over the last half of a swap-free degenerate run."""
-    from gcmc import MC_engine, config_specs, moves, sim_setup
-    from gcmc.state import ChainState
+    from gcmc import config_specs
+    from gcmc.engine import MC_engine
+    from gcmc.proposals import moves
+    from gcmc.run import sim_setup
+    from gcmc.system.state import ChainState
 
     def no_swap(rng, _n_species):
         """The three-way split whatever the species count: swap suppressed."""

@@ -12,13 +12,13 @@ from ase.io import read as ase_read
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
-from gcmc import io
+from gcmc.run import io
 
 
 def paths_in(d):
     # the real dataclass (str fields are coerced to Path in __post_init__),
     # so this harness exercises the exact object the runner hands to io
-    from gcmc.hash_fingerprint import RunPaths
+    from gcmc.run.hash_fingerprint import RunPaths
 
     return RunPaths(
         directory=d,

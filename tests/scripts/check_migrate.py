@@ -10,9 +10,9 @@ import tempfile
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-from gcmc import hash_fingerprint as identity
-from gcmc import io, migrate, runner
-from gcmc import sim_setup as config
+from gcmc.run import hash_fingerprint as identity
+from gcmc.run import io, migrate, runner
+from gcmc.run import sim_setup as config
 
 
 def make_legacy(path, positions3d, side, *, mu, cav, k, mc_cycle, two_dim, aux):

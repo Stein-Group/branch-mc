@@ -44,9 +44,9 @@ import math
 import numpy as np
 import pytest
 
-from gcmc import io as gio
-from gcmc import runner
-from gcmc.species_file import load_forcefield
+from gcmc.forcefield.species_file import load_forcefield
+from gcmc.run import io as gio
+from gcmc.run import runner
 
 pytestmark = pytest.mark.slow
 
@@ -100,7 +100,7 @@ def _run_arm(tmp_path, tag: str, comp, mu: dict[str, float]) -> np.ndarray:
             "channel_length": 3.0,
         },
         "ensemble": {
-            "type": "NVT",
+            "type": "semigrand",
             "dimension": 3,
             "box": BOX,
             "N": n,

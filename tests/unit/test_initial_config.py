@@ -15,7 +15,7 @@ import tempfile
 
 import numpy as np
 
-from gcmc import io, runner, sim_setup
+from gcmc.run import io, runner, sim_setup
 
 
 def _write_extxyz(path, pts, L):

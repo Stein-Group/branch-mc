@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from gcmc import io
-from gcmc.state import ChainState, zero_counters
+from gcmc.run import io
+from gcmc.system.state import ChainState, zero_counters
 
 
 def _paths(tmp_path):

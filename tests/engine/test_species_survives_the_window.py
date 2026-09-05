@@ -40,8 +40,9 @@ import numpy as np
 import pytest
 import yaml
 
-from gcmc import MC_engine, moves
-from gcmc.state import ChainState
+from gcmc.engine import MC_engine
+from gcmc.proposals import moves
+from gcmc.system.state import ChainState
 
 _SPECIES_FF = Path(__file__).resolve().parents[2] / "ff" / "species_three_reduced.yaml"
 _BOX = 12.0

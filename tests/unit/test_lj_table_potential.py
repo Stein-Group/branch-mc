@@ -13,10 +13,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gcmc.potentials import make_potential
-from gcmc.potentials.lennard_jones import LennardJones
-from gcmc.potentials.lj_table import LennardJonesTable
-from gcmc.potentials.pair_table import PairTable
+from gcmc.forcefield import make_potential
+from gcmc.forcefield.lennard_jones import LennardJones
+from gcmc.forcefield.lj_table import LennardJonesTable
+from gcmc.forcefield.pair_table import PairTable
 
 
 def _unit_table() -> PairTable:
@@ -69,7 +69,7 @@ def test_total_energy_matches_the_engine_lj_energy():
     """`total_energy` is the table analogue of the engine's `_lj_energy`; at one
     type it returns the same float. Compared here against the same operations the
     engine does: sum of lj_pair_energy over 0 < r < rc."""
-    from gcmc.potentials.lennard_jones import lj_pair_energy
+    from gcmc.forcefield.lennard_jones import lj_pair_energy
 
     _, table = _both()
     d = np.array([0.0, 0.97, 1.3, 2.0, 2.5, 3.1])  # includes a self-pair and beyond-rc

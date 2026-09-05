@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from gcmc import io
-from gcmc.sim_setup import from_params
+from gcmc.run import io
+from gcmc.run.sim_setup import from_params
 
 
 class FakeClock:
@@ -152,7 +152,7 @@ def test_a_negative_interval_is_refused_with_both_numbers():
 def test_the_interval_does_not_move_the_run_identity():
     """It is an execution knob, not physics: two runs differing only in flush
     cadence must share a run directory."""
-    from gcmc.hash_fingerprint import run_id
+    from gcmc.run.hash_fingerprint import run_id
 
     assert run_id(from_params(_p({}))) == run_id(
         from_params(_p({"log_flush_interval": 0.5}))

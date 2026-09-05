@@ -16,8 +16,8 @@ from pathlib import Path
 
 import numpy as np
 
-from gcmc.mof_field import FrameworkField
-from gcmc.potentials.pair_table import PairTable
+from gcmc.forcefield.lj_table import FrameworkField
+from gcmc.forcefield.pair_table import PairTable
 from scripts.mof.units import load_forcefield, reduce_tables
 
 
@@ -59,7 +59,7 @@ def setup_system(
     sr = red.sigma_ref
 
     if cif is not None:
-        from gcmc.io_framework import load_framework_typed
+        from gcmc.run.io_framework import load_framework_typed
         from scripts.mof.build_framework import build, write_extxyz
 
         atoms, meta = build(cif, ff)

@@ -21,7 +21,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gcmc.trials import TrialSet
+from gcmc.proposals.trials import TrialSet
 
 
 def _ts(n: int = 8, dim: int = 3, species=None) -> TrialSet:

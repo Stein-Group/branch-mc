@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _harness as H
 import numpy as np
 
-from gcmc import MC_engine
+from gcmc.engine import MC_engine
 
 SNAPSHOT = os.path.join(H.REF, "p4_snapshot.npz")
 

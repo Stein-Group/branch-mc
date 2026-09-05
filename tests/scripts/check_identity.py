@@ -10,8 +10,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
-from gcmc import hash_fingerprint as identity
-from gcmc import sim_setup as config
+from gcmc.run import hash_fingerprint as identity
+from gcmc.run import sim_setup as config
 
 BASE = {
     "potential": {"main": "hard_core"},

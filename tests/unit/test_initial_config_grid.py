@@ -19,8 +19,10 @@ import numpy as np
 import pytest
 from scipy.spatial import cKDTree
 
-from gcmc import config_specs, geometry, runner
-from gcmc.sim_setup import from_params
+from gcmc import config_specs
+from gcmc.run import runner
+from gcmc.run.sim_setup import from_params
+from gcmc.space import geometry
 
 _RNG = lambda: np.random.default_rng(0)  # noqa: E731
 
@@ -202,7 +204,7 @@ def _par_cfg(box=12.0, dim=3, n_cell=8, spec="grid"):
 
 
 def _assert_partitions(cfg, pos, rng):
-    from gcmc import decomposition
+    from gcmc.space import decomposition
 
     dim = cfg.dimension
     cells, rest, _ = decomposition.grid_up_nd(

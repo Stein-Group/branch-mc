@@ -26,8 +26,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gcmc import MC_engine, config_specs, runner, sim_setup
-from gcmc.state import ChainState
+from gcmc import config_specs
+from gcmc.engine import MC_engine
+from gcmc.run import runner, sim_setup
+from gcmc.system.state import ChainState
 
 _BASE = {
     "potential": {"main": "lennard_jones", "T": 1.5},

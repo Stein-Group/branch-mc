@@ -43,7 +43,7 @@ from __future__ import annotations
 import dataclasses
 
 from gcmc import config_fields as CF
-from gcmc import hash_fingerprint, sim_setup
+from gcmc.run import hash_fingerprint, sim_setup
 
 # ---------------------------------------------------------------- the partition
 #

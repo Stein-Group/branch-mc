@@ -1,17 +1,33 @@
 #!/bin/bash
 # The LJ A-B demixing series: one base config -> a Cartesian sweep of
-# single-core runs, expanded and scheduled by gcmc.launcher.
+# single-core runs, expanded and scheduled by gcmc.run.launcher.
 #
 # TWO ARMS, submitted as two jobs. They are the same experiment at one state
 # point and they answer different halves of P8's first claim:
 #
+#   ./scripts/submit_demixing.sbatch run-files/demix_canonical.json    # THE ONE
 #   ./scripts/submit_demixing.sbatch run-files/demix_kseries.json      # muVT
-#   ./scripts/submit_demixing.sbatch run-files/demix_kseries_nvt.json  # fixed N
+#   ./scripts/submit_demixing.sbatch run-files/demix_kseries_nvt.json  # semigrand
+#
+# READ THIS FIRST IF YOU WANT TWO PHASES IN A BOX: it is demix_canonical.json,
+# at T* = 1.3, and neither of the other two can show you that. The first is
+# grand canonical and the second is semi-grand, and in both the composition is
+# free to move -- so both dissolve an interface rather than hold one, which is
+# not a bug in them but the equilibrium they sample. They measure composition
+# curves; the canonical file measures the two-phase state.
+#
+# TEMPERATURE. The canonical and semi-grand files run at T* = 1.3, because that
+# is what separated on the cluster (Dipesh, 2026-08-27). Note that re-running the
+# canonical file HERE separates at both 1.0 and 1.3, so the mechanism is not
+# established -- demix_canonical.json's header has the numbers and the one run
+# that would settle it. The muVT file alone stays at 1.0, because its chemical
+# potentials are calibrated at that temperature and nowhere else.
 #
 # muVT (18 runs: 6 k x 3 starts) gives the transition curve -- composition
 # against k at fixed chemical potentials on the asymmetric model, where a
 # demixing mixture expels a species and the density falls with it. Fixed N
-# (30 runs: 6 k x 5 Delta-mu, one equimolar start) is the semi-grand arm on the
+# (30 runs: 6 k x 5 Delta-mu, one equimolar start) is the semi-grand arm -- now
+# spelled ensemble.type = "semigrand" rather than "NVT" -- on the
 # SYMMETRIC model, where Delta-mu = 0 is exactly the coexistence condition and
 # the sweep traces the isotherm x(Delta-mu) whose shape IS the transition. Each
 # file says the rest in its own header.
@@ -79,7 +95,7 @@ PYEOF
 # exists, so a typo fails here in a second instead of eighteen runs later.
 python -m scripts.demixing prepare "$BASE"
 
-python -m gcmc.launcher "$BASE" --root "$ROOT" --cores "$CORES" --threads 1
+python -m gcmc.run.launcher "$BASE" --root "$ROOT" --cores "$CORES" --threads 1
 
 # Analysis, run here so the numbers land next to the runs rather than waiting
 # for someone to remember. Each directory gets its own JSON: composition per

@@ -25,7 +25,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gcmc import demixing
+from gcmc.analysis import demixing
 
 BOX = 12.0
 DIM = 3

@@ -21,7 +21,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _harness as H
 
-from gcmc import MC_engine
+from gcmc.engine import MC_engine
 
 
 def run_mode(name):

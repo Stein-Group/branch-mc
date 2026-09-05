@@ -16,10 +16,10 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
-from gcmc import MC_engine as engine
 from gcmc import config_specs
-from gcmc.sim_setup import from_params
-from gcmc.state import ChainState
+from gcmc.engine import MC_engine as engine
+from gcmc.run.sim_setup import from_params
+from gcmc.system.state import ChainState
 
 
 def mean_N(mu, box, dim, radius, nwin=60, tail=25, seed=1, n0=None):

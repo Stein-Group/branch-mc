@@ -36,8 +36,8 @@ from typing import Any
 import numpy as np
 import yaml
 
-from gcmc import demixing
-from gcmc.species_file import load_forcefield
+from gcmc.analysis import demixing
+from gcmc.forcefield.species_file import load_forcefield
 
 #: The k_AB series. Zero is Lorentz-Berthelot and the null arm of the whole
 #: experiment; the upper end weakens the cross term to half its geometric mean,
@@ -158,7 +158,7 @@ def write_mixed_start(
     is the nearest `n_side**dim` to it. The file itself is authoritative about
     what was written, and the run's first window reports N.
     """
-    from gcmc import io as gio
+    from gcmc.run import io as gio
 
     ff = load_forcefield(model)
     n_species = len(ff.types)

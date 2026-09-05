@@ -32,9 +32,9 @@ from pathlib import Path
 
 import numpy as np
 
-from gcmc.mof_field import FrameworkField
-from gcmc.mof_metropolis import advance_metropolis_mof_ms
-from gcmc.potentials.pair_table import PairTable
+from gcmc.engine.framework import advance_metropolis_mof_ms
+from gcmc.forcefield.lj_table import FrameworkField
+from gcmc.forcefield.pair_table import PairTable
 from scripts.mof.system_setup import setup_system
 from scripts.mof.units import peng_robinson
 from scripts.mof.v1v2_units import loading_mol_per_kg, z_star_per_pa

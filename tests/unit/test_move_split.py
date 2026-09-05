@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gcmc import moves
+from gcmc.proposals import moves
 
 
 def test_the_multi_species_split_is_the_single_one_scaled_uniformly():

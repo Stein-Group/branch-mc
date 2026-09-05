@@ -81,11 +81,11 @@ if MODE == "aux3d":
 import cav_n_d_3d_g3_LJ as orig
 
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
-from gcmc.potentials.aux import Aux2D, Aux3D, aux_constants_2d
-from gcmc.potentials.lennard_jones import LennardJones
-from gcmc.samplers.base import EnergyWeigher, UniformWeigher
-from gcmc.samplers.rosenbluth import select_reverse
-from gcmc.trials import TrialSet
+from gcmc.forcefield.aux import HardCoreAux2D, HardCoreAux3D, aux_constants_2d
+from gcmc.forcefield.lennard_jones import LennardJones
+from gcmc.proposals.trials import TrialSet
+from gcmc.sampling.base import EnergyWeigher, UniformWeigher
+from gcmc.sampling.rosenbluth import select_reverse
 
 
 def eq(a, b, tag):
@@ -139,11 +139,13 @@ elif MODE == "lj3d":
     )
 elif MODE == "aux2d":
     weigher = EnergyWeigher(
-        Aux2D(diameter=lower, upper_cutoff=upper, params=aux_constants_2d(eta=0.69))
+        HardCoreAux2D(
+            diameter=lower, upper_cutoff=upper, params=aux_constants_2d(eta=0.69)
+        )
     )
 elif MODE == "aux3d":
     weigher = EnergyWeigher(
-        Aux3D.build(
+        HardCoreAux3D.build(
             diameter=lower,
             upper_cutoff=upper,
             side=side,

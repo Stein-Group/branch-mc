@@ -12,7 +12,7 @@ WHY A PROJECTION FIRST, AND NOT THE SPLIT ITSELF. Turning `Config` from a flat
 72-field dataclass into a composition touches 278 attribute reads in the package,
 three `dataclasses.replace` call sites, the checkpoint round-trip and the field
 partition test -- all at once. That is the big-bang the reduction-gate discipline
-(R15) exists to avoid, and it is the single largest change in the plan.
+ exists to avoid, and it is the single largest change in the plan.
 
 So the dataclasses are created HERE first, as read-only projections of an
 unchanged `Config`, with a round-trip test proving the five together lose
@@ -37,7 +37,7 @@ silently dropping out of the identity.
 
 UNITS. Every quantity is engine-reduced. Nothing in this module has seen an
 Angstrom or a Kelvin; `forcefield/units.py` is the single boundary where that
-conversion happens (R10).
+conversion happens.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING, Any
 from . import config_fields
 
 if TYPE_CHECKING:
-    from .sim_setup import Config
+    from .run.sim_setup import Config
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

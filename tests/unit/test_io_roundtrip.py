@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from gcmc import io
-from gcmc.hash_fingerprint import RunPaths
+from gcmc.run import io
+from gcmc.run.hash_fingerprint import RunPaths
 
 
 def _paths(d) -> RunPaths:

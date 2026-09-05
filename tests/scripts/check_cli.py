@@ -12,7 +12,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG_PARENT = os.path.join(HERE, "..", "..")
 sys.path.insert(0, PKG_PARENT)
-from gcmc import launcher
+from gcmc.run import launcher
 
 ENV = dict(os.environ)
 ENV["PYTHONPATH"] = PKG_PARENT + os.pathsep + ENV.get("PYTHONPATH", "")

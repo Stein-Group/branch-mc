@@ -32,10 +32,10 @@ import numpy as np
 import pytest
 from scipy.optimize import brentq
 
-from gcmc import MC_engine as engine
 from gcmc import config_specs
-from gcmc import sim_setup as config
-from gcmc.state import ChainState
+from gcmc.engine import MC_engine as engine
+from gcmc.run import sim_setup as config
+from gcmc.system.state import ChainState
 
 # mu, and the tolerance in eta. 0.004 is roughly 1.5% at these densities: loose
 # enough for 4 seeds x 60 windows, tight enough that the original's +2.8% at

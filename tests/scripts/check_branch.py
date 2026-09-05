@@ -30,7 +30,7 @@ ORIG = str(add_orig_to_path())  # R1: resolved from $ORIG_ROOT or the tag
 import cav_n_d_3d_g3_LJ as orig
 
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
-from gcmc.samplers import branch
+from gcmc.sampling import branch
 
 fails = 0
 checks = 0

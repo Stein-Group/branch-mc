@@ -17,8 +17,10 @@ import numpy as np
 import pytest
 from scipy.spatial import cKDTree
 
-from gcmc import MC_engine, config_specs, sim_setup
-from gcmc.neighbors import CellList
+from gcmc import config_specs
+from gcmc.engine import MC_engine
+from gcmc.run import sim_setup
+from gcmc.space.neighbors import CellList
 
 
 # --------------------------------------------------------------------- oracle
@@ -169,7 +171,7 @@ def test_matrix_block_is_permanent():
 
 # ------------------------------------------------------------ 5: empty system
 def test_empty_active_set_takes_the_all_admissible_path():
-    from gcmc import geometry
+    from gcmc.space import geometry
 
     dim, cutoff, box, nn = 3, 1.5, 7.5, 9
     cl = CellList(box, dim, cutoff)
@@ -238,7 +240,7 @@ def test_weights_are_identical_from_either_container(name):
     tree = cKDTree(P, boxsize=[box] * dim)
     cl = CellList.from_positions(P, box, dim, uc)
 
-    from gcmc import geometry
+    from gcmc.space import geometry
 
     raw_kd = geometry.find_neighbors(tree, trials, lower, uc, nn)
     raw_cl = geometry.find_neighbors(cl, trials, lower, uc, nn)
@@ -270,7 +272,7 @@ def test_hard_sphere_weight_pair_never_sees_a_padded_2d_array():
     trials carry unit weight from `_weighted_trials` and the engine's weigher is
     `UniformWeigher`. Assert both, so a future edit that routes padded distances
     into it fails here rather than silently changing the physics."""
-    from gcmc.samplers.base import UniformWeigher
+    from gcmc.sampling.base import UniformWeigher
 
     cfg = sim_setup.from_params(
         {

@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 from scipy.spatial import cKDTree
 
-from gcmc.neighbors import CellList
+from gcmc.space.neighbors import CellList
 
 BOXES = [
     np.array([30.0, 30.0, 24.0]),  # the plan's example

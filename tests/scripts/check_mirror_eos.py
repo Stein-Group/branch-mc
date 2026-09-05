@@ -48,10 +48,10 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-from gcmc import MC_engine as engine
 from gcmc import config_specs
-from gcmc.sim_setup import from_params
-from gcmc.state import ChainState
+from gcmc.engine import MC_engine as engine
+from gcmc.run.sim_setup import from_params
+from gcmc.system.state import ChainState
 
 BOX = 10.0
 MU = 1.0

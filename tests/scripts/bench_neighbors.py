@@ -29,7 +29,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _harness as H
 
-from gcmc import MC_engine
+from gcmc.engine import MC_engine
 
 # (label, box, N)
 SIZES = [("small", 12.0, 700), ("medium", 20.0, 4000), ("large", 30.0, 15000)]

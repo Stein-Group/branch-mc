@@ -22,10 +22,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gcmc import MC_engine, config_specs
-from gcmc.hash_fingerprint import run_id
-from gcmc.sim_setup import from_params
-from gcmc.state import ChainState
+from gcmc import config_specs
+from gcmc.engine import MC_engine
+from gcmc.run.hash_fingerprint import run_id
+from gcmc.run.sim_setup import from_params
+from gcmc.system.state import ChainState
 
 
 def _p(box, sampler="metropolis", extra_ens=None, extra_run=None):

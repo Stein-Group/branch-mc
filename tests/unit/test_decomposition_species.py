@@ -22,7 +22,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gcmc import decomposition
+from gcmc.space import decomposition
 
 
 def _split(n=200, box=24.0, dim=3, cell=6.0, buffer=2.5, seed=0, n_species=3):

@@ -29,7 +29,7 @@ ORIG = str(add_orig_to_path())  # R1: resolved from $ORIG_ROOT or the tag
 import cav_n_d_3d_g3_LJ as orig
 
 sys.path.insert(0, os.path.join(ORIG, ".."))
-from gcmc.trials import TrialSet
+from gcmc.proposals.trials import TrialSet
 
 FIELDS = ["coords", "energy_weight", "cossum", "sinsum", "counts", "ref_neighbor_coord"]
 

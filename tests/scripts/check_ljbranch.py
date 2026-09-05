@@ -27,9 +27,9 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from scipy.spatial import cKDTree
 
-from gcmc.MC_engine import _lj_set_energy, _lj_singleparticle_weight
-from gcmc.potentials import make_potential
-from gcmc.samplers import branch
+from gcmc.engine.MC_engine import _lj_set_energy, _lj_singleparticle_weight
+from gcmc.forcefield import make_potential
+from gcmc.sampling import branch
 
 LOWER = 0.9  # the auxiliary exclusion floor
 RC = 2.5  # LJ cutoff

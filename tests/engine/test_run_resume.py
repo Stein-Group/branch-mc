@@ -22,7 +22,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from gcmc import runner
+from gcmc.run import runner
 
 _WINDOW = 2000
 
@@ -148,7 +148,7 @@ def test_a_typed_run_carries_its_species_across_a_resume(tmp_path):
         "single-species result would make the resume check vacuous"
     )
 
-    from gcmc import io as gio
+    from gcmc.run import io as gio
 
     ckpt = gio.load_checkpoint(paths1)
     assert ckpt is not None and ckpt["species"] is not None, (

@@ -33,11 +33,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from gcmc.io_framework import load_framework_typed
-from gcmc.mof_field import FrameworkField
-from gcmc.mof_metropolis import advance_metropolis_mof, advance_metropolis_mof_ms
-from gcmc.potentials.lj_table import LennardJonesTable
-from gcmc.potentials.pair_table import PairTable
+from gcmc.engine.framework import advance_metropolis_mof, advance_metropolis_mof_ms
+from gcmc.forcefield.lj_table import FrameworkField, LennardJonesTable
+from gcmc.forcefield.pair_table import PairTable
+from gcmc.run.io_framework import load_framework_typed
 from scripts.mof.ref_energy import read_extxyz, total_energy
 from scripts.mof.units import load_forcefield, reduce_tables
 
@@ -208,7 +207,7 @@ def test_binary_total_energy_matches_ref(env):
         assert u_ref_k == pytest.approx(u_core_k, rel=1e-10, abs=1e-9)
         # the record-run decomposition must sum to the same total and match the
         # brute-force reduced total exactly (its u_total feeds the CSV stream)
-        from gcmc.mof_metropolis import mof_energy_decomposition
+        from gcmc.engine.framework import mof_energy_decomposition
 
         dec = mof_energy_decomposition(
             pos, spc, field=field, table=table, beta=1.0, upper_cutoff=field.rc

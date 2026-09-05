@@ -29,11 +29,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gcmc import MC_engine, config_specs, sim_setup
-from gcmc.potentials.lennard_jones import LennardJones
-from gcmc.potentials.lj_table import LennardJonesTable
-from gcmc.potentials.pair_table import PairTable
-from gcmc.state import ChainState
+from gcmc import config_specs
+from gcmc.engine import MC_engine
+from gcmc.forcefield.lennard_jones import LennardJones
+from gcmc.forcefield.lj_table import LennardJonesTable
+from gcmc.forcefield.pair_table import PairTable
+from gcmc.run import sim_setup
+from gcmc.system.state import ChainState
 
 _BOX, _MU, _T, _N0 = 6.0, 1.0, 1.2, 30
 
@@ -189,7 +191,7 @@ def test_the_overlap_floor_is_per_pair() -> None:
     eps = np.ones((2, 2))
     table = PairTable.from_reduced(("A", "B"), 2, sigma, eps, 0.9)
 
-    from gcmc.potentials.overlap import pair_overlaps
+    from gcmc.forcefield.overlap import pair_overlaps
 
     d = np.array([1.2, 1.2])
     types = np.array([0, 1])
@@ -209,7 +211,7 @@ def test_every_sampler_accepts_a_species_file() -> None:
     SAMPLER and arrived in that order:
 
         rosenbluth      per-pair weights and per-pair overlap floors
-        channel         ChannelSweepMS / ChannelSweepLJMS -- these already
+        channel         the mixture overlap policy -- this already
                         existed for the MOF path; what was missing was
                         `make_sweep` selecting them
         branch          count_and_sample / ljbranch_weight_sum build adjacency at

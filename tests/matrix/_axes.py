@@ -268,8 +268,16 @@ def build_params(point: Point, matrix_dir: Path | None = None) -> dict[str, Any]
         sampler["trial_box_side"] = 3.0
 
     ensemble: dict[str, Any] = {"dimension": dim, "box": box, "type": point.ensemble}
-    if point.ensemble == "NVT":
+    # Both fixed-N ensembles take a count. They differ in what else they take:
+    # NVT refuses a state point (its composition is the start file's, and with a
+    # species file it also demands one, so typed NVT stays a REJECTED point here
+    # -- deliberately, since a matrix point has no initial_config), while
+    # semigrand requires exactly one, because the activity RATIO is what moves
+    # composition in it.
+    if point.ensemble in ("NVT", "semigrand"):
         ensemble["N"] = 20
+    if point.ensemble == "NVT":
+        pass  # NVT states no state point at all, typed or not
     elif point.species_file is not None:
         # Typed mode states one activity per species (M10). The species file
         # shipped for the test suite declares three, and a missing or unknown

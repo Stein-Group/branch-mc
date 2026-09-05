@@ -38,7 +38,7 @@ import _harness as H
 import numpy as np
 import pytest
 
-from gcmc import MC_engine
+from gcmc.engine import MC_engine
 
 # R1: this module's oracle is the frozen stage-A engine, which lives in tag
 # v2-engineA rather than in the tree. Skipped as a module when it is absent --

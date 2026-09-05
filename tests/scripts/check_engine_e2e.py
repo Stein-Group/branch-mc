@@ -160,10 +160,10 @@ orig_eta = data[:, 1]
 
 # ---- engine ----
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
-from gcmc import MC_engine as engine
 from gcmc import config_specs
-from gcmc import sim_setup as config
-from gcmc.state import ChainState
+from gcmc.engine import MC_engine as engine
+from gcmc.run import sim_setup as config
+from gcmc.system.state import ChainState
 
 cfg = config.from_params(PARAMS[MODE])
 pot = cfg.build_potential()

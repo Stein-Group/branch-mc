@@ -17,8 +17,9 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 
-from gcmc import runner
+from gcmc.run import runner
 from scripts.demixing import analyse_run, read_log, write_models
 
 _PARAMS = {
@@ -59,7 +60,7 @@ def test_the_series_is_generated_from_the_anchor(tmp_path):
     from a template that forgot to substitute would still produce six files with
     six names.
     """
-    from gcmc.species_file import load_forcefield
+    from gcmc.forcefield.species_file import load_forcefield
     from scripts.demixing import K_SERIES
 
     paths = write_models(tmp_path)
@@ -142,3 +143,47 @@ def test_the_analysis_refuses_a_log_with_no_composition(tmp_path):
     (d / "run.log").write_text("#      N\n    100\n")
     with pytest.raises(ValueError, match="no per-species columns"):
         analyse_run(d)
+
+
+def test_prepare_makes_what_a_base_file_names_and_refuses_what_it_cannot(tmp_path):
+    """`prepare` is load-bearing: the sbatch calls it instead of a hardcoded loop.
+
+    Two properties, and the second is the one worth having. It writes the models
+    and starts the base file's `_models` / `_starts` blocks describe -- and it
+    CHECKS that every path the params actually name now exists. A base file that
+    sweeps a model nobody generated used to fail eighteen runs later, inside the
+    launcher, after the job had been queued.
+    """
+    import json as _json
+
+    from scripts.demixing import prepare
+
+    base = tmp_path / "base.json"
+    start = tmp_path / "start.extxyz"
+    spec = {
+        "_models": {
+            "anchor": "ff/species_symmetric_reduced.yaml",
+            "out": str(tmp_path),
+        },
+        "_starts": {
+            "model": "ff/species_symmetric_reduced.yaml",
+            "box": 8.0,
+            "eta": 0.35,
+            "n": 200,
+            "files": {str(start): 0.5},
+        },
+        "potential": {"species_file": [str(tmp_path / "species_symmetric_k0.yaml")]},
+        "run": {"initial_config": [str(start)]},
+    }
+    base.write_text(_json.dumps(spec))
+    made = prepare(base)
+    assert len(made["models"]) == 6 and len(made["starts"]) == 1
+    assert start.exists()
+    assert int(start.read_text().splitlines()[0]) == 200, (
+        "the start does not carry the exact particle count ensemble.N would state"
+    )
+
+    spec["potential"]["species_file"].append(str(tmp_path / "not_generated.yaml"))
+    base.write_text(_json.dumps(spec))
+    with pytest.raises(FileNotFoundError, match=r"not_generated\.yaml"):
+        prepare(base)

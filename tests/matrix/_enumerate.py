@@ -34,7 +34,7 @@ import json
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from gcmc import sim_setup
+from gcmc.run import sim_setup
 
 from . import _axes
 from ._axes import AXES, Point, build_params

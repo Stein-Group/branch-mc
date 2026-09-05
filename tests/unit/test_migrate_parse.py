@@ -5,7 +5,7 @@ names (the second exercises the 2D + aux-potential + gamma/eta tail).
 
 from __future__ import annotations
 
-from gcmc.migrate import _parse_name
+from gcmc.run.migrate import _parse_name
 
 
 def test_parse_minimal_3d_name():

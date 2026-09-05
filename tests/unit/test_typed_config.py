@@ -21,11 +21,11 @@ import numpy as np
 import pytest
 
 from gcmc import config_fields
-from gcmc.hash_fingerprint import identity_dict, run_id
+from gcmc.run.hash_fingerprint import identity_dict, run_id
 
 #: Pinned digest of the canonical untyped run. See point 4 below for its history.
 _UNTYPED_RUN_ID = "e864f492d3ba"
-from gcmc.sim_setup import from_params
+from gcmc.run.sim_setup import from_params
 
 FF = Path(__file__).resolve().parents[2] / "ff"
 BINARY = str(FF / "species_binary_reduced.yaml")
@@ -442,8 +442,8 @@ def test_the_xekr_species_file_builds_a_typed_config():
     assert s.sigma_self[1] == pytest.approx(3.636 / 4.1, rel=1e-15)
 
 
-def test_typed_nvt_is_accepted_and_still_needs_its_activity_ratio():
-    """A mixture at fixed N is the semi-grand ensemble, and it parses.
+def test_semigrand_is_accepted_and_still_needs_its_activity_ratio():
+    """A mixture at fixed TOTAL N is the semi-grand ensemble, and it parses.
 
     It used to be neither supported nor refused: `build_species_spec` demands a
     state-point route for any typed run, so a typed NVT file died with "a typed
@@ -451,20 +451,83 @@ def test_typed_nvt_is_accepted_and_still_needs_its_activity_ratio():
     `ensemble.mu` produced "NVT takes no 'mu'". Two validators, each naming the
     other's refusal as the fix, with no configuration in between.
 
+    It then spent a stage reachable but MISNAMED, as `"NVT"`, which is the more
+    expensive of the two failures: three cluster campaigns were launched under a
+    params file that read as canonical and sampled something else. It has its own
+    name now.
+
     Both halves are asserted because the pair is the point. `mu` is MEANINGFUL
     here -- at fixed N the ratio of activities is what sets the composition, and
     only the ratio does any work -- so the route is required rather than ignored,
     and omitting it is under-specifying the run rather than choosing a default.
     """
-    p = _typed(ensemble={"N": 100, "type": "NVT"})
+    p = _typed(ensemble={"N": 100, "type": "semigrand"})
     cfg = from_params(p)
-    assert cfg.ensemble_type == "NVT" and cfg.n_species == 2
+    assert cfg.ensemble_type == "semigrand" and cfg.n_species == 2
 
-    q = _typed(ensemble={"N": 100, "type": "NVT", "mu": None})
+    q = _typed(ensemble={"N": 100, "type": "semigrand", "mu": None})
     _raises(q, "exactly one state-point route")
+
+    # ...and the OTHER fixed-N ensemble refuses the same key, because there it
+    # would be a knob that turns and does nothing. This assertion is the one that
+    # would have caught the misnaming: the two ensembles must disagree about mu.
+    c = _typed(ensemble={"N": 100, "type": "NVT"})
+    _raises(c, "would do nothing")
+
+    # a species file with more than one species makes NVT canonical, and a
+    # canonical run reads no trial cloud, so the fixture's rosenbluth block is
+    # refused before anything else about it is considered
+    d = _typed(ensemble={"N": 100, "type": "NVT", "mu": None})
+    _raises(d, "runs no trial cloud")
+
+    # ...and once the sampler is the only legal one, the remaining demand is the
+    # composition itself, which a canonical run takes from a file rather than a
+    # draw
+    e = _typed(ensemble={"N": 100, "type": "NVT", "mu": None})
+    e["sampler"] = {"type": "metropolis"}
+    _raises(e, "run.initial_config")
 
     # ...and the route error is still what an under-specified muVT run gets, so
     # the NVT path has not swallowed the older one.
     r = _typed()
     r["ensemble"].pop("mu")
     _raises(r, "exactly one state-point route")
+
+
+@pytest.mark.parametrize(
+    ("sampler", "foreign"),
+    [
+        ("metropolis", "channel_length"),
+        ("metropolis", "channel_width"),
+        ("rosenbluth", "channel_length"),
+        ("rosenbluth", "channel_width"),
+        ("branch", "channel_length"),
+        ("channel_cyclic", "channel_length"),
+    ],
+)
+def test_a_sampler_refuses_the_keys_it_cannot_read(sampler, foreign):
+    """Only the chosen sampler's keys are legal in the sampler block.
+
+    These six cells were ACCEPTED AND IGNORED. That is worse than it sounds:
+    `channel_length` and `channel_width` are in `_IDENTITY_FIELDS`, so a
+    rosenbluth run stating one got a different run directory for the identical
+    chain -- measured, four ids for one trajectory. A sweep over a key the
+    sampler cannot read yields N directories of one chain and nothing says so.
+
+    The union-of-all-keys check that allowed this is gone; each sampler names
+    what it reads in `_SAMPLER_KEYS`, once.
+    """
+    base = {
+        "metropolis": {},
+        "rosenbluth": {"trials": 20, "trial_box_side": 3.0},
+        "branch": {"depth": 1, "trials": 20, "trial_box_side": 3.0},
+        "channel_cyclic": {"depth": 1, "trial_density": 1.5, "channel_width": 1.5},
+    }[sampler]
+    smp = {"type": sampler, **base, foreign: 5.0}
+    p = {
+        "potential": {"main": "hard_core"},
+        "sampler": smp,
+        "ensemble": {"type": "muVT", "dimension": 3, "box": 20.0, "mu": 1.0},
+        "run": {"kind": "single", "radius": 0.5, "seed": 1},
+    }
+    _raises(p, "does not read")

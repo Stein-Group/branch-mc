@@ -28,7 +28,7 @@ import numpy as np
 import pytest
 from gen_p4_snapshot import N_WINDOWS, SNAPSHOT
 
-from gcmc import MC_engine
+from gcmc.engine import MC_engine
 
 
 @pytest.fixture(scope="module")

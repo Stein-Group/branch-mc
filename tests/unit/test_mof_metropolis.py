@@ -21,11 +21,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from gcmc.io_framework import load_framework_typed
-from gcmc.mof_field import FrameworkField
-from gcmc.mof_metropolis import advance_metropolis_mof
-from gcmc.potentials.lj_table import LennardJonesTable
-from gcmc.potentials.pair_table import PairTable
+from gcmc.engine.framework import advance_metropolis_mof
+from gcmc.forcefield.lj_table import FrameworkField, LennardJonesTable
+from gcmc.forcefield.pair_table import PairTable
+from gcmc.run.io_framework import load_framework_typed
 from scripts.mof.ref_energy import read_extxyz, total_energy
 from scripts.mof.units import load_forcefield, reduce_tables
 
@@ -225,7 +224,7 @@ def test_loop_reduces_to_the_henry_limit(env):
     Low activity and a short run keep it cheap; the point is the ratio, not a
     precise loading.
     """
-    from gcmc.mof_field import widom_henry
+    from gcmc.analysis.widom import widom_henry
 
     table, field = env["table"], env["field"]
     red = env["red"]

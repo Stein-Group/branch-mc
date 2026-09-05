@@ -1,6 +1,6 @@
-"""Back-compat re-export. The loader itself now lives in `gcmc/species_file.py`.
+"""Back-compat re-export. The loader itself now lives in `gcmc/forcefield/species_file.py`.
 
-It moved because `gcmc.sim_setup` validates a species file at `from_params` time
+It moved because `gcmc.run.sim_setup` validates a species file at `from_params` time
 (P2 of multispecies_plan.md, M18), and the engine package must not import
 `scripts/`: `scripts` is not in `[tool.setuptools.packages.find]`, so a typed run
 from an installed copy of gcmc would have failed at import.
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sys
 
-from gcmc.species_file import (
+from gcmc.forcefield.species_file import (
     ANGSTROM_M,
     AUX_FIRST_SHELL,
     KB_J_PER_K,

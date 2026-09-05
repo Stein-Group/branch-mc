@@ -38,9 +38,10 @@ def engine_henry(
     reference: str = "Xe",
     seed: int = 1,
 ) -> dict:
-    from gcmc.io_framework import load_framework_typed
-    from gcmc.mof_field import FrameworkField, widom_henry
-    from gcmc.potentials.pair_table import PairTable
+    from gcmc.analysis.widom import widom_henry
+    from gcmc.forcefield.lj_table import FrameworkField
+    from gcmc.forcefield.pair_table import PairTable
+    from gcmc.run.io_framework import load_framework_typed
 
     ff = load_forcefield(ff_path)
     red = reduce_tables(ff, T, reference=reference)

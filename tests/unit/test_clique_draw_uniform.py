@@ -15,7 +15,7 @@ import itertools
 
 import numpy as np
 
-from gcmc.samplers.branch import _build_adj, count_and_sample
+from gcmc.sampling.branch import _build_adj, count_and_sample
 
 CASES = [(2, 13, 2, 4.0), (2, 15, 3, 4.5), (3, 15, 3, 3.2), (3, 16, 4, 3.4)]
 DRAWS = 6000

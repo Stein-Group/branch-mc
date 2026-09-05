@@ -31,8 +31,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gcmc import MC_engine, config_specs, moves, sim_setup
-from gcmc.state import ChainState
+from gcmc import config_specs
+from gcmc.engine import MC_engine
+from gcmc.proposals import moves
+from gcmc.run import sim_setup
+from gcmc.system.state import ChainState
 
 pytestmark = pytest.mark.slow
 

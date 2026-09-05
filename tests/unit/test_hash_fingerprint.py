@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from gcmc import hash_fingerprint as hf
-from gcmc.hash_fingerprint import RunPaths
-from gcmc.sim_setup import from_params
+from gcmc.run import hash_fingerprint as hf
+from gcmc.run.hash_fingerprint import RunPaths
+from gcmc.run.sim_setup import from_params
 
 _BASE = {
     "potential": {"main": "hard_core"},

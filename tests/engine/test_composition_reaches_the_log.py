@@ -33,7 +33,7 @@ import json
 
 import pytest
 
-from gcmc import runner
+from gcmc.run import runner
 
 _TYPED = {
     "potential": {
@@ -134,12 +134,18 @@ def test_single_species_header_is_unchanged(tmp_path):
     assert len(rows[0]) == len(header.lstrip("#").split())
 
 
-def test_a_row_that_does_not_match_its_header_raises():
-    """The truncation guard is reachable.
+def test_a_column_with_no_value_raises_and_names_itself():
+    """The row cannot silently lose its tail.
 
-    `zip` stops at the shorter of its arguments, so before this check a row with
-    more cells than columns wrote a well-formed line missing its tail -- the
-    per-species columns being the tail.
+    The earlier arrangement passed a positional list of cells alongside a
+    positional list of widths, and `zip` stops at the shorter of the two -- so a
+    row carrying more cells than the header declared dropped them and still
+    wrote a well-formed line, the per-species columns being the tail. Header and
+    row are now built from ONE column list with values looked up by key, which
+    makes that failure unreachable; what remains reachable is a declared column
+    the window did not produce, and that raises with the column named.
     """
-    with pytest.raises(ValueError, match="cells against"):
-        runner._log_row(["1", "2", "3"], [7, 7])
+    cols = [("N", 7, "core", "N"), ("wall_s", 11, "core", "wall")]
+    assert runner._log_row(cols, {"N": 3, "wall": "1.0"}).split() == ["3", "1.0"]
+    with pytest.raises(KeyError, match="wall_s"):
+        runner._log_row(cols, {"N": 3})

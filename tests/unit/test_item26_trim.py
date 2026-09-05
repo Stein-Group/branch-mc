@@ -9,7 +9,7 @@ absent-file no-op.
 import os
 import tempfile
 
-from gcmc import io
+from gcmc.run import io
 
 
 def _frame(natoms, step):

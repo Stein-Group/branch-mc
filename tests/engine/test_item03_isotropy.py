@@ -22,8 +22,10 @@ import numpy as np
 import pytest
 from scipy.spatial import cKDTree
 
-from gcmc import MC_engine, config_specs, sim_setup
-from gcmc.state import ChainState
+from gcmc import config_specs
+from gcmc.engine import MC_engine
+from gcmc.run import sim_setup
+from gcmc.system.state import ChainState
 
 # Slow tier: both tests are statistical (correlation tolerances 0.03-0.04 need
 # large samples, ~136s total). The default tier still guards that the translate

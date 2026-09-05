@@ -31,9 +31,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gcmc.neighbors import CellList
-from gcmc.potentials.pair_table import PairTable, table_pair_energy_sq
-from gcmc.species_file import load_forcefield, reduce_tables
+from gcmc.forcefield.pair_table import PairTable, table_pair_energy_sq
+from gcmc.forcefield.species_file import load_forcefield, reduce_tables
+from gcmc.space.neighbors import CellList
 
 THREE = "ff/species_three_reduced.yaml"
 

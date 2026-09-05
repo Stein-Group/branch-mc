@@ -20,9 +20,9 @@ import numpy as np
 import pytest
 import yaml
 
-from gcmc.potentials.lennard_jones import lj_pair_energy_sq
-from gcmc.potentials.pair_table import PairTable, table_pair_energy_sq
-from gcmc.species_file import load_forcefield, reduce_tables
+from gcmc.forcefield.lennard_jones import lj_pair_energy_sq
+from gcmc.forcefield.pair_table import PairTable, table_pair_energy_sq
+from gcmc.forcefield.species_file import load_forcefield, reduce_tables
 
 FF = Path(__file__).resolve().parents[2] / "ff"
 ONE = FF / "species_one_reduced.yaml"

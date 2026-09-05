@@ -27,7 +27,7 @@ import _harness as H
 import numpy as np
 import pytest
 
-from gcmc import MC_engine
+from gcmc.engine import MC_engine
 
 
 def test_a_single_species_run_leaves_the_column_as_none():

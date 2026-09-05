@@ -10,9 +10,9 @@ import os
 import numpy as np
 from scipy.spatial import cKDTree
 
-from gcmc.potentials.aux import Aux2D, Aux3D, aux_constants_2d
-from gcmc.potentials.hard_sphere import HardSphere
-from gcmc.potentials.lennard_jones import LennardJones
+from gcmc.forcefield.aux import HardCoreAux2D, HardCoreAux3D, aux_constants_2d
+from gcmc.forcefield.hard_sphere import HardSphere
+from gcmc.forcefield.lennard_jones import LennardJones
 
 REFDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "refs")
 
@@ -74,7 +74,7 @@ def test_aux2d():
         "r_m",
     ]:
         same(c[name], float(r[f"const_{name}"]), f"aux2d const {name}")
-    pot = Aux2D(
+    pot = HardCoreAux2D(
         diameter=float(r["diameter"]), upper_cutoff=float(r["upper_cutoff"]), params=c
     )
     for g in (1.0, 0.5):
@@ -100,7 +100,7 @@ def test_aux3d():
         "orig",
         "g3_analysis_data.csv",
     )
-    pot = Aux3D.build(
+    pot = HardCoreAux3D.build(
         diameter=float(r["diameter"]),
         upper_cutoff=float(r["upper_cutoff"]),
         side=side,

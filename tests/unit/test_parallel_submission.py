@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from gcmc.hash_fingerprint import run_id
-from gcmc.sim_setup import from_params
+from gcmc.run.hash_fingerprint import run_id
+from gcmc.run.sim_setup import from_params
 
 MFM = [31.322, 31.322, 24.994]
 
@@ -294,7 +294,7 @@ def test_an_unexpanded_seed_sweep_is_refused():
 def test_the_decomposition_summary_reports_every_derived_number():
     """It goes to stdout so it lands in the scheduler's .out: with n_cell the cell
     geometry is no longer something the operator typed and can read back."""
-    from gcmc.sim_setup import describe_parallel
+    from gcmc.run.sim_setup import describe_parallel
 
     cfg = from_params(_p({"n_cell": 80}, box=[31.322, 31.322, 24.994]))
     text = describe_parallel(cfg)
@@ -319,7 +319,7 @@ def test_the_summary_reports_the_per_axis_gap():
     """In n_cell mode the gap is the buffer on every axis; in manual mode it is
     whatever the floor divide left over and can differ per axis, which is the
     reason it is printed per axis rather than assumed."""
-    from gcmc.sim_setup import describe_parallel
+    from gcmc.run.sim_setup import describe_parallel
 
     text = describe_parallel(from_params(_p({"cell_length": 8.0, "buffer": 2.0})))
     assert "manual geometry" in text
@@ -327,7 +327,7 @@ def test_the_summary_reports_the_per_axis_gap():
 
 
 def test_a_serial_run_says_so_instead_of_faking_a_decomposition():
-    from gcmc.sim_setup import describe_parallel
+    from gcmc.run.sim_setup import describe_parallel
 
     cfg = from_params(
         {

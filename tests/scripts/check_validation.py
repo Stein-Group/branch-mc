@@ -6,7 +6,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
-from gcmc.sim_setup import from_params
+from gcmc.run.sim_setup import from_params
 
 # The g3 table is shipped DATA, not history: it is read at runtime by the 3D
 # pmf auxiliary, so R1 moves it to data/ rather than into the v0 tag.

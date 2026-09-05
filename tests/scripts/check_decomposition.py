@@ -27,7 +27,7 @@ ORIG = str(add_orig_to_path())  # R1: resolved from $ORIG_ROOT or the tag
 
 # The verbatim 2D transcript moved out of the package in S1: the engine never
 # called it, so it is test support, not shipping code. `grid_up_nd` and `Cell`
-# stayed behind in gcmc/decomposition.py, which is what the engine runs.
+# stayed behind in gcmc/space/decomposition.py, which is what the engine runs.
 import _legacy_decomposition as D
 
 # ---- build the original helpers in isolation -------------------------------

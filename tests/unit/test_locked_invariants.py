@@ -32,7 +32,7 @@ import ast
 import hashlib
 from pathlib import Path
 
-_BRANCH = Path(__file__).resolve().parents[2] / "gcmc" / "samplers" / "branch.py"
+_BRANCH = Path(__file__).resolve().parents[2] / "gcmc" / "sampling" / "branch.py"
 
 # SHA-256 of ast.unparse(node) for each frozen function.
 #

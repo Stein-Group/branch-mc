@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from gcmc.rdf import RDFAccumulator
-from gcmc.state import ChainState
-from gcmc.topology import single_atom
-from gcmc.widom import free_volume_fraction
+from gcmc.analysis.rdf import RDFAccumulator
+from gcmc.analysis.widom import free_volume_fraction
+from gcmc.forcefield.topology import single_atom
+from gcmc.system.state import ChainState
 
 
 def test_chainstate_fresh_is_empty_and_seed_deterministic():

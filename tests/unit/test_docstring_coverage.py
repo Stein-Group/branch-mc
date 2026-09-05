@@ -97,10 +97,10 @@ def test_the_units_convention_is_stated_where_numbers_have_units() -> None:
     list is welcome; narrowing it needs a reason.
     """
     must_state_units = [
-        "gcmc/potentials/pair_table.py",
-        "gcmc/potentials/lennard_jones.py",
-        "gcmc/species.py",
-        "gcmc/species_file.py",
+        "gcmc/forcefield/pair_table.py",
+        "gcmc/forcefield/lennard_jones.py",
+        "gcmc/forcefield/species.py",
+        "gcmc/forcefield/species_file.py",
         "gcmc/config_specs.py",
     ]
     silent = []

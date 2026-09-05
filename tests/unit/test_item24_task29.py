@@ -13,7 +13,7 @@ cuboid volume, channel_length * channel_width**2.
 
 import numpy as np
 
-from gcmc.sim_setup import from_params
+from gcmc.run.sim_setup import from_params
 
 
 def _base(**over):

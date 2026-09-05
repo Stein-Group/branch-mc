@@ -15,7 +15,7 @@ neighbours, so the fix addresses a real truncation rather than a hypothetical on
 import numpy as np
 from scipy.spatial import cKDTree
 
-from gcmc import geometry
+from gcmc.space import geometry
 
 
 def _within_cutoff_sorted(tree, pts, cutoff, box):

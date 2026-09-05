@@ -21,8 +21,10 @@ import math
 import numpy as np
 import pytest
 
-from gcmc import MC_engine, config_specs, sim_setup
-from gcmc.state import ChainState
+from gcmc import config_specs
+from gcmc.engine import MC_engine
+from gcmc.run import sim_setup
+from gcmc.system.state import ChainState
 
 # Slow tier: every test here measures an occupancy ratio P(N=0)/P(N=1) by long
 # muVT sampling (~240s total). The move-selection / RNG structure these guard is

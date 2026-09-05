@@ -83,10 +83,10 @@ if MODE == "aux3d":
 import cav_n_d_3d_g3_LJ as orig
 
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
-from gcmc import geometry
-from gcmc.potentials.aux import Aux2D, Aux3D, aux_constants_2d
-from gcmc.potentials.lennard_jones import LennardJones
-from gcmc.trials import TrialSet
+from gcmc.forcefield.aux import HardCoreAux2D, HardCoreAux3D, aux_constants_2d
+from gcmc.forcefield.lennard_jones import LennardJones
+from gcmc.proposals.trials import TrialSet
+from gcmc.space import geometry
 
 
 def eq(a, b, tag):
@@ -151,11 +151,13 @@ elif MODE in ("hs2d", "hs3d"):
     w = np.ones(len(coords))
     ts = TrialSet(coords, w)
 elif MODE == "aux2d":
-    pot = Aux2D(diameter=lower, upper_cutoff=upper, params=aux_constants_2d(eta=0.69))
+    pot = HardCoreAux2D(
+        diameter=lower, upper_cutoff=upper, params=aux_constants_2d(eta=0.69)
+    )
     w = pot.weight_bulk(dists, gamma=g1)
     ts = TrialSet(coords, w)
 elif MODE == "aux3d":
-    pot = Aux3D.build(
+    pot = HardCoreAux3D.build(
         diameter=lower,
         upper_cutoff=upper,
         side=side,

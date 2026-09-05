@@ -3,7 +3,7 @@
 `_advance_metropolis` keeps its kd-tree forever: it is the independent reference
 engine that the converted paths are validated against, and it would stop being
 independent if it shared their index. Everything else in `MC_engine` must go
-through `gcmc.neighbors.CellList`, and so must all of `gcmc.parallel` (U1 of
+through `gcmc.space.neighbors.CellList`, and so must all of `gcmc.engine.parallel` (U1 of
 cell_unify_plan.md): the parallel metropolis kernel inside `advance_cell` is
 not the reference, so that module gets no exemption at all.
 
@@ -22,10 +22,22 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, ROOT)
 
 # Shrinks one stage at a time; each shrink is recorded in the ledger.
-#   A1 (now):  {_advance_metropolis, advance, _lj_set_energy}
+#   A1:        {_advance_metropolis, advance, _lj_set_energy}
 #   A3:        {_advance_metropolis, _lj_set_energy}
 #   A4 onward: {_advance_metropolis}
-ALLOWED = {"_advance_metropolis"}
+#   S5.5:      {metropolis_window}
+#
+# The last entry is a RENAME, and it is also a shrink. `_advance_metropolis` and
+# the framework loop in `mof_metropolis` each built their own kd-trees; the
+# merge left ONE function that does, and deleted the framework module's
+# `_guest_guest_energy` with its own tree build along with it. Three sites in
+# two modules became one site in one.
+#
+# Metropolis is still the exemption from R5's one-neighbour-structure rule, and
+# still for the same reason: migrating it to `CellList` changes the neighbour
+# ORDER, hence the float sum, hence every metropolis chain and every pin behind
+# them. That is a deliberate re-baseline, not a tidy-up.
+ALLOWED = {"metropolis_window"}
 
 _TREE_NAMES = {"cKDTree", "KDTree"}
 
@@ -59,12 +71,12 @@ def _enclosing_functions_calling_trees(path):
 
 def test_engine_builds_no_kdtree_outside_metropolis():
     hits = _enclosing_functions_calling_trees(
-        os.path.join(ROOT, "gcmc", "MC_engine.py")
+        os.path.join(ROOT, "gcmc", "engine", "MC_engine.py")
     )
     extra = hits - ALLOWED
     assert not extra, (
         f"kd-tree construction in MC_engine functions {sorted(extra)}; the hot "
-        f"path has one neighbour structure, gcmc.neighbors.CellList"
+        f"path has one neighbour structure, gcmc.space.neighbors.CellList"
     )
 
 
@@ -75,16 +87,18 @@ def test_parallel_builds_no_kdtree_anywhere():
     query+update. There is no reference-engine exemption here: the parallel
     metropolis kernel is not the reference (the serial one is), so the allowed
     set for this module is empty and stays empty."""
-    hits = _enclosing_functions_calling_trees(os.path.join(ROOT, "gcmc", "parallel.py"))
+    hits = _enclosing_functions_calling_trees(
+        os.path.join(ROOT, "gcmc", "engine", "parallel.py")
+    )
     assert not hits, (
         f"kd-tree construction in parallel functions {sorted(hits)}; the "
-        f"parallel hot path has one neighbour structure, gcmc.neighbors.CellList"
+        f"parallel hot path has one neighbour structure, gcmc.space.neighbors.CellList"
     )
 
 
 def test_parallel_does_not_import_scipy_spatial():
     """The import itself is the tell: nothing in parallel.py needs it now."""
-    src = Path(ROOT, "gcmc", "parallel.py").read_text()
+    src = Path(ROOT, "gcmc", "engine", "parallel.py").read_text()
     tree = ast.parse(src)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -98,7 +112,7 @@ def test_parallel_does_not_import_scipy_spatial():
 
 
 def test_neighbors_module_does_not_import_scipy():
-    src = Path(ROOT, "gcmc", "neighbors.py").read_text()
+    src = Path(ROOT, "gcmc", "space", "neighbors.py").read_text()
     tree = ast.parse(src)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):

@@ -1,6 +1,6 @@
 """Config-level checks for items 5, 7, 8 and the item-2 no-op guard.
 
-These exercise gcmc.sim_setup.from_params directly: they are fast and pin the
+These exercise gcmc.run.sim_setup.from_params directly: they are fast and pin the
 decisions that are easy to regress in the config layer.
 
 Item 5  every LJ sampler shares one hard-core floor (0.9 sigma by default), and
@@ -14,8 +14,10 @@ Item 2  an NVT window with no particles returns immediately instead of looping.
 
 import numpy as np
 
-from gcmc import MC_engine, config_specs, sim_setup
-from gcmc.state import ChainState
+from gcmc import config_specs
+from gcmc.engine import MC_engine
+from gcmc.run import sim_setup
+from gcmc.system.state import ChainState
 
 
 def _lj(sampler_block, **run):

@@ -35,14 +35,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from gcmc import io
+from gcmc.run import io
 
 _SYMBOLS = ("Ne", "Ar", "Kr")
 
 
 def _paths(tmp_path: Path):
     """A minimal RunPaths pointing into tmp_path."""
-    from gcmc.hash_fingerprint import RunPaths
+    from gcmc.run.hash_fingerprint import RunPaths
 
     root = tmp_path / "run"
     root.mkdir(parents=True, exist_ok=True)

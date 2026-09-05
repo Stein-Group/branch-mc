@@ -15,8 +15,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from gcmc.potentials.lennard_jones import lj_pair_energy, lj_pair_energy_sq
-from gcmc.potentials.pair_table import (
+from gcmc.forcefield.lennard_jones import lj_pair_energy, lj_pair_energy_sq
+from gcmc.forcefield.pair_table import (
     PairTable,
     overlaps_table,
     pair_floor,

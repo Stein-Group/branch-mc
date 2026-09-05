@@ -23,10 +23,11 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
 
-from gcmc import MC_engine as engine
-from gcmc import config_specs, parallel
-from gcmc.sim_setup import from_params
-from gcmc.state import ChainState, zero_counters
+from gcmc import config_specs
+from gcmc.engine import MC_engine as engine
+from gcmc.engine import parallel
+from gcmc.run.sim_setup import from_params
+from gcmc.system.state import ChainState, zero_counters
 
 # One cell is one core, so cfg.n_workers is the cell count; without this
 # hook a 9- or 27-cell case would spawn that many processes inside a test.

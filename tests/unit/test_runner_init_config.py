@@ -8,8 +8,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gcmc import runner
-from gcmc.sim_setup import from_params
+from gcmc.run import runner
+from gcmc.run.sim_setup import from_params
 
 _BASE = {
     "potential": {"main": "hard_core"},

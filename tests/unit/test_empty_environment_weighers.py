@@ -8,7 +8,7 @@ and unit weight, which is why the ordinary LJ and hard-core paths can start from
 an empty box.
 
 The two GEOMETRY-AWARE weighers could not. `reweighting.calculate_order_parameter`
-dereferenced `kdtree.data`; `Aux3D.weight_bulk` asserted `kdtree is not None`.
+dereferenced `kdtree.data`; `HardCoreAux3D.weight_bulk` asserted `kdtree is not None`.
 Between them that is psi6 reweighting and the pmf auxiliary -- and the feature
 matrix reported it as eight failures across four modes.
 
@@ -30,7 +30,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gcmc.samplers import reweighting
+from gcmc.sampling import reweighting
 
 
 def _padded(n: int, k: int) -> tuple[np.ndarray, np.ndarray]:
@@ -84,10 +84,12 @@ def test_psi6_agrees_with_the_sparse_case_it_generalises() -> None:
 def test_the_pmf_auxiliary_on_an_empty_environment_applies_no_bias() -> None:
     """An empty product is 1: the g3 factor is three-body, and with no
     neighbours there is no triplet to weight."""
-    aux = pytest.importorskip("gcmc.potentials.aux")
-    Aux3D = aux.Aux3D
+    aux = pytest.importorskip("gcmc.forcefield.aux")
+    HardCoreAux3D = aux.HardCoreAux3D
 
-    obj = Aux3D.__new__(Aux3D)  # no g3 table needed: the empty path reads none
+    obj = HardCoreAux3D.__new__(
+        HardCoreAux3D
+    )  # no g3 table needed: the empty path reads none
     obj.side = 10.0
     coords = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
     dists, idxs = _padded(2, 5)
@@ -107,8 +109,8 @@ def test_the_pmf_auxiliary_on_an_empty_environment_applies_no_bias() -> None:
 def test_the_pmf_per_pair_recompute_honours_the_undefined_reference() -> None:
     """`weight_pair` must take the same no-bias branch, or the bulk weight and
     the recompute would disagree on the same move."""
-    aux = pytest.importorskip("gcmc.potentials.aux")
-    obj = aux.Aux3D.__new__(aux.Aux3D)
+    aux = pytest.importorskip("gcmc.forcefield.aux")
+    obj = aux.HardCoreAux3D.__new__(aux.HardCoreAux3D)
     obj.side = 10.0
 
     trial = np.array([[1.0, 1.0, 1.0]])

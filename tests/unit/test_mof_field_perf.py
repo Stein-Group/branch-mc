@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from gcmc.mof_field import FrameworkField
-from gcmc.potentials.pair_table import PairTable
+from gcmc.forcefield.lj_table import FrameworkField
+from gcmc.forcefield.pair_table import PairTable
 from scripts.mof.units import load_forcefield, reduce_tables
 
 FF_A = "ff/forcefield_A.yaml"
@@ -77,7 +77,7 @@ def test_widom_batched_matches_pointwise_reference():
     change. overlaps_many must also match overlaps point by point."""
     import math
 
-    from gcmc.mof_field import widom_henry
+    from gcmc.analysis.widom import widom_henry
 
     field, table, box = _synthetic_field(n_atoms=40, side=8.0, seed=2)
     xe = table.index("Xe")

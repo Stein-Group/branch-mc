@@ -18,7 +18,7 @@ import pytest
 from ase import Atoms
 from ase.io import write as ase_write
 
-from gcmc.potentials.lennard_jones import lj_pair_energy
+from gcmc.forcefield.lennard_jones import lj_pair_energy
 from scripts.mof.build_framework import (
     build,
     orthogonal_lengths,

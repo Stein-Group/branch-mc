@@ -142,7 +142,7 @@ if MODE == "aux3d":
 import cav_n_d_3d_g3_LJ as orig
 
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
-from gcmc import sim_setup as config
+from gcmc.run import sim_setup as config
 
 cfg = config.from_params(PARAMS[MODE])
 

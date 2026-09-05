@@ -5,7 +5,7 @@ Together they set the sweep size and the core budget the launcher enforces.
 
 from __future__ import annotations
 
-from gcmc.launcher import cores_per_run, expand_sweep
+from gcmc.run.launcher import cores_per_run, expand_sweep
 
 _BASE = {
     "potential": {"main": "hard_core"},

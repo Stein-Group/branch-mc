@@ -1,4 +1,4 @@
-"""P1: the parallel cell planner (gcmc/cell_plan.py).
+"""P1: the parallel cell planner (gcmc/space/cell_plan.py).
 
 Pure-function tests: no Config, no engine, no process pool, no simulation.
 Whole module runs in well under a second.
@@ -10,7 +10,7 @@ import math
 
 import pytest
 
-from gcmc.cell_plan import (
+from gcmc.space.cell_plan import (
     CellPlan,
     factor_cells,
     plan_auto,

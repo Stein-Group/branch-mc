@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import logging
 
-from . import runner
+from .run import runner
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -32,7 +32,17 @@ def main(argv: list[str] | None = None) -> int:
 
     args = p.parse_args(argv)
     if args.cmd == "run":
-        state, paths = runner.run(args.params, root=args.root)
+        # A BAD PARAMS FILE IS A USER ERROR, NOT A CRASH. `sim_setup` raises
+        # `ValueError` with a message written to be read -- it names the key, what
+        # it conflicts with and what to write instead -- and a traceback wrapped
+        # around that message hides it in twenty lines of frames the reader
+        # cannot act on. Only the two exception types that mean "your input" are
+        # caught; anything else is a bug in this package and a traceback is the
+        # correct output for one.
+        try:
+            state, paths = runner.run(args.params, root=args.root)
+        except (ValueError, FileNotFoundError) as exc:
+            p.exit(2, f"error: {exc}\n")
         # Compatibility contract: this exact "done: ..." line goes to stdout;
         # cluster sweep scripts grep it. Keep it a print, not a log record.
         print(f"done: step={state.step} N={len(state.positions)} dir={paths.directory}")

@@ -12,11 +12,11 @@ So the rule is mechanical: the tolerance literal appears in `geometry.py` and
 nowhere else in `gcmc/`, and every overlap decision routes through
 `geometry.overlaps`, `geometry.pair_overlaps` or `overlap.overlap_radius`.
 Modules that need the constant import it (`samplers/channel.py` and
-`mof_channel.py` both do).
+`channel_move.py` both do).
 
 A new site that genuinely cannot use the helpers -- one working in squared
 distances, say -- takes the threshold from `overlap_radius` and squares it, which
-is what `mof_field.overlaps_many` does. That still leaves one subtraction in one
+is what `FrameworkField.overlaps_many` does. That still leaves one subtraction in one
 place.
 """
 
@@ -29,9 +29,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from gcmc import geometry
-from gcmc.potentials import overlap
-from gcmc.potentials.pair_table import PairTable, overlaps_table
+from gcmc.forcefield import overlap
+from gcmc.forcefield.pair_table import PairTable, overlaps_table
+from gcmc.space import geometry
 
 _PKG = Path(geometry.__file__).parent
 _GEOMETRY = _PKG / "geometry.py"
@@ -153,15 +153,20 @@ def test_overlaps_table_delegates_rather_than_reimplementing(monkeypatch):
     assert overlaps_table(0.5, 0, 0, table) == "sentinel"
 
 
-@pytest.mark.parametrize("mod", ["gcmc.mof_field", "gcmc.mof_metropolis"])
+@pytest.mark.parametrize("mod", ["gcmc.forcefield.lj_table", "gcmc.engine.MC_engine"])
 def test_the_mof_layer_imports_the_overlap_convention(mod):
     """Both MOF overlap sites were independent copies until P3. If one loses the
     import it has almost certainly grown a copy back.
 
     Renamed at S2: the convention moved from `geometry` (layer 2) down to
     `potentials.overlap` (layer 1), because every part of it is a function of
-    sigma and none of it knows about a box. The guard is unchanged in intent --
-    only the name of the module that must be imported has moved."""
+    sigma and none of it knows about a box. Renamed again at S5.4, when
+    `mof_field` merged into `forcefield.lj_table`, and RETARGETED at S5.5, when
+    the framework loop merged into `MC_engine.metropolis_window` and took its
+    overlap decision with it -- `mof_metropolis` stopped importing the module
+    because it stopped deciding, which is the outcome the guard wants, not a
+    hole in it. The intent is unchanged every time: whichever module decides
+    admissibility must reach for the one convention rather than grow a copy."""
     import importlib
 
     assert hasattr(importlib.import_module(mod), "overlap")

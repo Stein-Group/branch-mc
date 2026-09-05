@@ -5,7 +5,7 @@ and a few clearly supported mixes must build. This guards the matrix in the
 module docstring against drift.
 """
 
-from gcmc.sim_setup import from_params
+from gcmc.run.sim_setup import from_params
 
 
 def _raises(p):

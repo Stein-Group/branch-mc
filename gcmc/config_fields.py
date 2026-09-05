@@ -1,11 +1,11 @@
 """Which Config fields are physics, which are execution, and which are derived.
 
-WHY THIS FILE EXISTS (R8). The run fingerprint used to be a hand-curated tuple
+WHY THIS FILE EXISTS. The run fingerprint used to be a hand-curated tuple
 of names in `hash_fingerprint`. Maintained lists drift, and this one had:
 
   * `lj_tail_pref` MISSING -- so `tail: true` and `tail: false`, two different
     Hamiltonians sampling different densities, hashed to the same id and would
-    resume each other. A live collision, found by the partition test in S1.
+    resume each other. A live collision, found by the partition test below.
   * `pore_axis_len` missing while `pore_H` and `pore_R` were present.
   * eight of twenty-five keys hashing as literal `null` on an ordinary run.
   * four keys DERIVED from others already in the set -- `potential_type` from
@@ -92,7 +92,12 @@ SAMPLER: tuple[str, ...] = (
 )
 
 ENSEMBLE: tuple[str, ...] = (
-    "ensemble_type",  # muVT | NVT | QA | confined
+    # muVT | NVT | semigrand | QA | confined. It carries the CANONICAL vs
+    # SEMI-GRAND distinction that `fixed_composition` used to carry as a
+    # separate boolean: at fixed N, NVT holds every species count and
+    # semigrand holds only the total, and those are different chains sampling
+    # different distributions, so the name is physics.
+    "ensemble_type",
     "chem_pot",
     "fugacity",  # z, the activity the chain actually uses
     "target_n",

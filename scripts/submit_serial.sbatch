@@ -31,4 +31,4 @@ export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 BASE="${1:?usage: ./submit_serial.sbatch <params.json> [runs_root]}"
 ROOT="${2:-runs/$(basename "$BASE" .json)}"
 
-python -m gcmc.launcher "$BASE" --root "$ROOT" --threads 1
+python -m gcmc.run.launcher "$BASE" --root "$ROOT" --threads 1

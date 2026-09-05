@@ -27,7 +27,7 @@ import dataclasses
 import pytest
 
 from gcmc import config_specs as CS
-from gcmc import sim_setup
+from gcmc.run import sim_setup
 from tests.matrix import _enumerate as E
 from tests.matrix._axes import build_params
 
@@ -94,7 +94,7 @@ def test_the_kernel_spec_never_reaches_the_identity() -> None:
     digest four separate ways (`potential_type`, `branch`, `channel`,
     `metropolis`) while being hashed itself.
     """
-    from gcmc import hash_fingerprint
+    from gcmc.run import hash_fingerprint
 
     derived = {f.name for f in dataclasses.fields(CS.KernelSpec)}
     leaked = sorted(derived & set(hash_fingerprint._IDENTITY_FIELDS))
@@ -172,7 +172,7 @@ def test_identity_is_exactly_the_three_physics_specs() -> None:
     `config_fields` and `config_specs` are pinned to each other in a triangle.
     Any two of them agreeing while the third drifts is caught here.
     """
-    from gcmc import hash_fingerprint
+    from gcmc.run import hash_fingerprint
 
     union: set[str] = set()
     for cls in (CS.PotentialSpec, CS.SamplerSpec, CS.EnsembleSpec):
@@ -189,7 +189,7 @@ def test_execution_and_io_never_reach_the_identity() -> None:
     split one experiment across many directories and quietly break resume, and
     it would look like nothing more than a lot of run folders.
     """
-    from gcmc import hash_fingerprint
+    from gcmc.run import hash_fingerprint
 
     never: set[str] = set()
     for cls in (CS.ExecutionSpec, CS.IOSpec):

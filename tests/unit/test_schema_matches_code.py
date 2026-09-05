@@ -4,7 +4,7 @@
 allowlist and rejects anything else, so a key it does not know is a hard error
 and a key it knows but nobody documents is invisible. The other two copies are
 examples/schema.json (machine-readable, what config validation uses) and the
-Schema block in gcmc/sim_setup.py's docstring (what a person reads).
+Schema block in gcmc/run/sim_setup.py's docstring (what a person reads).
 
 Copies rot. A detached annotated copy of this schema had drifted far enough to
 document `use_depth`, a key the code now REJECTS (it became `full_repacking`),
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-import gcmc.sim_setup as S
+import gcmc.run.sim_setup as S
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_JSON = ROOT / "examples" / "schema.json"
@@ -33,7 +33,7 @@ def _allowlists_from_source():
     """Pull the literal key sets out of the `_check(section, {...}, {...})` calls
     inside from_params. Read from the AST, not from a docstring or a comment, so
     this measures the code that actually runs."""
-    src = (ROOT / "gcmc" / "sim_setup.py").read_text()
+    src = (ROOT / "gcmc" / "run" / "sim_setup.py").read_text()
     tree = ast.parse(src)
     fn = next(
         n
@@ -140,6 +140,7 @@ def test_docstring_schema_documents_every_key():
         "rosenbluth",
         "branch",
         "channel",
+        "channel_cyclic",
         "reweight",
         # sampler.channel_length: "cyclic" is current, the rest legacy synonyms
         "cyclic",
@@ -149,6 +150,7 @@ def test_docstring_schema_documents_every_key():
         # ensemble.type
         "muVT",
         "NVT",
+        "semigrand",
         "QA",
         "confined",
         # run.kind

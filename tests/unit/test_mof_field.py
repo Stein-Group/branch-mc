@@ -21,9 +21,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from gcmc.io_framework import load_framework_typed
-from gcmc.mof_field import FrameworkField
-from gcmc.potentials.pair_table import PairTable
+from gcmc.forcefield.lj_table import FrameworkField
+from gcmc.forcefield.pair_table import PairTable
+from gcmc.run.io_framework import load_framework_typed
 from scripts.mof.ref_energy import read_extxyz, total_energy
 from scripts.mof.units import load_forcefield, reduce_tables
 
@@ -177,7 +177,7 @@ def test_widom_henry_selectivity_lands_near_the_paper(setup):
     """
     import numpy as np
 
-    from gcmc.mof_field import widom_henry
+    from gcmc.analysis.widom import widom_henry
 
     field, table, red = setup["field"], setup["table"], setup["red"]
     beta = 1.0 / red.T_star  # reduced beta = 1 / T*

@@ -6,7 +6,7 @@ exposed as a property so run fingerprints keep reading potential_type unchanged.
 This pins the full mapping so the split cannot silently change a dispatch key.
 """
 
-from gcmc.sim_setup import _derive_potential_type, from_params
+from gcmc.run.sim_setup import _derive_potential_type, from_params
 
 # (potential, bias, sampler) -> expected flat tag
 CASES = {

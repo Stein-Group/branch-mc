@@ -64,7 +64,7 @@ import numpy as np
 import pytest
 import yaml
 
-from gcmc import MC_engine
+from gcmc.engine import MC_engine
 
 #: Axis points where the correction is measured to actually evaluate. See the
 #: module docstring for the one that is deliberately not here.

@@ -24,12 +24,14 @@ Adding a module to `LAYERS` is the ONLY way to make this test pass for new code.
 That is deliberate: a new file must be placed on the ladder by a human who
 thought about where it goes, not defaulted onto it.
 
-NOTE ON THE CURRENT TREE. The layer assignments below describe the TARGET
-architecture (restructure_plan.md section 5) mapped onto today's filenames, so
-the test is useful before the S2 restructure rather than after it. Where a
-module is scheduled to be merged away (the `mof_*` family, the duplicate
-potentials), it is placed at the layer its content belongs to, not the layer its
-filename suggests.
+NOTE ON THE CURRENT TREE. The layer assignments below used to describe a TARGET
+architecture mapped onto flat filenames, because the tree was flat and the ladder
+was the only place the architecture existed. At S5.10 the files moved into it:
+`gcmc/forcefield/`, `space/`, `system/`, `proposals/`, `sampling/`, `engine/`,
+`run/`, and `analysis/` off to one side. The directory a module sits in is now
+its layer, so this table and the tree say the same thing twice -- which is the
+point, because a second statement of the same fact is what makes a drift between
+them fail rather than pass.
 """
 
 from __future__ import annotations
@@ -76,64 +78,72 @@ LAYERS: dict[str, int] = {
     "config_fields": 0,
     "config_specs": 0,
     # -- L1 forcefield ------------------------------------------------------
-    "potentials.base": 1,
-    "potentials.pair_table": 1,
-    "potentials.lennard_jones": 1,
-    "potentials.lj_table": 1,
-    "potentials.hard_sphere": 1,
-    "potentials.aux": 1,
-    "potentials.overlap": 1,  # S2: the overlap convention, moved down from L2
-    "species": 1,
-    "species_file": 1,
-    "topology": 1,
-    "mof_field": 1,  # -> merges into potentials.pair_table (S5.4)
+    "forcefield.base": 1,
+    "forcefield.pair_table": 1,
+    "forcefield.lennard_jones": 1,
+    "forcefield.lj_table": 1,  # S5.4: absorbed mof_field (the framework half)
+    "forcefield.hard_sphere": 1,
+    "forcefield.aux": 1,
+    "forcefield.overlap": 1,  # S2: the overlap convention, moved down from L2
+    "forcefield.species": 1,
+    "forcefield.species_file": 1,
+    "forcefield.topology": 1,
     # -- L2 space -----------------------------------------------------------
-    "geometry": 2,
-    "neighbors": 2,
-    "body": 2,  # S2: oriented body geometry, moved down from samplers.channel
-    "cell_plan": 2,
-    "decomposition": 2,
+    "space.geometry": 2,
+    "space.neighbors": 2,
+    "space.body": 2,  # S2: oriented body geometry, moved down from samplers.channel
+    "space.cell_plan": 2,
+    "space.decomposition": 2,
     # -- L3 system ----------------------------------------------------------
-    "state": 3,
+    "system.state": 3,
     # -- L4 proposals -------------------------------------------------------
-    "moves": 4,
-    "trials": 4,
-    "channel_move": 4,
+    "proposals.moves": 4,
+    "proposals.trials": 4,
+    "proposals.channel_move": 4,  # S5.7: absorbed the framework window + its sweep factory
     # -- L5 sampling --------------------------------------------------------
-    "samplers.base": 5,
-    "samplers.rosenbluth": 5,
-    "samplers.branch": 5,
-    "samplers.channel": 5,
-    "samplers.channel_cyclic": 5,  # R16: shared DP, own mask policy
-    "samplers.reweighting": 5,
-    "mof_channel": 5,  # -> merges into channel_move (S5.7)
+    "sampling.base": 5,
+    "sampling.rosenbluth": 5,
+    "sampling.branch": 5,
+    "sampling.channel": 5,
+    "sampling.channel_cyclic": 5,  # R16: shared DP, own mask policy
+    "sampling.reweighting": 5,
     # -- L6 engine ----------------------------------------------------------
-    "MC_engine": 6,
-    "parallel": 6,
-    "mof_metropolis": 6,  # -> merges into the one metropolis loop (S5.5)
+    "engine.MC_engine": 6,
+    "engine.parallel": 6,
+    "engine.framework": 6,  # S5.5: its metropolis loop merged into MC_engine
     # -- L7 run -------------------------------------------------------------
-    "sim_setup": 7,
-    "hash_fingerprint": 7,
-    "io": 7,
-    "io_framework": 7,
-    "runner": 7,
-    "launcher": 7,
-    "migrate": 7,
+    "run.sim_setup": 7,
+    "run.hash_fingerprint": 7,
+    "run.io": 7,
+    "run.io_framework": 7,
+    "run.runner": 7,
+    "run.launcher": 7,
+    "run.migrate": 7,
     "__main__": 7,
     # -- off-ladder ---------------------------------------------------------
-    "rdf": 3,
-    "widom": 3,
+    "analysis.rdf": 3,
+    "analysis.widom": 3,
     # Analysis over a configuration: reads positions, a species column and the
     # neighbour structure (L2), and nothing above. Sits with `rdf` because it is
     # the same kind of thing -- a correlation measured on a frame -- and the two
     # are marked in `demixing`'s docstring as an S5 merge candidate.
-    "demixing": 3,
+    "analysis.demixing": 3,
 }
 
 # Packages whose __init__ is a re-export shim. They are excluded rather than
 # layered because a shim's imports describe its children, not a dependency of
 # its own, and layering them would force every child up to the parent's level.
-_SHIMS = {"", "potentials", "samplers"}
+_SHIMS = {
+    "",
+    "forcefield",
+    "sampling",
+    "space",
+    "system",
+    "proposals",
+    "engine",
+    "run",
+    "analysis",
+}
 
 
 # Inversions that exist TODAY and are scheduled to be removed. Listed
@@ -162,12 +172,12 @@ KNOWN_INVERSIONS: dict[tuple[str, str], str] = {
     # hands a policy object down. Resolving the edge now would build a seam that
     # the collapse then removes.
     (
-        "channel_move",
-        "samplers.channel",
+        "proposals.channel_move",
+        "sampling.channel",
     ): "S5: R7 collapses the sweeps; the factory goes with them",
     (
-        "channel_move",
-        "samplers.channel_cyclic",
+        "proposals.channel_move",
+        "sampling.channel_cyclic",
     ): "S5: R7 collapses the sweeps; the factory goes with them",
 }
 

@@ -38,9 +38,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gcmc.mof_field import FrameworkField
-from gcmc.mof_metropolis import advance_metropolis_mof_ms
-from gcmc.potentials.pair_table import PairTable
+from gcmc.engine.framework import advance_metropolis_mof_ms
+from gcmc.forcefield.lj_table import FrameworkField
+from gcmc.forcefield.pair_table import PairTable
 
 pytestmark = pytest.mark.slow
 
@@ -323,8 +323,10 @@ def _engine_mean_N(species_file: str, mu_per_species: dict, seed: int, windows: 
     """
     import numpy as _np
 
-    from gcmc import MC_engine, config_specs, sim_setup
-    from gcmc.state import ChainState
+    from gcmc import config_specs
+    from gcmc.engine import MC_engine
+    from gcmc.run import sim_setup
+    from gcmc.system.state import ChainState
 
     box, temp = 8.0, 2.0
     params = {

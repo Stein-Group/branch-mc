@@ -8,7 +8,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-from gcmc import topology as T
+from gcmc.forcefield import topology as T
 
 
 def ok(m):

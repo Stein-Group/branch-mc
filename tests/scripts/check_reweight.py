@@ -26,7 +26,7 @@ from _frozen import add_orig_to_path
 ORIG = str(add_orig_to_path())  # R1: resolved from $ORIG_ROOT or the tag
 sys.path.insert(0, WORK)
 from gcmc import config_specs
-from gcmc.samplers import reweighting as RW
+from gcmc.sampling import reweighting as RW
 
 
 def ok(m):
@@ -121,9 +121,9 @@ sys.argv, old = old_argv, None
 os.chdir(old_cwd)
 sys.path[:] = old_path
 
-from gcmc import MC_engine as engine
-from gcmc import sim_setup as config
-from gcmc.state import ChainState
+from gcmc.engine import MC_engine as engine
+from gcmc.run import sim_setup as config
+from gcmc.system.state import ChainState
 
 cfg = config.from_params(
     {

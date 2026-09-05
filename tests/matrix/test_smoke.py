@@ -42,8 +42,10 @@ from typing import Any
 import numpy as np
 import pytest
 
-from gcmc import MC_engine, config_specs, parallel, runner, sim_setup
-from gcmc.state import ChainState
+from gcmc import config_specs
+from gcmc.engine import MC_engine, parallel
+from gcmc.run import runner, sim_setup
+from gcmc.system.state import ChainState
 
 from . import _enumerate as E
 from ._axes import N_WINDOWS, SEED, Point, build_params

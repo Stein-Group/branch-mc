@@ -8,7 +8,7 @@ real and still worth doing -- but the ENGINE never calls any of them. It calls
 
 So 1,041 lines of the package existed solely to be compared against something
 else. That is test-support code by definition, and it now lives with the test
-that uses it. `gcmc/decomposition.py` keeps only what the engine runs.
+that uses it. `gcmc/space/decomposition.py` keeps only what the engine runs.
 
 Nothing here is maintained. If a diff against the original fails, the answer is
 that the ORIGINAL changed or the oracle is misconfigured -- never that this file
