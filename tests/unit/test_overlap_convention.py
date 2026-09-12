@@ -153,7 +153,9 @@ def test_overlaps_table_delegates_rather_than_reimplementing(monkeypatch):
     assert overlaps_table(0.5, 0, 0, table) == "sentinel"
 
 
-@pytest.mark.parametrize("mod", ["gcmc.forcefield.lj_table", "gcmc.engine.MC_engine"])
+@pytest.mark.parametrize(
+    "mod", ["gcmc.forcefield.lj_table", "gcmc.engine.metropolis_dynamics"]
+)
 def test_the_mof_layer_imports_the_overlap_convention(mod):
     """Both MOF overlap sites were independent copies until P3. If one loses the
     import it has almost certainly grown a copy back.
@@ -162,7 +164,7 @@ def test_the_mof_layer_imports_the_overlap_convention(mod):
     `potentials.overlap` (layer 1), because every part of it is a function of
     sigma and none of it knows about a box. Renamed again at S5.4, when
     `mof_field` merged into `forcefield.lj_table`, and RETARGETED at S5.5, when
-    the framework loop merged into `MC_engine.metropolis_window` and took its
+    the framework loop merged into `metropolis_dynamics.metropolis_window` and took its
     overlap decision with it -- `mof_metropolis` stopped importing the module
     because it stopped deciding, which is the outcome the guard wants, not a
     hole in it. The intent is unchanged every time: whichever module decides

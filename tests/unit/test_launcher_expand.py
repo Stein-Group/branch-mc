@@ -160,3 +160,39 @@ def test_the_grid_token_on_the_start_axis_is_not_a_sweep():
     combos, labels = expand_sweep(base)
     assert len(combos) == 1 and labels == ["single"]
     assert combos[0]["run"]["initial_config"] == "grid"
+
+
+def test_the_engine_axis_sweeps_and_labels_the_two_dynamics():
+    """The engine is a swept axis, so one launch produces both arms of a
+    tau_N comparison at one state point rather than two launches that have to
+    be kept apart by hand."""
+    sweep = {
+        **_BASE,
+        "sampler": {
+            "type": "channel",
+            "depth": 1,
+            "trial_density": 1.0,
+            "channel_length": 5.0,
+            "channel_width": 1.5,
+            "engine": ["metropolis_dynamics", "glauber_dynamics"],
+        },
+    }
+    combos, labels = expand_sweep(sweep)
+    assert len(combos) == 2
+    assert labels == ["enginemetropolis_dynamics", "engineglauber_dynamics"]
+    assert [c["sampler"]["engine"] for c in combos] == [
+        "metropolis_dynamics",
+        "glauber_dynamics",
+    ]
+
+
+def test_a_single_engine_is_applied_but_stays_out_of_the_label():
+    """Adding the axis must not rename any existing run directory: an axis with
+    one value is applied and contributes no id fragment."""
+    base = {
+        **_BASE,
+        "sampler": {**_BASE["sampler"], "engine": "metropolis_dynamics"},
+    }
+    combos, labels = expand_sweep(base)
+    assert len(combos) == 1 and labels == ["single"]
+    assert combos[0]["sampler"]["engine"] == "metropolis_dynamics"

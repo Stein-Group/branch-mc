@@ -136,7 +136,7 @@ def _composition(
 ) -> tuple[np.ndarray, float]:
     """Mean composition over the last half of a swap-free degenerate run."""
     from gcmc import config_specs
-    from gcmc.engine import MC_engine
+    from gcmc.engine import metropolis_dynamics
     from gcmc.proposals import moves
     from gcmc.run import sim_setup
     from gcmc.system.state import ChainState
@@ -149,13 +149,13 @@ def _composition(
         _degenerate_params(mu=mu, box=box, depth=depth, sampler=sampler)
     )
     pot = cfg.build_potential()
-    wgh = MC_engine.make_weigher(config_specs.kernel_spec(cfg), pot)
+    wgh = metropolis_dynamics.make_weigher(config_specs.kernel_spec(cfg), pot)
 
-    real_draw = MC_engine.moves.draw_move
-    real_corr = MC_engine.moves.species_draw_correction
-    MC_engine.moves.draw_move = no_swap
+    real_draw = metropolis_dynamics.moves.draw_move
+    real_corr = metropolis_dynamics.moves.species_draw_correction
+    metropolis_dynamics.moves.draw_move = no_swap
     if not correction:
-        MC_engine.moves.species_draw_correction = lambda *a, **k: 0.0
+        metropolis_dynamics.moves.species_draw_correction = lambda *a, **k: 0.0
     try:
         rng = np.random.default_rng(seed)
         n0 = 20
@@ -167,7 +167,7 @@ def _composition(
         state.species = np.full(n0, start_type, dtype=np.int64)
         frac, counts = [], []
         for _ in range(n_windows):
-            MC_engine.advance(state, cfg, pot, wgh)
+            metropolis_dynamics.advance(state, cfg, pot, wgh)
             assert state.species is not None
             n = len(state.positions)
             counts.append(n)
@@ -175,8 +175,8 @@ def _composition(
         half = np.asarray(frac)[n_windows // 2 :]
         return half.mean(axis=0), float(np.mean(counts[n_windows // 2 :]))
     finally:
-        MC_engine.moves.draw_move = real_draw
-        MC_engine.moves.species_draw_correction = real_corr
+        metropolis_dynamics.moves.draw_move = real_draw
+        metropolis_dynamics.moves.species_draw_correction = real_corr
 
 
 def _pooled(n_windows: int, *, correction: bool, **kw) -> np.ndarray:

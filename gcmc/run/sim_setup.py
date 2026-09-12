@@ -44,20 +44,53 @@ of this block is examples/schema.json, which validation uses.
 
   "sampler":    {"type": "metropolis" | "rosenbluth" | "branch" | "channel"
                          | "channel_cyclic" | "reweight",
+                 "engine": "metropolis_dynamics" | "glauber_dynamics",
+                                                           # default metropolis_dynamics; ABSENT MEANS
+                                                           #   metropolis_dynamics, which is the
+                                                           #   backward-compatibility contract.
+                                                           # THE DYNAMICS AXIS, not the proposal
+                                                           #   axis `type`: metropolis_dynamics is
+                                                           #   accept/reject, glauber_dynamics
+                                                           #   draws the window's whole occupancy
+                                                           #   from its exact conditional and has
+                                                           #   no acceptance test at all (dN of
+                                                           #   any sign and magnitude; add /
+                                                           #   remove / repack stop being separate
+                                                           #   moves). Same muVT ensemble, same z,
+                                                           #   same U -- a different kernel.
+                                                           # glauber_dynamics REQUIRES
+                                                           #   type = "channel" and depth >= 1,
+                                                           #   takes no full_repacking, refuses
+                                                           #   both auxiliaries and
+                                                           #   channel_cyclic, caps the LJ path at
+                                                           #   4 trials per sigma of rod length,
+                                                           #   and is serial only. It moves every
+                                                           #   run id: pre-`engine` directories
+                                                           #   are not resumed, by decision.
+                 "kmax_margin": int,                       # default 0; glauber_dynamics ONLY, and
+                                                           #   its only new tunable. kmax =
+                                                           #   min(M, ceil(packing_bound) +
+                                                           #   kmax_margin); M and kmax are both
+                                                           #   DERIVED, so neither is a key.
                  # EVERY OTHER KEY BELONGS TO SOME SAMPLERS AND NOT OTHERS, and a
                  # sampler refuses the ones it does not read rather than ignoring
                  # them (`_SAMPLER_KEYS`). Two of them are identity fields, so an
                  # ignored key is not harmless: it gives the same chain a
                  # different run directory.
                  #
-                 #   metropolis      no other key at all
+                 #   metropolis      no other key but `engine`
                  #   rosenbluth      depth, full_repacking, trials,
                  #   branch          trial_density, trial_box_side
                  #   reweight
                  #   channel         depth, full_repacking, trials,
-                 #                   trial_density, channel_length, channel_width
+                 #                   trial_density, channel_length,
+                 #                   channel_width, kmax_margin
                  #   channel_cyclic  depth, full_repacking, trial_density,
                  #                   channel_width
+                 #
+                 # `engine` is a key of EVERY sampler: stating the default is
+                 # always legal. WHICH VALUES a sampler admits is a different
+                 # question -- only `channel` may set glauber_dynamics.
                  "depth": int,                             # default 0; channel needs >= 1; XOR full_repacking
                  "full_repacking": bool,                   # default False; repacks the whole cavity instead
                                                            #   of a fixed depth. XOR depth.
@@ -251,6 +284,7 @@ import logging
 import math
 from dataclasses import dataclass
 
+from ..forcefield.overlap import max_core_floor
 from ..forcefield.species import (
     STATE_POINT_ROUTES,
     SpeciesSpec,
@@ -258,6 +292,8 @@ from ..forcefield.species import (
     one_route,
 )
 from ..space import cell_plan
+from ..space.body import cuboid_packing_bound
+from . import guard_audit
 
 log = logging.getLogger(__name__)
 
@@ -312,6 +348,21 @@ def _gamma_dict(pmf: bool, reweight: bool, two_dim: bool) -> dict[int, float]:
 
 
 _MAIN = {"hard_core", "lennard_jones"}
+
+#: THE DYNAMICS AXIS (section 3.4 of the design plan). `metropolis_dynamics`
+#: reads redundant next to `sampler = "metropolis"` and is kept deliberately: it
+#: names the DYNAMICS (accept/reject versus an exact conditional draw), while
+#: `sampler` names the PROPOSAL (how a trial cloud is generated). Two different
+#: things called "metropolis" in one params file is exactly the confusion the
+#: value name exists to prevent, and every refusal below names the axis rather
+#: than only the values.
+#:
+#: ABSENT MEANS `metropolis_dynamics`. That is the backward-compatibility contract and
+#: it is stated here, in the schema and in the refusal messages -- not left
+#: implied -- because every params file written before this field existed relies
+#: on it.
+_ENGINES = {"metropolis_dynamics", "glauber_dynamics"}
+_ENGINE_DEFAULT = "metropolis_dynamics"
 # R16: `channel_cyclic` is its own sampler, not a value of `channel_length`.
 # The two share a dynamic program and nothing else; the cyclic rod lifts the
 # locality guard, pays a full minimum-image pair pass, and sizes its trial count
@@ -355,27 +406,95 @@ _SAMPLERS = {
 _CAVITY_KEYS = frozenset(
     {"trials", "trial_density", "trial_box_side", "depth", "full_repacking"}
 )
+#: `engine` is a key of EVERY sampler, because stating the default is always
+#: legal and a reader should be able to write `engine: metropolis_dynamics` next to any
+#: sampler and have it mean what it says. Which VALUES each sampler admits is a
+#: different question, answered by the refusal table further down: only
+#: `channel` may set `glauber_dynamics`. Refusing the key here instead would
+#: give the reader "sampler.type='rosenbluth' does not read ['engine']", which
+#: is true of the value and misleading about the key.
+_ENGINE_KEY = frozenset({"engine"})
 _SAMPLER_KEYS: dict[str, tuple[frozenset[str], str]] = {
     # Standard GCMC: one uniform trial insertion, no cavity, no trial cloud.
-    "metropolis": (frozenset(), "it proposes one uniform insertion and no cloud"),
-    "rosenbluth": (_CAVITY_KEYS, "its trial region is a cube of side trial_box_side"),
-    "branch": (_CAVITY_KEYS, "its trial region is a cube of side trial_box_side"),
-    "reweight": (_CAVITY_KEYS, "its trial region is a cube of side trial_box_side"),
+    "metropolis": (_ENGINE_KEY, "it proposes one uniform insertion and no cloud"),
+    "rosenbluth": (
+        _CAVITY_KEYS | _ENGINE_KEY,
+        "its trial region is a cube of side trial_box_side",
+    ),
+    "branch": (
+        _CAVITY_KEYS | _ENGINE_KEY,
+        "its trial region is a cube of side trial_box_side",
+    ),
+    "reweight": (
+        _CAVITY_KEYS | _ENGINE_KEY,
+        "its trial region is a cube of side trial_box_side",
+    ),
     # The rod: an oriented cuboid, so a cube side means nothing to it.
+    # `kmax_margin` is the Glauber engine's one tunable and only this sampler can run
+    # that engine, so only this sampler reads it.
     "channel": (
         frozenset(
             {"trials", "trial_density", "channel_length", "channel_width"}
-            | {"depth", "full_repacking"}
-        ),
+            | {"depth", "full_repacking", "kmax_margin"}
+        )
+        | _ENGINE_KEY,
         "its trial region is an oriented cuboid of channel_length x channel_width",
     ),
     # R16: the cyclic rod spans the box, so its LENGTH is set per move by the
     # orientation and there is no fixed trial count either.
     "channel_cyclic": (
-        frozenset({"trial_density", "channel_width", "depth", "full_repacking"}),
+        frozenset({"trial_density", "channel_width", "depth", "full_repacking"})
+        | _ENGINE_KEY,
         "it spans the box, so its length and trial count are set per move",
     ),
 }
+
+
+def assert_channel_guard(
+    channel_length: float,
+    channel_width: float,
+    dim: int,
+    span: float,
+    cutoff: float,
+    *,
+    span_name: str = "box",
+) -> None:
+    """Refuse a channel body that does not fit, with a margin, inside `span`.
+
+    The guarded sweep works on LOCAL cuboid coordinates and does no minimum
+    image, so a body whose diagonal reaches within `cutoff` of the torus size
+    can read a wrapped pair as a distant one. `span` is the size of that torus
+    and `cutoff` the largest distance the sweep will read.
+
+    ONE FUNCTION, TWO TORI. Serially the torus is the box. On the parallel path
+    the body must lie inside the WORKER CELL, so the binding dimension is the
+    cell and a config that passes the serial check can violate it per cell.
+    G10 of the design plan wants that extension written while it is
+    cheap rather than after the G9 references are pinned, so the span is a
+    parameter and `span_name` is what the message calls it. The channel sampler
+    is refused under `run.kind="parallel"` today, so `from_params` only ever
+    passes the box; `tests/unit/test_glauber_config.py` calls this with a cell
+    span directly, which is what keeps the branch honest rather than aspirational.
+
+    THE DIAGONAL IS DIMENSION-CORRECT: sqrt(L^2 + 2 w^2) for a 3D cuboid,
+    sqrt(L^2 + w^2) for a 2D rectangle, because the cross-section carries
+    (dim - 1) widths. `channel_move.window_guard_ok` uses 2 w^2 unconditionally,
+    which is STRICTER in 2D -- it can refuse a legal 2D body but never accept an
+    illegal one -- and is left alone: relaxing a guard is the one direction that
+    needs its own gate.
+    """
+    diag = math.sqrt(float(channel_length) ** 2 + (dim - 1) * float(channel_width) ** 2)
+    limit = float(span) - float(cutoff)
+    if diag > limit:
+        raise ValueError(
+            f"channel geometry violates the periodic guard: cuboid diagonal "
+            f"{diag:.3f} must be <= {span_name} {float(span):.3f} - "
+            f"{float(cutoff):.3f} = {limit:.3f} (the margin is the largest "
+            f"distance the sweep reads: auxiliary.cutoff when a short-range "
+            f"auxiliary is configured, the largest active pair floor on the "
+            f"hard-core path under engine=glauber_dynamics, else "
+            f"run.upper_cutoff)"
+        )
 
 
 def _check_sampler(smp: dict[str, Any], sampler: str) -> None:
@@ -576,7 +695,7 @@ class Config:
     radius: float
     diameter: float
     r_squared: float
-    no_of_trial_molecules: int
+    n_trial_molecules: int
     no_neigh: int
     upper_cutoff: float
     lower_cutoff: float
@@ -662,6 +781,29 @@ class Config:
     # molecule fields -- is the authority on sigma, epsilon, the pair floors, the
     # truncation, the auxiliary and the per-species state point.
     species: SpeciesSpec | None = None
+    # ---- the DYNAMICS axis (design plan, section 3.4) -----------
+    #
+    # `metropolis_dynamics` (the default, and what an ABSENT key means -- that is the
+    # backward-compatibility contract) is accept/reject dynamics: everything
+    # shipped before this field existed. `glauber_dynamics` computes the exact
+    # conditional distribution of a window's guest content and draws from it, so
+    # its exchange path has no acceptance test at all.
+    #
+    # SAME ENSEMBLE, DIFFERENT KERNEL. muVT, the same z, the same U -- which is
+    # why the existing physics gates apply to it verbatim as cross-engine
+    # agreement rather than needing new reference numbers.
+    engine: str = "metropolis_dynamics"
+    # The Glauber engine's ONE new tunable: how far above the body's geometric
+    # packing bound the occupancy ladder is truncated. Everything else derives.
+    kmax_margin: int = 0
+    # DERIVED, per section 1.3. `window_M` is the pool size (in-window guests
+    # plus the fresh cloud, always exactly this many points) and `window_kmax`
+    # the ladder truncation. Both are zero on a `metropolis_dynamics` run, which reads
+    # neither. See `config_fields.DERIVED` for why they are derived rather than
+    # separately hashed, and `tests/unit/test_glauber_config.py` for the
+    # derivation as an assertion.
+    window_M: int = 0
+    window_kmax: int = 0
 
     @property
     def n_species(self) -> int:
@@ -812,7 +954,7 @@ class Config:
                     upper_cutoff=uc,
                     diameter=d,
                     side=self.box,
-                    n_trials=self.no_of_trial_molecules,
+                    n_trials=self.n_trial_molecules,
                     g3_csv=self.g3_csv,
                 )
             case "aux" if self.two_dim:
@@ -825,7 +967,7 @@ class Config:
                     diameter=d,
                     upper_cutoff=uc,
                     side=self.box,
-                    n_trials=self.no_of_trial_molecules,
+                    n_trials=self.n_trial_molecules,
                     g3_csv=self.g3_csv,
                 )
             case "reweight":
@@ -900,6 +1042,8 @@ def from_params(p: dict[str, Any]) -> Config:
         smp,
         {
             "type",
+            "engine",
+            "kmax_margin",
             "depth",
             "full_repacking",
             "trials",
@@ -913,6 +1057,78 @@ def from_params(p: dict[str, Any]) -> Config:
     sampler = smp["type"]
     if sampler not in _SAMPLERS:
         raise ValueError(f"unknown sampler {sampler!r}; allowed {sorted(_SAMPLERS)}")
+    # THE DYNAMICS, read before anything else about the sampler, because several
+    # refusals below are conditional on it. Absent means `metropolis_dynamics`
+    # (`_ENGINES`), which is the backward-compatibility contract.
+    engine = str(smp.get("engine", _ENGINE_DEFAULT))
+    if engine not in _ENGINES:
+        raise ValueError(
+            f"unknown sampler.engine {engine!r}; allowed {sorted(_ENGINES)}. "
+            "`engine` selects the DYNAMICS (Metropolis accept/reject vs the "
+            "Glauber engine's exact conditional draw); `sampler.type` selects "
+            "how a trial cloud is proposed. They are different axes."
+        )
+    glauber = engine == "glauber_dynamics"
+    # ---- the Glauber engine's refusal table (section 3.5) ---------------
+    #
+    # ERROR TEXT NAMES THE AXIS, NOT JUST THE VALUES. `engine` selects the
+    # dynamics; `sampler` selects how a trial cloud is proposed. Both have a
+    # value called "metropolis"-ish, so a bare "incompatible" message is
+    # unreadable -- and an unreadable refusal is the failure mode here, which is
+    # why `tests/unit/test_glauber_config.py` asserts on the MESSAGE and not only
+    # on the raise.
+    if glauber and sampler != "channel":
+        _why = {
+            "metropolis": (
+                "sampler=metropolis proposes a single trial with no cloud, "
+                "so the Glauber engine has nothing to sweep over"
+            ),
+            "rosenbluth": (
+                "sampler=rosenbluth proposes a cube cavity and selects "
+                "sequentially; there is no transfer matrix over it, so the "
+                "local conditional cannot be computed exactly"
+            ),
+            "branch": (
+                "sampler=branch enumerates cliques in a cube cavity, which "
+                "has no 1D chain structure and no transfer matrix"
+            ),
+            "reweight": (
+                "sampler=reweight is the 2D hexatic psi6 method, an "
+                "estimator-layer scheme with no local conditional"
+            ),
+            "channel_cyclic": (
+                "the cyclic rod spans the box wall to wall, so its exterior "
+                "is not separable from its interior and the frozen-exterior "
+                "argument the whole conditional is derived from has no "
+                "meaning. This is a permanent geometric objection, not a "
+                "performance one"
+            ),
+        }[sampler]
+        raise ValueError(
+            f"engine=glauber_dynamics requires sampler=channel, got "
+            f"sampler={sampler}.\n"
+            "These are different axes: `engine` selects the dynamics "
+            "(Metropolis accept/reject vs Glauber conditional draw), "
+            "`sampler` selects how the trial cloud is proposed. "
+            f"{_why}."
+        )
+
+    kmax_margin = int(smp.get("kmax_margin", 0))
+    if kmax_margin < 0:
+        raise ValueError(
+            f"sampler.kmax_margin must be >= 0, got {kmax_margin}: it is how far "
+            "ABOVE the body's geometric packing bound the ladder is truncated, "
+            "and a negative margin would truncate below the bound -- which makes "
+            "the kernel the identity on states the chain can actually reach and "
+            "silently biases <N> low (design plan, section 3.7)."
+        )
+    if "kmax_margin" in smp and not glauber:
+        raise ValueError(
+            "sampler.kmax_margin only means something under "
+            'sampler.engine="glauber_dynamics": it sets where that engine '
+            "truncates its occupancy ladder. Metropolis dynamics has no ladder. "
+            "Remove it, or set the engine."
+        )
     # Only this sampler's keys, from here on. Every check below is one this
     # sampler can actually fail.
     _check_sampler(smp, sampler)
@@ -1484,8 +1700,8 @@ def from_params(p: dict[str, Any]) -> Config:
             "reweight uses psi6, not a pmf auxiliary; remove the auxiliary block"
         )
     # M15: fail at the earliest layer that can see the problem. This guard lived
-    # in `MC_engine._advance_metropolis`, which meant the validator ACCEPTED the
-    # combination and the engine refused it -- after the run directory was
+    # in `metropolis_dynamics._advance_single_particle`, which meant the validator
+    # ACCEPTED the combination and the engine refused it -- after the run directory was
     # created, the log opened and the first window begun. The feature matrix
     # found it on its first run, as a point that passed validation and then
     # raised.
@@ -1495,7 +1711,7 @@ def from_params(p: dict[str, Any]) -> Config:
     # trial the selection bias cancels identically, so metropolis + pmf IS
     # metropolis on the plain LJ potential, and the engine unwraps it to exactly
     # that.
-    # M15 again, and a worse case than the one below it. `_advance_metropolis`
+    # M15 again, and a worse case than the one below it. `_advance_single_particle`
     # is not typed-aware in ANY respect, and measured on the tree three separate
     # things go wrong at once, all of them SILENTLY:
     #
@@ -1521,7 +1737,7 @@ def from_params(p: dict[str, Any]) -> Config:
     #
     # EXCEPT under the canonical ensemble, and the exception is exact rather than
     # convenient. Everything the refusal names is a property of
-    # `_advance_metropolis`, and a canonical run never enters it: `advance` takes
+    # `_advance_single_particle`, and a canonical run never enters it: `advance` takes
     # its NVT branch, draws from `moves.draw_canonical_move`, and proposes a
     # translation or a species-aware pair identity exchange. `metropolis` there
     # is a name for "no trial cloud", which is what the canonical move set is.
@@ -1543,7 +1759,7 @@ def from_params(p: dict[str, Any]) -> Config:
     # matrix for the same reason: the numbers are the numbers of a perfectly
     # valid run, just not the run that was requested.
     #
-    # `gcmc/engine/parallel.py` contains no species draw, no `p_trial`, no identity
+    # `gcmc/engine/cell_parallel.py` contains no species draw, no `p_trial`, no identity
     # swap and no `species_draw_correction` -- grep it. The cell kernel is
     # single-species, so every insertion is type 0. Measured on a three-species
     # request at box 16 over four windows: N grew 453 -> 788 and the composition
@@ -1562,7 +1778,7 @@ def from_params(p: dict[str, Any]) -> Config:
     if typed and parallel:
         raise ValueError(
             "run.kind='parallel' is not multi-species yet (P7): the cell kernel "
-            "in gcmc/engine/parallel.py draws no species, proposes no identity swap and "
+            "in gcmc/engine/cell_parallel.py draws no species, proposes no identity swap and "
             "reads no per-pair sigma/epsilon, so a typed parallel run inserts "
             "everything as the first species and silently samples a "
             "single-species system at that species' activity. The species column "
@@ -1783,7 +1999,7 @@ def from_params(p: dict[str, Any]) -> Config:
         # The channel trial region is an oriented cuboid: one long axis of length
         # channel_length and a square cross-section channel_width x channel_width.
         # That is the exact body the trial spheres are dropped into (see the
-        # channel branch of MC_engine.advance), so its volume is the natural
+        # channel branch of metropolis_dynamics.advance), so its volume is the natural
         # normaliser. trial_density is spheres per unit volume, hence the count is
         # simply density * volume. trial_box_side has no meaning here and was
         # rejected above.
@@ -2113,9 +2329,134 @@ def from_params(p: dict[str, Any]) -> Config:
                 "decomposition carries only the fluid in each cell and would "
                 "drop the frozen matrix. Use run.kind='single'."
             )
+    # ---- the Glauber engine's remaining refusals (section 3.5) ----------
+    if glauber:
+        if full_repacking or int(smp.get("depth", 0)) < 1:
+            raise ValueError(
+                "engine=glauber_dynamics requires sampler.depth >= 1 and takes "
+                "no sampler.full_repacking. The Glauber engine replaces add / remove "
+                "/ repack with ONE move that draws the window's whole occupancy "
+                "from its exact conditional, so dN is free and neither knob "
+                "selects a move type any more; depth >= 1 is kept because it is "
+                "the channel sampler's own precondition (depth 0 has no clique "
+                "structure to sweep). Set depth: 1 and drop full_repacking."
+            )
+        if short_range:
+            # SECTION 3.5, the config twin of the assertion in the engine
+            # module. The dual-cutoff correction depends on the drawn
+            # ARRANGEMENT, not on k, so it cannot fold into the ladder and would
+            # reintroduce an acceptance test -- i.e. it would make a
+            # "rejection-free" engine reject. A later opt-in hybrid (Glauber engine on
+            # the rc_sel ladder plus one Metropolis step on the uc residual) is
+            # exact but not rejection-free and must log its acceptance; it is out
+            # of scope.
+            raise ValueError(
+                "engine=glauber_dynamics refuses the short-range (dual-cutoff) "
+                "auxiliary. The Glauber engine has no acceptance step to divide a "
+                "shortened selection radius back out of, so it scores every "
+                "pair at run.upper_cutoff; the dual-cutoff correction depends on "
+                "the drawn arrangement rather than on the occupancy k, so it "
+                "cannot fold into the occupancy ladder and would reintroduce a "
+                "rejection. Drop the auxiliary block, or use "
+                "engine=metropolis_dynamics."
+            )
+        if pmf:
+            raise ValueError(
+                "engine=glauber_dynamics refuses the pmf auxiliary: the pmf is a "
+                "SELECTION bias divided back out in an acceptance ratio, and "
+                "this engine has no acceptance ratio to divide it out of."
+            )
+        if ens_type == "NVT" and typed:
+            raise ValueError(
+                "engine=glauber_dynamics does not support the CANONICAL "
+                "ensemble (ensemble.type='NVT' with a species file), which "
+                "fixes every species count and not just the total. The window "
+                "move resamples a whole block's occupancy from its exact "
+                "conditional, and there is no way to do that while conserving a "
+                "species MULTISET -- the transfer matrix draws a clique, not a "
+                "permutation. Use ensemble.type='semigrand' (total N fixed, "
+                "composition free), which is what this engine's fixed-N "
+                "restriction actually samples."
+            )
+        if ens_type not in ("muVT", "NVT", "semigrand"):
+            raise ValueError(
+                f"engine=glauber_dynamics does not support "
+                f"ensemble.type={ens_type!r}. It is derived for muVT with a "
+                "separable frozen exterior (and its fixed-N restriction, where "
+                "the ladder collapses to k = k_in); a pore or a quenched matrix "
+                "changes what 'outside the window' means and has its own gate."
+            )
+    # ---- M and kmax, DERIVED (section 1.3) --------------------------------
+    #
+    #     M    = round(trial_density * V_W)          per window body
+    #     kmax = min(M, ceil(packing_bound(body)) + kmax_margin)
+    #
+    # BOTH ARE PHYSICS PARAMETERS, NOT ENGINE CONSTANTS: each changes the chain,
+    # so neither may be a literal inside the engine module where it would be an
+    # undeclared knob that escapes the run digest. They are declared here, and
+    # `config_fields.DERIVED` records why they are derived from hashed inputs
+    # rather than hashed themselves.
+    #
+    # M IS THE CONFIGURED TRIAL COUNT, deliberately the same number and not a
+    # second derivation to drift: `n_trials` above is already
+    # `round(trial_density * channel_length * channel_width**(dim-1))`, which is
+    # exactly `round(trial_density * V_W)`. What the field adds is the MEANING --
+    # on the Metropolis path `n_trial_molecules` is the size of the fresh
+    # cloud, while here it is the size of the whole POOL (in-window guests plus
+    # cloud), and the pool is always exactly M points because inadmissible
+    # trials are kept at weight zero rather than dropped (section 2B.5).
+    #
+    # M MAY DEPEND ON THE BODY GEOMETRY -- legal, the body is drawn without
+    # looking at the configuration -- but NEVER ON OCCUPANCY (section 2B.4).
+    # That is asserted rather than asserted-in-a-comment: G1.11 builds the body
+    # against configurations with different k_in and requires the same M.
+    window_M = 0
+    window_kmax = 0
+    if glauber:
+        window_M = int(n_trials)
+        _bound = cuboid_packing_bound(channel_length, channel_width, dim, diameter)
+        window_kmax = min(window_M, int(math.ceil(_bound)) + kmax_margin)
+        if not (1 <= window_kmax <= window_M):
+            raise ValueError(
+                f"engine=glauber_dynamics needs 1 <= kmax <= M, derived "
+                f"kmax={window_kmax} and M={window_M} from trial_density="
+                f"{trial_density:g} on a {channel_length:g} x {channel_width:g} "
+                f"body (V_W = {channel_length * channel_width ** (dim - 1):g}). "
+                "M is round(trial_density * V_W), so raise sampler.trial_density "
+                "until the pool can hold at least one particle."
+            )
+        # WHY THERE IS NO "M IS BELOW THE PACKING BOUND" REFUSAL HERE. The
+        # bound is a rigorous over-estimate and, for a thin body, a loose one
+        # (`cuboid_packing_bound` says by how much), so requiring M above it
+        # would demand a `trial_density` the lambda <= 4 rule below then
+        # refuses -- two rules contradicting each other over a number neither
+        # measures. What matters is whether the chain ever REACHES an occupancy
+        # the pool cannot hold, and that is measured rather than predicted:
+        # `cut_M` and `cut_k` count every such window, and
+        # G3.4 asserts both are identically zero on the hard-core path. A
+        # physical channel occupancy is far below M at any realistic
+        # trial_density, so they are zero -- and if they are not, the counter
+        # says so in the log instead of an estimate saying so at setup.
+        # LAMBDA <= 4 TRIALS PER SIGMA OF CHANNEL LENGTH. A hard scoping rule,
+        # not a tunable. With rc = uc forced (section 1.2) the DP's eviction
+        # window widens, and the measured penalty is 1.3-2x at lambda <= 4 but
+        # 11x at lambda = 8 (state counts: L=24, M=192, lambda=8 goes from 9099
+        # states / 20 ms at rc 1.5 to 283339 / 217 ms at rc 3.0). LJ path only:
+        # the hard-core sweep's eviction window is the contact distance and does
+        # not widen.
+        _lambda = window_M * diameter / channel_length
+        if lj and _lambda > 4.0 + 1e-9:
+            raise ValueError(
+                f"engine=glauber_dynamics refuses {_lambda:.2f} trials per sigma "
+                f"of channel length (M={window_M} over L={channel_length:g} at "
+                f"sigma={diameter:g}); the limit is 4. With the selection radius "
+                "forced to run.upper_cutoff the transfer matrix's eviction "
+                "window widens, and the measured cost is 1.3-2x at lambda <= 4 "
+                "against 11x at lambda = 8. Lower sampler.trial_density to at "
+                f"most {4.0 * channel_length / (diameter * channel_length * channel_width ** (dim - 1)):.4g} "
+                "or lengthen the rod. This is a scoping rule, not a tunable."
+            )
     if channel:
-        import math as _m
-
         if parallel:
             raise ValueError("channel sampler is serial only")
         if not full_repacking and int(smp.get("depth", 0)) < 1:
@@ -2151,17 +2492,24 @@ def from_params(p: dict[str, Any]) -> Config:
             if lj and short_range:
                 assert aux_cutoff is not None
                 guard_cut = aux_cutoff
-            # body diagonal: cuboid sqrt(L^2 + 2 w^2) in 3D, rectangle
-            # sqrt(L^2 + w^2) in 2D. The cross-section carries (dim-1) widths.
-            diag = _m.sqrt(channel_length**2 + (dim - 1) * channel_width**2)
-            if diag > box - guard_cut:
-                raise ValueError(
-                    f"channel geometry violates the periodic guard: cuboid "
-                    f"diagonal {diag:.3f} must be <= box - {guard_cut:.3f} = "
-                    f"{box - guard_cut:.3f} (the margin is the largest distance "
-                    f"the sweep reads, i.e. auxiliary.cutoff when a short-range "
-                    f"auxiliary is configured, else run.upper_cutoff)"
-                )
+            # THE HEAT BATH ENFORCES AT THE RADIUS IT SCORES AT, which is
+            # `upper_cutoff` on the LJ path (section 1.2: there is no acceptance
+            # step to divide a shortened selection radius back out of, and the
+            # short-range auxiliary is refused above so `guard_cut` is already
+            # `uc` there) and the LARGEST ACTIVE PAIR FLOOR on the hard-core path.
+            #
+            # The second half is the only place the two engines' guards differ,
+            # and it is a real gap rather than pedantry: `diameter` is the
+            # SINGLE-COMPONENT floor, so a typed hard-core run whose largest
+            # `c * sigma_ij` exceeds it was guarded at too short a radius. Under
+            # Metropolis a wrapped pair beyond the guard is divided back out of
+            # the acceptance; under the Glauber engine there is nothing to divide it
+            # out of, so it has to be excluded geometrically.
+            if glauber and not lj and species is not None:
+                guard_cut = max(guard_cut, max_core_floor(species.table.core_floor))
+            assert_channel_guard(
+                channel_length, channel_width, dim, box, guard_cut, span_name="box"
+            )
 
     # ---- fail fast on physically invalid runs, one specific message each ----
     _r_int = uc if lj else diameter
@@ -2364,7 +2712,7 @@ def from_params(p: dict[str, Any]) -> Config:
         )
     seed_val = int(_raw_seed) if _raw_seed is not None else None
 
-    return Config(
+    cfg = Config(
         potential=potential,
         bias=bias,
         sampler=sampler,
@@ -2421,7 +2769,7 @@ def from_params(p: dict[str, Any]) -> Config:
         radius=radius,
         diameter=diameter,
         r_squared=r_squared,
-        no_of_trial_molecules=n_trials,
+        n_trial_molecules=n_trials,
         no_neigh=no_neigh,
         upper_cutoff=uc,
         lower_cutoff=lower_cutoff,
@@ -2454,7 +2802,20 @@ def from_params(p: dict[str, Any]) -> Config:
         pore_H=_pore_H,
         pore_R=_pore_R,
         pore_axis_len=_pore_axis_len,
+        engine=engine,
+        kmax_margin=kmax_margin,
+        window_M=window_M,
+        window_kmax=window_kmax,
     )
+    # G0.9 OF THE DESIGN PLAN: the periodic guard has never been
+    # checked on the bulk channel path, so nobody knew for which configurations
+    # its local-Euclidean assumption held. This records one line per channel
+    # Config when `GCMC_GUARD_AUDIT` names a sink and does nothing otherwise --
+    # which is how the scan reaches the three dozen channel configurations built
+    # programmatically inside the test suite without a maintained list of them.
+    # It is an audit, not a check: nothing here refuses a run.
+    guard_audit.record(cfg)
+    return cfg
 
 
 def describe_parallel(cfg: Config) -> str:

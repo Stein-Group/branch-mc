@@ -20,7 +20,7 @@ sys.path.insert(
 )
 
 from gcmc import config_specs
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 from gcmc.run import sim_setup
 from gcmc.system.state import ChainState
 
@@ -40,7 +40,7 @@ _FROZEN = {"gcmcA": _frozen.ENGINEA, "gcmc0": _frozen.ENGINE0}
 
 
 def load_engine(name):
-    """(sim_setup, MC_engine, ChainState) of a frozen or current package.
+    """(sim_setup, metropolis_dynamics, ChainState) of a frozen or current package.
 
     A frozen engine is retrieved from its tag rather than the tree. Callers that
     cannot tolerate a skip should check `_frozen.root(...)` first; everything in
@@ -60,7 +60,7 @@ def load_engine(name):
     importlib.import_module(pkg)
     return (
         importlib.import_module(pkg + ".sim_setup"),
-        importlib.import_module(pkg + ".MC_engine"),
+        importlib.import_module(pkg + ".metropolis_dynamics"),
         importlib.import_module(pkg + ".state").ChainState,
     )
 
@@ -138,7 +138,9 @@ def _back_translate(params):
 
 def build(params, seed, positions=None, matrix=None, engine=None):
     """cfg / potential / weigher / state for a params dict."""
-    ss, eng, CS = (sim_setup, MC_engine, ChainState) if engine is None else engine
+    ss, eng, CS = (
+        (sim_setup, metropolis_dynamics, ChainState) if engine is None else engine
+    )
     if engine is not None:
         params = _back_translate(params)
     cfg = ss.from_params(params)

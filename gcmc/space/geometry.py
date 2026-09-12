@@ -136,24 +136,25 @@ def inside_pore(
 ) -> BoolArray | bool | None:
     """Which centres satisfy a confining hard wall. None when there is no pore.
 
-    `coords` is (M, dim) or a single (dim,) point; the return follows -- an
-    array for the first, a plain bool for the second. A sphere of radius
-    `samp.radius` must keep its CENTRE off the wall by that radius, which is why
-    the clearance is the configured particle radius and not a hardcoded 0.5.
+        `coords` is (M, dim) or a single (dim,) point; the return follows -- an
+        array for the first, a plain bool for the second. A sphere of radius
+        `samp.radius` must keep its CENTRE off the wall by that radius, which is why
+        the clearance is the configured particle radius and not a hardcoded 0.5.
 
-    THREE COPIES BECAME ONE. This lived as `MC_engine._inside_pore`
-    (L6), was duplicated verbatim for single points as
-    `runner._inside_pore_seed` (L7), and was stated a third time as bounds by a
-    `MC_engine._pore_bounds` that nothing called. Two live copies of a hard-wall
-    test is the kind of duplication that does not announce itself: they agree
-    until one is edited, and the symptom is seeded configurations seated inside
-    a wall that the engine then refuses to move, which reads as a sampling
-    problem rather than a geometry one.
+        THREE COPIES BECAME ONE. This lived as `metropolis_dynamics._inside_pore`
+        (L6), was duplicated verbatim for single points as
+        `runner._inside_pore_seed` (L7), and was stated a third time as bounds by a
+        `metropolis_dynamics._pore_bounds` that nothing called. Two live copies of a
+    hard-wall
+        test is the kind of duplication that does not announce itself: they agree
+        until one is edited, and the symptom is seeded configurations seated inside
+        a wall that the engine then refuses to move, which reads as a sampling
+        problem rather than a geometry one.
 
-    It belongs HERE because that is the layer both callers can see -- the
-    ladder's own instruction when a shared thing forces an upward import. It is
-    also simply true: a wall test asks where a particle is, which is what this
-    module is for, and it reads no energy.
+        It belongs HERE because that is the layer both callers can see -- the
+        ladder's own instruction when a shared thing forces an upward import. It is
+        also simply true: a wall test asks where a particle is, which is what this
+        module is for, and it reads no energy.
     """
     if ens.pore_geometry is None:
         return None

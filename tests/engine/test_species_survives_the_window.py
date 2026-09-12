@@ -40,7 +40,7 @@ import numpy as np
 import pytest
 import yaml
 
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 from gcmc.proposals import moves
 from gcmc.system.state import ChainState
 
@@ -98,7 +98,7 @@ def test_a_fresh_typed_run_reports_more_than_one_species(
     state.positions = H.lattice_seed(_BOX, 250, 3, np.random.default_rng(5))
 
     for _ in range(3):
-        MC_engine.advance(state, cfg, potential, weigher)
+        metropolis_dynamics.advance(state, cfg, potential, weigher)
 
     assert state.species is not None, (
         f"{sampler} d{depth}: a three-species run left state.species as None, so "
@@ -150,29 +150,31 @@ def test_an_untouched_particle_keeps_its_species_across_the_boundary(
     state = ChainState.fresh(cfg.dimension, seed=5)
     state.positions = H.lattice_seed(_BOX, 250, 3, np.random.default_rng(5))
 
-    MC_engine.advance(state, cfg, potential, weigher)  # let a mixture establish
+    metropolis_dynamics.advance(
+        state, cfg, potential, weigher
+    )  # let a mixture establish
 
     def no_swap(rng, _n_species):
         """The three-way split whatever the species count: swap suppressed."""
         return str(rng.choice(moves.SINGLE_MOVES, p=moves.SINGLE_PROBS))
 
-    real_draw = MC_engine.moves.draw_move
-    MC_engine.moves.draw_move = no_swap
+    real_draw = metropolis_dynamics.moves.draw_move
+    metropolis_dynamics.moves.draw_move = no_swap
     try:
-        MC_engine.advance(state, cfg, potential, weigher)
+        metropolis_dynamics.advance(state, cfg, potential, weigher)
         before = {
             tuple(row): int(s)
             for row, s in zip(np.asarray(state.positions), np.asarray(state.species))
         }
         assert len(before) == len(state.positions), "two particles share a coordinate"
 
-        summary = MC_engine.advance(state, cfg, potential, weigher)
+        summary = metropolis_dynamics.advance(state, cfg, potential, weigher)
         after = {
             tuple(row): int(s)
             for row, s in zip(np.asarray(state.positions), np.asarray(state.species))
         }
     finally:
-        MC_engine.moves.draw_move = real_draw
+        metropolis_dynamics.moves.draw_move = real_draw
 
     assert summary["counters"]["swap_step"] == 0, (
         "the swap suppression did not take effect, so a legal relabel is "

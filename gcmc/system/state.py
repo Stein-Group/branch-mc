@@ -12,6 +12,7 @@ continuous across a walltime kill.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 
@@ -78,6 +79,27 @@ class ChainState:
     # rolling window of per-window mean cavity occupancy, used only for the
     # avg_n_cav diagnostic column (local density check n_cav/v_cav vs N/V).
     ncav_history: list[float] = field(default_factory=list)
+    # FLAT-HISTOGRAM BIASING IN N, or None. A `sampling.flat_histogram
+    # .FlatHistogram`: the bias eta[N] the exchange path adds to its weights,
+    # plus the collection matrix filled with UNBIASED transition probabilities.
+    # Declared here rather than passed per call because it accumulates ACROSS
+    # window boundaries -- a matrix reset each window would estimate nothing --
+    # and because the engines read it exactly where they read the rest of the
+    # chain's state.
+    #
+    # NOT CHECKPOINTED, and that is a stated limitation rather than an
+    # oversight. `io.save_checkpoint` serialises a fixed set of arrays, so
+    # persisting a (n_states x n_states) matrix and its visit histogram is its
+    # own piece of work with its own schema bump; until then a resumed run
+    # restarts its bias from flat, which is correct but slower. What must NOT be
+    # done in the meantime is to reset the matrix at a bias REFRESH: its rows
+    # are unbiased transition probabilities, so rows collected under the old
+    # eta and the new one estimate the same matrix and merging them is exact.
+    # That property is the whole reason the scheme is cheap.
+    #
+    # Typed `Any` to keep layer 3 from importing layer 5; the object is only
+    # ever passed through.
+    flat_histogram: Any = None
 
     @classmethod
     def fresh(cls, dimension: int, seed: int | None = None) -> ChainState:

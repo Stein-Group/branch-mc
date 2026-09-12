@@ -55,6 +55,7 @@ __all__ = [
     "axial_coord_full",
     "cuboid_members",
     "cuboid_members_cl",
+    "cuboid_packing_bound",
     "local_from_box",
     "make_cuboid_cloud",
     "oriented_cuboid_trials",
@@ -440,3 +441,81 @@ def cuboid_members(
     half = np.array([half_long] + [half_w] * (U.shape[1] - 1))
     inside = (np.abs(U) <= half).all(axis=1)
     return np.where(inside)[0]
+
+
+#: Kepler's sphere-packing density, pi / sqrt(18). The proven maximum fraction
+#: of space that non-overlapping equal spheres can fill; its 2D twin is the
+#: hexagonal density pi / sqrt(12).
+_KEPLER_3D = math.pi / math.sqrt(18.0)
+_HEX_2D = math.pi / math.sqrt(12.0)
+
+
+def cuboid_packing_bound(
+    channel_length: float, channel_width: float, dim: int, sigma: float
+) -> float:
+    """Upper bound on how many hard spheres of diameter `sigma` can have their
+    CENTRES inside a channel_length x channel_width^(dim-1) body.
+
+    Section 1.3 and 3.7 of the design plan. `kmax` is derived from this
+    plus a margin, and 3.7 is what makes the bound's DIRECTION load-bearing: the
+    window kernel is pi-invariant on {k_in <= min(kmax, M)} and the identity
+    elsewhere, so for hard cores "set kmax and M above the geometric packing
+    bound and the region is everything" -- exact, with both truncation counters
+    identically zero. A bound that is too LOW silently truncates the state space
+    and the chain reports a plausible wrong isotherm; a bound that is too HIGH
+    only widens the DP's C array, which section 2B.6 measured at 2.2x in the
+    worst case (M = 64: 20 ms at kmax = 12 against 44 ms at kmax = M). So this
+    is deliberately an over-estimate, and it is RIGOROUS rather than fitted.
+
+    THE ARGUMENT. Centres lie in the body; each carries a ball of radius
+    sigma/2, and those balls are pairwise disjoint (centres are at least sigma
+    apart) and contained in the body DILATED by sigma/2 -- whose measure is the
+    Steiner formula for a box. So
+
+        k * v_ball(sigma/2)  <=  eta_max * measure(dilated body)
+
+    with eta_max the proven maximum packing density in that dimension: Kepler's
+    pi/sqrt(18) in 3D, the hexagonal pi/sqrt(12) in 2D. No lattice, no column
+    structure and no aspect ratio is assumed, which is what makes it safe for
+    the obliquely-oriented thin channels this engine runs in.
+
+    IT IS LOOSE FOR A THIN BODY, AND SAYING SO IS THE POINT. For L = 6, w = 1.5,
+    sigma = 1 it returns about 58 where the true capacity is nearer 20: the
+    dilation term dominates when two of the three extents are of order sigma.
+    `sim_setup` therefore caps `kmax` at the pool size M, and under the
+    lambda <= 4 scoping rule (section 3.5) M is the binding constraint for every
+    realistic thin channel -- so `kmax = M` in practice and the bound's job is
+    only to stop kmax exceeding it on a long or wide body. `k <= M` is not a
+    truncation: it is a fact about subsets of an M-element pool.
+
+    WHY NOT A TIGHTER BOUND. Slab arguments (partition the axis, bound each
+    slab by the maximum number of cross-section points at the induced minimum
+    separation) were tried and are WORSE here -- they double-count across slab
+    boundaries, and for this geometry every choice of slab width returns
+    something above the Steiner bound. A numerical maximum-independent-set on a
+    grid would be tighter and would not be rigorous, which is the wrong trade
+    for a quantity whose error in one direction is a silent bias.
+    """
+    L = float(channel_length)
+    w = float(channel_width)
+    s = float(sigma)
+    if L <= 0.0 or w <= 0.0 or s <= 0.0:
+        raise ValueError(
+            f"packing bound needs a positive body and diameter, got "
+            f"L={L}, w={w}, sigma={s}"
+        )
+    r = 0.5 * s
+    if dim == 2:
+        # Steiner in the plane: area + perimeter*r + pi r^2
+        dilated = L * w + 2.0 * (L + w) * r + math.pi * r * r
+        return float(_HEX_2D * dilated / (math.pi * r * r))
+    # Steiner in space for a box a x b x c:
+    #   V + 2r(ab+bc+ca) + pi r^2 (a+b+c) + (4/3) pi r^3
+    a, b, c = L, w, w
+    dilated = (
+        a * b * c
+        + 2.0 * r * (a * b + b * c + c * a)
+        + math.pi * r * r * (a + b + c)
+        + (4.0 / 3.0) * math.pi * r**3
+    )
+    return float(_KEPLER_3D * dilated / ((4.0 / 3.0) * math.pi * r**3))

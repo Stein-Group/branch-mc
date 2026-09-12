@@ -83,16 +83,23 @@ class PotentialSpec:
 class SamplerSpec:
     """How a trial cloud is proposed and weighted.
 
-    Identity-bearing. `trial_box_side` and `no_of_trial_molecules` are here, not
+    Identity-bearing. `trial_box_side` and `n_trial_molecules` are here, not
     in execution, because they change the Markov chain even though the
     equilibrium distribution is invariant under them -- and because they are
     documented launcher sweep axes, so two runs differing there must not collide.
     """
 
     sampler: str
+    #: the DYNAMICS axis: metropolis_dynamics | glauber_dynamics. See the note in
+    #: `config_fields.SAMPLER`; `sampler` and `engine` are different questions
+    #: and the refusal messages in `sim_setup` say so by name.
+    engine: str
+    #: how far above the body's geometric packing bound `window_kmax` is set.
+    #: The Glauber engine's only new tunable.
+    kmax_margin: int
     depth: int
     full_repacking: bool
-    no_of_trial_molecules: int
+    n_trial_molecules: int
     trial_density: float
     trial_box_side: float
     cavity_radius: float
@@ -193,7 +200,7 @@ class KernelSpec:
 
     Before this class, a kernel that wanted them had no narrow object to take
     and had to accept the whole `Config` -- which is exactly the god-object
-    coupling R8 exists to break, reappearing one layer down. `parallel.py` was
+    coupling R8 exists to break, reappearing one layer down. `cell_parallel.py` was
     where that became unavoidable: 11 of its 36 `cfg.` reads are derived, and no
     combination of the five could have supplied them.
 
@@ -203,6 +210,11 @@ class KernelSpec:
     """
 
     potential_type: str
+    #: Glauber pool size M and ladder truncation kmax, derived per section 1.3
+    #: of the design plan. Zero on a `metropolis_dynamics` run, which reads
+    #: neither.
+    window_M: int
+    window_kmax: int
     beta: float
     branch: bool
     channel: bool

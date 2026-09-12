@@ -123,7 +123,7 @@ class LennardJonesTable(Potential):
 
         WHY THIS EXISTS ALONGSIDE `_pair_u`. That method takes one
         `self.trial_type` for every row, which is right for the MOF path -- one
-        guest is inserted at a time. The exchange move in `MC_engine.advance`
+        guest is inserted at a time. The exchange move in `metropolis_dynamics.advance`
         weights an entire trial cloud in one call, and after P3 each trial in
         that cloud carries its OWN drawn species. A per-instance `trial_type`
         cannot express that, and building one potential object per type would

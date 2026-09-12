@@ -19,7 +19,7 @@ further down and worse -- `aux: {control: true}` returned `aux_cutoff() is None`
 byte-for-byte identical to `aux: none`, so the "control arm" was literally the
 arm it was the control for.
 
-Both are fixed (`MC_engine.advance`'s flag, `ForceField.aux_cutoff`), so the
+Both are fixed (`metropolis_dynamics.advance`'s flag, `ForceField.aux_cutoff`), so the
 correction now RUNS at the no-op radius and this file is a real gate. It asserts
 three things per point, and the first is what keeps it honest:
 
@@ -64,7 +64,7 @@ import numpy as np
 import pytest
 import yaml
 
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 
 #: Axis points where the correction is measured to actually evaluate. See the
 #: module docstring for the one that is deliberately not here.
@@ -130,7 +130,7 @@ def _run(params: dict, seed: int, dim: int, n_seed: int) -> tuple:
     evaluated = 0
     stats: list[tuple[float, float]] = []
     for _ in range(_WINDOWS):
-        summary = MC_engine.advance(state, cfg, potential, weigher)
+        summary = metropolis_dynamics.advance(state, cfg, potential, weigher)
         n = int(summary.get("aux_corr_n", 0))
         evaluated += n
         if n:

@@ -32,7 +32,7 @@ from pathlib import Path
 
 import numpy as np
 
-from gcmc.engine.framework import advance_metropolis_mof_ms
+from gcmc.engine.rigid_framework import advance_metropolis_mof_ms
 from gcmc.forcefield.lj_table import FrameworkField
 from gcmc.forcefield.pair_table import PairTable
 from scripts.mof.system_setup import setup_system

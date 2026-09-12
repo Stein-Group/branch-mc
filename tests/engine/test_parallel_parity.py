@@ -2,7 +2,7 @@
 
 U4 of cell_unify_plan.md. Two things had no pytest-level coverage before:
 
-  * 3D parallel. It runs deliberately now (the original's "parallel is 2D only"
+  * 3D cell_parallel. It runs deliberately now (the original's "parallel is 2D only"
     guard was dropped by decision in U0), so the burden of proof moved here and
     onto the cluster ladder in U3. The heavy statistical validation is U3's;
     this is the fast rung that keeps CI honest between cluster runs.
@@ -22,14 +22,14 @@ import numpy as np
 import pytest
 
 from gcmc import config_specs
-from gcmc.engine import MC_engine as engine
-from gcmc.engine import parallel
+from gcmc.engine import cell_parallel
+from gcmc.engine import metropolis_dynamics as engine
 from gcmc.run.sim_setup import from_params
 from gcmc.system.state import ChainState, zero_counters
 
 # One cell is one core, so cfg.n_workers is the cell count; without this
 # hook a 9- or 27-cell case would spawn that many processes inside a test.
-parallel.IN_PROCESS = True
+cell_parallel.IN_PROCESS = True
 
 MU = 1.0
 
@@ -72,8 +72,8 @@ def _equilibrium_eta(advance, cfg, st, n_win, n_tail):
     honest bars, never on a flat tolerance)."""
     pot = cfg.build_potential()
     w = (
-        parallel.make_weigher(config_specs.kernel_spec(cfg), pot)
-        if advance is parallel.advance_parallel
+        cell_parallel.make_weigher(config_specs.kernel_spec(cfg), pot)
+        if advance is cell_parallel.advance_parallel
         else engine.make_weigher(config_specs.kernel_spec(cfg), pot)
     )
     etas = []
@@ -113,7 +113,11 @@ def test_parallel_matches_serial_equilibrium(dim):
     cfg_s = _cfg(dim, "single", box_s, window=window)
 
     eta_p, err_p = _equilibrium_eta(
-        parallel.advance_parallel, cfg_p, _state(n0_p, dim, box_p - 1.0), n_win, n_tail
+        cell_parallel.advance_parallel,
+        cfg_p,
+        _state(n0_p, dim, box_p - 1.0),
+        n_win,
+        n_tail,
     )
     eta_s, err_s = _equilibrium_eta(
         engine.advance, cfg_s, _state(n0_s, dim, box_s - 1.0, seed=3), n_win, n_tail
@@ -143,7 +147,7 @@ def test_cell_list_invariants_hold(dim, sampler, monkeypatch):
     configuration -- including the rejected ones, which is where a missed
     reactivate would hide. The hook asserts inside the `finally`, so every early
     exit in the move loop is covered too."""
-    monkeypatch.setattr(parallel, "DEBUG_CELL_LIST", True)
+    monkeypatch.setattr(cell_parallel, "DEBUG_CELL_LIST", True)
     p = {
         "potential": {"main": "hard_core"},
         "ensemble": {"mu": 2.0, "dimension": dim, "box": 24.0},
@@ -159,17 +163,17 @@ def test_cell_list_invariants_hold(dim, sampler, monkeypatch):
     }
     cfg = from_params(p)
     pot = cfg.build_potential()
-    w = parallel.make_weigher(config_specs.kernel_spec(cfg), pot)
+    w = cell_parallel.make_weigher(config_specs.kernel_spec(cfg), pot)
     st = _state(60 if dim == 2 else 200, dim, 23.0)
     for _ in range(3):
-        out = parallel.advance_parallel(st, cfg, pot, w)
+        out = cell_parallel.advance_parallel(st, cfg, pot, w)
     assert out["N"] > 0
 
 
 def test_lj_cell_list_invariants_hold(monkeypatch):
     """Same, for LJ: the border must stay in the list and stay unflagged, since
     `is_matrix` is what would silently drop it from the energy sum."""
-    monkeypatch.setattr(parallel, "DEBUG_CELL_LIST", True)
+    monkeypatch.setattr(cell_parallel, "DEBUG_CELL_LIST", True)
     p = {
         "potential": {"main": "lennard_jones", "T": 2.0, "tail": False},
         "ensemble": {"mu": -2.0, "dimension": 3, "box": 24.0},
@@ -190,8 +194,8 @@ def test_lj_cell_list_invariants_hold(monkeypatch):
     }
     cfg = from_params(p)
     pot = cfg.build_potential()
-    w = parallel.make_weigher(config_specs.kernel_spec(cfg), pot)
+    w = cell_parallel.make_weigher(config_specs.kernel_spec(cfg), pot)
     st = _state(150, 3, 23.0)
     for _ in range(3):
-        out = parallel.advance_parallel(st, cfg, pot, w)
+        out = cell_parallel.advance_parallel(st, cfg, pot, w)
     assert out["N"] > 0

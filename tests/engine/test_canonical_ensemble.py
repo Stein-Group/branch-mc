@@ -41,7 +41,7 @@ import pytest
 
 from gcmc import config_specs
 from gcmc.analysis import demixing
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 from gcmc.run import runner, sim_setup
 from gcmc.system.state import ChainState
 
@@ -98,11 +98,13 @@ def _drive(params, windows=1):
     """Advance the engine directly, returning (state, per-window summaries)."""
     cfg = sim_setup.from_params(params)
     pot = cfg.build_potential()
-    weigher = MC_engine.make_weigher(config_specs.kernel_spec(cfg), pot)
+    weigher = metropolis_dynamics.make_weigher(config_specs.kernel_spec(cfg), pot)
     state = ChainState.fresh(3, seed=3)
     state.positions = runner._init_config(cfg, state.rng)
     state.species = runner._init_species(cfg, len(state.positions))
-    out = [MC_engine.advance(state, cfg, pot, weigher) for _ in range(windows)]
+    out = [
+        metropolis_dynamics.advance(state, cfg, pot, weigher) for _ in range(windows)
+    ]
     return state, out
 
 
@@ -292,7 +294,7 @@ def test_the_sampler_is_pinned_because_it_cannot_change_the_chain(tmp_path):
 
 
 def test_a_canonical_run_does_not_enter_the_metropolis_loop(tmp_path):
-    """`sampler.type='metropolis'` names the move set, not `_advance_metropolis`.
+    """`sampler.type='metropolis'` names the move set, not `_advance_single_particle`.
 
     The dispatch in `advance` was on the sampler alone, so pinning the sampler
     sent canonical runs into the single-species metropolis loop, which has no

@@ -32,7 +32,7 @@ import numpy as np
 import pytest
 
 from gcmc import config_specs
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 from gcmc.proposals import moves
 from gcmc.run import sim_setup
 from gcmc.system.state import ChainState
@@ -57,10 +57,10 @@ def _run(mus: dict, *, box: float, n_windows: int, suppress_swap: bool, seed: in
         }
     )
     pot = cfg.build_potential()
-    wgh = MC_engine.make_weigher(config_specs.kernel_spec(cfg), pot)
-    real = MC_engine.moves.draw_move
+    wgh = metropolis_dynamics.make_weigher(config_specs.kernel_spec(cfg), pot)
+    real = metropolis_dynamics.moves.draw_move
     if suppress_swap:
-        MC_engine.moves.draw_move = _no_swap
+        metropolis_dynamics.moves.draw_move = _no_swap
     try:
         state = ChainState(
             positions=np.empty((0, 3)), rng=np.random.default_rng(seed), step=0
@@ -69,14 +69,14 @@ def _run(mus: dict, *, box: float, n_windows: int, suppress_swap: bool, seed: in
         counts = np.zeros(3)
         samples = 0
         for w in range(n_windows):
-            MC_engine.advance(state, cfg, pot, wgh)
+            metropolis_dynamics.advance(state, cfg, pot, wgh)
             assert state.species is not None
             if w >= n_windows // 3:
                 counts += np.bincount(state.species, minlength=3)
                 samples += 1
         return cfg, counts / max(samples, 1)
     finally:
-        MC_engine.moves.draw_move = real
+        metropolis_dynamics.moves.draw_move = real
 
 
 _SKEWED = {"A": -3.0, "B": -3.5, "C": -4.0}

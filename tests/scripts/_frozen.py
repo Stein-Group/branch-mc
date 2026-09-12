@@ -150,7 +150,7 @@ def add_to_path(which: Frozen) -> Path:
     """Put `which` on `sys.path` so its modules import by bare name.
 
     The check scripts do `import cav_n_d_3d_g3_LJ as orig`, and the engine
-    oracles do `import gcmcA.MC_engine` -- both need the directory on the path
+    oracles do `import gcmcA.metropolis_dynamics` -- both need the directory on the path
     rather than a package import. Idempotent: repeated calls do not grow
     `sys.path`, which matters because these modules are imported once per script
     and there are eleven of them.

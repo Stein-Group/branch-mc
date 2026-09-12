@@ -17,7 +17,7 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
 from gcmc import config_specs
-from gcmc.engine import MC_engine as engine
+from gcmc.engine import metropolis_dynamics as engine
 from gcmc.run.sim_setup import from_params
 from gcmc.system.state import ChainState
 

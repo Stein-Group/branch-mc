@@ -47,7 +47,7 @@ def run_point(
     seed: int,
 ) -> dict:
     """One pressure point: equilibrate, then average loading over the back half."""
-    from gcmc.engine.framework import advance_metropolis_mof
+    from gcmc.engine.rigid_framework import advance_metropolis_mof
 
     rng = np.random.default_rng(seed)
     pos = np.empty((0, box.shape[0]))

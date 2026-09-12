@@ -124,3 +124,77 @@ def widom_henry(
         "stderr": math.sqrt(var / n_samples),
         "accessible_fraction": n_accessible / n_samples,
     }
+
+
+def widom_bulk(
+    positions: FloatArray,
+    box: float | FloatArray,
+    beta: float,
+    rc: float,
+    *,
+    n_test: int = 20_000,
+    lower: float = 0.0,
+    tail_pref: float | None = None,
+    seed: int = 0,
+) -> float:
+    """beta * mu_excess of a BULK fluid by test-particle insertion.
+
+    beta mu_ex = -ln < exp(-beta dU) > over uniformly placed test particles,
+    with dU the truncated pair energy against the configuration (plus the
+    mean-field tail's insertion increment when one is configured). The bulk case
+    of the same estimator as `free_volume_fraction`, which is the hard-sphere
+    limit of this: there dU is 0 or +inf and the average collapses to the free
+    volume.
+
+    WHY THIS IS THE CHECK WORTH HAVING. It closes the chemical potential against
+    itself:
+
+        beta mu  ==  ln rho  +  beta mu_ex
+
+    in this package's reduced convention (Lambda = 1, so z = exp(beta mu) and
+    the ideal-gas term is ln rho). It needs NO literature value and no second
+    sampler, and it catches weight errors that a single-point comparison against
+    an equation of state cannot -- a wrong activity, a missing volume factor or
+    a double-counted tail all move <N> to a self-consistent-looking place, and
+    all three break this identity.
+
+    THE TAIL INCREMENT is `tail_pref * (2N + 1)`, exactly the term the insertion
+    acceptance uses, because a test particle IS an insertion. Omitting it while
+    the chain includes it is a systematic offset of about that size in
+    beta mu_ex, which at rho* ~ 0.6 is not small.
+
+    `lower` is the hard-core floor: a test point inside it contributes exactly
+    zero rather than a huge Boltzmann factor, which is what the engine's own
+    overlap test does and what keeps the two conventions the same.
+    """
+    P = np.asarray(positions, float)
+    n, dim = P.shape if P.ndim == 2 else (0, len(np.atleast_1d(box)))
+    b = np.broadcast_to(np.asarray(box, float), (dim,))
+    rng = np.random.default_rng(seed)
+    pts = rng.uniform(0.0, 1.0, size=(n_test, dim)) * b
+    if n == 0:
+        return 0.0
+    tree = cKDTree(P % b, boxsize=b)
+    acc = np.zeros(n_test)
+    nb = tree.query_ball_point(pts % b, rc)
+    from ..forcefield.lennard_jones import lj_pair_energy_sq
+
+    tail = 0.0
+    if tail_pref is not None:
+        tail = float(tail_pref) * (2.0 * n + 1.0)
+    for i, js in enumerate(nb):
+        if not js:
+            acc[i] = math.exp(-beta * tail)
+            continue
+        d = P[js] - pts[i]
+        d -= b * np.round(d / b)
+        d2 = np.einsum("ij,ij->i", d, d)
+        if lower > 0.0 and bool((d2 <= (lower - 1e-12) ** 2).any()):
+            acc[i] = 0.0
+            continue
+        u = float(np.sum(lj_pair_energy_sq(d2))) + tail
+        acc[i] = math.exp(-beta * u) if -beta * u < 700.0 else math.inf
+    mean = float(acc.mean())
+    if mean <= 0.0:
+        return math.inf
+    return -math.log(mean)

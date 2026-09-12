@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _harness as H
 import numpy as np
 
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 
 SNAPSHOT = os.path.join(H.REF, "p4_snapshot.npz")
 
@@ -56,7 +56,7 @@ def _run(mode: str) -> dict[str, np.ndarray]:
     rows: list[list[float]] = []
     keys: list[str] | None = None
     for _ in range(N_WINDOWS):
-        summary = MC_engine.advance(st, cfg, pot, wgh)
+        summary = metropolis_dynamics.advance(st, cfg, pot, wgh)
         if keys is None:
             keys = sorted(k for k, v in summary.items() if isinstance(v, (int, float)))
         rows.append([float(summary[k]) for k in keys])

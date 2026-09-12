@@ -78,9 +78,34 @@ POTENTIAL: tuple[str, ...] = (
 
 SAMPLER: tuple[str, ...] = (
     "sampler",  # metropolis | rosenbluth | branch | channel | channel_cyclic | reweight
+    # THE DYNAMICS AXIS, and it is not the same axis as `sampler`.
+    #
+    # `sampler` says how a trial cloud is PROPOSED; `engine` says what is then
+    # done with it -- a Metropolis accept/reject test (`metropolis_dynamics`) or an
+    # exact conditional draw over the whole window (`glauber_dynamics`). Two
+    # runs differing here sample the same muVT distribution through different
+    # transition kernels, which is the textbook case of a field that is physics
+    # by the rule at the top of this file: the ensemble is invariant, the Markov
+    # chain is not.
+    #
+    # ADDING IT MOVES EVERY RUN ID, and that is accepted rather than worked
+    # around. `hash_fingerprint._IDENTITY_FIELDS` derives from the CLASSES of
+    # the physics sub-configs on purpose, so a new field in this group reaches
+    # the digest without anyone remembering to list it -- which is the whole
+    # design. Excluding the default to preserve old ids would mean fighting the
+    # PHYSICS / config_specs / hash_fingerprint triangle that exists to stop
+    # hand-maintained identity lists. Existing Metropolis params files still
+    # validate and run correctly; they start a fresh run directory rather than
+    # resuming an old one, and resuming a pre-`engine` run is explicitly not a
+    # requirement. Precedent: `upper_cutoff` and `no_neigh` moved ids the same
+    # way.
+    "engine",  # metropolis_dynamics | glauber_dynamics
+    # The Glauber engine's ONLY new tunable. Everything else about the window --
+    # the pool size M and the truncation kmax -- derives (see DERIVED below).
+    "kmax_margin",
     "depth",
     "full_repacking",
-    "no_of_trial_molecules",
+    "n_trial_molecules",
     "trial_density",
     "trial_box_side",
     "cavity_radius",
@@ -171,6 +196,27 @@ IO: tuple[str, ...] = (
 # rather than the whole Config.
 DERIVED: tuple[str, ...] = (
     "potential_type",  # PROPERTY: from potential + bias + sampler
+    # THE GLAUBER ENGINE's pool size M and truncation kmax (section 1.3 of
+    # the design plan). DERIVED, and the plan's phrase "identity-bearing"
+    # is satisfied through their INPUTS rather than by hashing them here.
+    #
+    # The plan is right that both change the chain, so two runs differing in
+    # either must not share a directory. They cannot differ without one of
+    # `trial_density`, `channel_length`, `channel_width`, `dimension`, `radius`
+    # or `kmax_margin` differing -- every one of which is hashed -- because
+    #
+    #     window_M    = round(trial_density * V_W)
+    #     window_kmax = min(window_M, ceil(packing_bound(body)) + kmax_margin)
+    #
+    # is a function of exactly those. Hashing M and kmax as well would
+    # double-count their inputs, which is the specific failure this file was
+    # written to end (`sampler` reached the old digest four separate ways
+    # through this group). So the identity requirement is met and the triangle
+    # is not fought; what makes it a REQUIREMENT rather than a hope is
+    # `tests/unit/test_glauber_config.py`, which asserts the derivation and that
+    # neither is a function of occupancy.
+    "window_M",
+    "window_kmax",
     "beta",  # 1 / temp
     "branch",  # from sampler
     "channel",  # from sampler

@@ -120,6 +120,15 @@ DEPTH_VALUES: tuple[Any, ...] = (0, 1, 2, 3, 4, "full_repacking")
 AXES: tuple[Axis, ...] = (
     Axis("potential", _enum_at("potential.main")),
     Axis("sampler", _enum_at("sampler.type")),
+    # THE DYNAMICS AXIS, and it is orthogonal to the sampler axis. `engine`
+    # decides what happens to a proposed trial cloud -- a Metropolis
+    # accept/reject test, or an exact conditional draw over the whole window --
+    # while `sampler` decides how the cloud is proposed. Enumerating them
+    # independently is what makes the REJECTED set worth reading: the Glauber engine
+    # is legal only with `sampler = channel` at depth >= 1, so the product puts
+    # every illegal pair in front of the validator and the matrix records which
+    # message each one produced.
+    Axis("engine", _enum_at("sampler.engine")),
     Axis("depth", DEPTH_VALUES),
     Axis("dimension", _enum_at("ensemble.dimension")),
     Axis("ensemble", _enum_at("ensemble.type")),
@@ -166,6 +175,7 @@ class Point(NamedTuple):
 
     potential: str
     sampler: str
+    engine: str
     depth: Any
     dimension: int
     ensemble: str
@@ -188,6 +198,8 @@ class Point(NamedTuple):
             self.ensemble,
             self.kind,
         ]
+        if self.engine != "metropolis_dynamics":
+            bits.append(self.engine)
         if self.auxiliary:
             bits.append(f"aux_{self.auxiliary}")
         if self.sampler == "channel":
@@ -238,6 +250,12 @@ def build_params(point: Point, matrix_dir: Path | None = None) -> dict[str, Any]
         potential["species_file"] = str(_FF / point.species_file)
 
     sampler: dict[str, Any] = {"type": point.sampler}
+    # The DEFAULT is written only when it is not the default, so a
+    # `metropolis_dynamics` point produces exactly the params file it produced before
+    # this axis existed -- which is what keeps every tier-2 digest of an
+    # existing point where it was.
+    if point.engine != "metropolis_dynamics":
+        sampler["engine"] = point.engine
     # metropolis is standard GCMC: it is depth-0 by definition and the validator
     # forbids depth, trials, trial_density and trial_box_side outright. Depth is
     # a BRANCH-MC concept and does not apply, so the axis is simply not written

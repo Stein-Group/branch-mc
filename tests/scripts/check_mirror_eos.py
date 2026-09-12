@@ -49,7 +49,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from gcmc import config_specs
-from gcmc.engine import MC_engine as engine
+from gcmc.engine import metropolis_dynamics as engine
 from gcmc.run.sim_setup import from_params
 from gcmc.system.state import ChainState
 
@@ -139,7 +139,8 @@ def main(argv):
         raise SystemExit(
             f"\n{fails} sampler(s) disagree with metropolis by more than 3 sigma. "
             f"The depth >= 1 proposal or the clique draw has regressed; check that "
-            f"remove/repack still offsets the anchor (MC_engine, parallel) and that "
+            f"remove/repack still offsets the anchor (metropolis_dynamics, "
+            f"parallel) and that "
             f"count_and_sample is still called with rng="
         )
     print("\nALL MIRROR-EOS TESTS PASSED")

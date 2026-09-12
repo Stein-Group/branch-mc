@@ -94,7 +94,7 @@ def legacy_to_params(
 
     mu = float(pick("chem_pot"))
     cav = float(pick("cavity_radius"))
-    k = int(pick("no_trials", pick("no_of_trial_molecules")))
+    k = int(pick("no_trials", pick("n_trial_molecules")))
     step = int(info.get("mc_cycle", 0))
 
     pot_choice = potential or ("aux" if aux else "hard_sphere")

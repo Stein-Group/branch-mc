@@ -44,7 +44,12 @@ from ..sampling.branch import count_and_sample
 from ..sampling.rosenbluth import select_forward, select_reverse
 from ..space import decomposition, geometry, neighbors
 from ..system.state import zero_counters
-from .MC_engine import _lj_energy, _lj_set_energy, _weighted_trials, make_weigher
+from .metropolis_dynamics import (
+    _lj_energy,
+    _lj_set_energy,
+    _weighted_trials,
+    make_weigher,
+)
 
 # Test hook (U4 of cell_unify_plan.md): when true, `advance_cell` verifies after
 # every proposal that its cell list still describes exactly the live
@@ -121,7 +126,8 @@ def advance_cell(
     Returns (new_main_global, counters).
 
     FOUR SUB-CONFIGS RATHER THAN `Config`. `advance_parallel` still takes a
-    `Config` -- it must, because `runner` assigns it and `MC_engine.advance` to
+    `Config` -- it must, because `runner` assigns it and
+    `metropolis_dynamics.advance` to
     the same name and calls whichever it got. It projects once, at the top, and
     what crosses into the workers from there is these four objects.
 
@@ -173,7 +179,7 @@ def advance_cell(
     depth = samp.depth
     lower, uc, nn = pot_spec.lower_cutoff, kern.upper_cutoff, kern.no_neigh
     beta, mu, mf = kern.beta, ens.chem_pot, samp.move_factor
-    n_trials = samp.no_of_trial_molecules
+    n_trials = samp.n_trial_molecules
     v_cell = float(np.prod(L_c))
     ljaux = kern.potential_type == "ljaux"
     lj = kern.potential_type == "lj" or ljaux
@@ -340,7 +346,8 @@ def advance_cell(
             elif n_cav < n_remove:
                 # capped group size; the two directions must cap to each other's
                 # inverse or detailed balance fails. See the long note at the
-                # matching branch in MC_engine.advance -- the add used to remove
+                # matching branch in metropolis_dynamics.advance -- the add
+                # used to remove
                 # n_cav - 1 and leave one occupant behind, which no remove
                 # proposal undoes.
                 if choice == "add":
@@ -663,7 +670,7 @@ def advance_parallel(state, cfg, potential, weigher):
     """Advance one window by domain decomposition (2D or 3D).
 
     Keeps `Config` in its signature, deliberately: `runner` binds this or
-    `MC_engine.advance` to the same name and calls whichever it bound, so the
+    `metropolis_dynamics.advance` to the same name and calls whichever it bound, so the
     two must agree. This is the projection boundary -- `cfg` is read here and
     nowhere below, and the cells receive sub-configs.
     """

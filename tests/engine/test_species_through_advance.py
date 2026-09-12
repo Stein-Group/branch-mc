@@ -27,7 +27,7 @@ import _harness as H
 import numpy as np
 import pytest
 
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 
 
 def test_a_single_species_run_leaves_the_column_as_none():
@@ -37,7 +37,7 @@ def test_a_single_species_run_leaves_the_column_as_none():
     instead would be numerically harmless and would break both of those."""
     cfg, pot, wgh, st = H.make_mode("hs_branch")
     assert st.species is None
-    MC_engine.advance(st, cfg, pot, wgh)
+    metropolis_dynamics.advance(st, cfg, pot, wgh)
     assert st.species is None
     # and the accessor still materialises the right length on demand
     assert st.species_of.shape == (st.n,)
@@ -55,7 +55,7 @@ def test_the_column_comes_back_aligned_with_the_positions():
     cfg, pot, wgh, st = H.make_mode("hs_branch")
     st.species = np.zeros(st.n, dtype=np.int64)
     st.species[::3] = 1
-    MC_engine.advance(st, cfg, pot, wgh)
+    metropolis_dynamics.advance(st, cfg, pot, wgh)
     assert st.species is not None
     assert st.species.shape == (len(st.positions),)
     assert st.species.dtype == np.int64
@@ -99,7 +99,7 @@ def test_survivors_keep_their_own_species_across_a_window():
     before = {tuple(p): int(s) for p, s in zip(st.positions, st.species)}
     assert len(before) == st.n, "duplicate positions; the key is not unique"
 
-    MC_engine.advance(st, cfg, pot, wgh)
+    metropolis_dynamics.advance(st, cfg, pot, wgh)
     assert st.species is not None
 
     checked = 0
@@ -124,7 +124,7 @@ def test_exchange_insertions_are_still_type_zero():
     cfg, pot, wgh, st = H.make_mode("hs_branch")
     n0 = st.n
     st.species = np.ones(n0, dtype=np.int64)  # nothing is type 0 to begin with
-    MC_engine.advance(st, cfg, pot, wgh)
+    metropolis_dynamics.advance(st, cfg, pot, wgh)
     assert st.species is not None
     inserted = int(np.count_nonzero(st.species == 0))
     assert inserted > 0, (

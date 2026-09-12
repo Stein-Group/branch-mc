@@ -121,7 +121,7 @@ sys.argv, old = old_argv, None
 os.chdir(old_cwd)
 sys.path[:] = old_path
 
-from gcmc.engine import MC_engine as engine
+from gcmc.engine import metropolis_dynamics as engine
 from gcmc.run import sim_setup as config
 from gcmc.system.state import ChainState
 

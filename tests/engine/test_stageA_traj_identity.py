@@ -16,7 +16,7 @@ says otherwise.
 
 Two things are still asserted of the CURRENT engine:
 
-  * `metropolis` is bit-identical. Rule 2 keeps `_advance_metropolis` on its
+  * `metropolis` is bit-identical. Rule 2 keeps `_advance_single_particle` on its
     kd-tree and forbids touching it, precisely so it can be an independent
     reference for the B3 EOS gate. A divergence here means it was touched.
   * Every mode still completes its windows with consistent bookkeeping. Cheap,
@@ -38,7 +38,7 @@ import _harness as H
 import numpy as np
 import pytest
 
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 
 # R1: this module's oracle is the frozen stage-A engine, which lives in tag
 # v2-engineA rather than in the tree. Skipped as a module when it is absent --
@@ -56,7 +56,7 @@ def _check_against_reference(mode, engine):
     ref = np.load(path, allow_pickle=False)
 
     eng = None if engine == "current" else H.load_engine(engine)
-    advance = (MC_engine if eng is None else eng[1]).advance
+    advance = (metropolis_dynamics if eng is None else eng[1]).advance
     cfg, pot, wgh, st = H.make_mode(mode, engine=eng)
     for i in range(H.REF_WINDOWS):
         advance(st, cfg, pot, wgh)
@@ -83,7 +83,7 @@ def test_frozen_stage_a_engine_still_matches_the_oracle(mode):
 
 
 def test_metropolis_is_bit_identical_in_the_current_engine():
-    """`_advance_metropolis` was never converted, and never may be."""
+    """`_advance_single_particle` was never converted, and never may be."""
     _check_against_reference("metropolis", "current")
 
 
@@ -91,5 +91,5 @@ def test_metropolis_is_bit_identical_in_the_current_engine():
 def test_current_engine_still_runs_every_mode(mode):
     cfg, pot, wgh, st = H.make_mode(mode)
     for _ in range(H.REF_WINDOWS):
-        stats = MC_engine.advance(st, cfg, pot, wgh)
+        stats = metropolis_dynamics.advance(st, cfg, pot, wgh)
     assert stats["N"] == len(st.positions)

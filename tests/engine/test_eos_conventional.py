@@ -33,7 +33,7 @@ import pytest
 from scipy.optimize import brentq
 
 from gcmc import config_specs
-from gcmc.engine import MC_engine as engine
+from gcmc.engine import metropolis_dynamics as engine
 from gcmc.run import sim_setup as config
 from gcmc.system.state import ChainState
 

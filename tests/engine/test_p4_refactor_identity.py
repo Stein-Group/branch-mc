@@ -28,7 +28,7 @@ import numpy as np
 import pytest
 from gen_p4_snapshot import N_WINDOWS, SNAPSHOT
 
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 
 
 @pytest.fixture(scope="module")
@@ -47,7 +47,7 @@ def test_the_chain_is_bit_identical_across_the_refactor(mode, snapshot):
     keys = [str(k) for k in snapshot[f"{mode}__keys"]]
     rows = []
     for _ in range(N_WINDOWS):
-        summary = MC_engine.advance(st, cfg, pot, wgh)
+        summary = metropolis_dynamics.advance(st, cfg, pot, wgh)
         rows.append([float(summary[k]) for k in keys])
 
     want_ctr = snapshot[f"{mode}__counters"]

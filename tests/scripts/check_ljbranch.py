@@ -27,7 +27,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from scipy.spatial import cKDTree
 
-from gcmc.engine.MC_engine import _lj_set_energy, _lj_singleparticle_weight
+from gcmc.engine.metropolis_dynamics import _lj_set_energy, _lj_singleparticle_weight
 from gcmc.forcefield import make_potential
 from gcmc.sampling import branch
 

@@ -1,9 +1,9 @@
 """There is exactly one neighbour structure in the hot path.
 
-`_advance_metropolis` keeps its kd-tree forever: it is the independent reference
+`_advance_single_particle` keeps its kd-tree forever: it is the independent reference
 engine that the converted paths are validated against, and it would stop being
-independent if it shared their index. Everything else in `MC_engine` must go
-through `gcmc.space.neighbors.CellList`, and so must all of `gcmc.engine.parallel` (U1 of
+independent if it shared their index. Everything else in `metropolis_dynamics` must go
+through `gcmc.space.neighbors.CellList`, and so must all of `gcmc.engine.cell_parallel` (U1 of
 cell_unify_plan.md): the parallel metropolis kernel inside `advance_cell` is
 not the reference, so that module gets no exemption at all.
 
@@ -22,12 +22,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, ROOT)
 
 # Shrinks one stage at a time; each shrink is recorded in the ledger.
-#   A1:        {_advance_metropolis, advance, _lj_set_energy}
-#   A3:        {_advance_metropolis, _lj_set_energy}
-#   A4 onward: {_advance_metropolis}
+#   A1:        {_advance_single_particle, advance, _lj_set_energy}
+#   A3:        {_advance_single_particle, _lj_set_energy}
+#   A4 onward: {_advance_single_particle}
 #   S5.5:      {metropolis_window}
 #
-# The last entry is a RENAME, and it is also a shrink. `_advance_metropolis` and
+# The last entry is a RENAME, and it is also a shrink. `_advance_single_particle` and
 # the framework loop in `mof_metropolis` each built their own kd-trees; the
 # merge left ONE function that does, and deleted the framework module's
 # `_guest_guest_energy` with its own tree build along with it. Three sites in
@@ -71,11 +71,12 @@ def _enclosing_functions_calling_trees(path):
 
 def test_engine_builds_no_kdtree_outside_metropolis():
     hits = _enclosing_functions_calling_trees(
-        os.path.join(ROOT, "gcmc", "engine", "MC_engine.py")
+        os.path.join(ROOT, "gcmc", "engine", "metropolis_dynamics.py")
     )
     extra = hits - ALLOWED
     assert not extra, (
-        f"kd-tree construction in MC_engine functions {sorted(extra)}; the hot "
+        f"kd-tree construction in metropolis_dynamics functions "
+        f"{sorted(extra)}; the hot "
         f"path has one neighbour structure, gcmc.space.neighbors.CellList"
     )
 
@@ -88,7 +89,7 @@ def test_parallel_builds_no_kdtree_anywhere():
     metropolis kernel is not the reference (the serial one is), so the allowed
     set for this module is empty and stays empty."""
     hits = _enclosing_functions_calling_trees(
-        os.path.join(ROOT, "gcmc", "engine", "parallel.py")
+        os.path.join(ROOT, "gcmc", "engine", "cell_parallel.py")
     )
     assert not hits, (
         f"kd-tree construction in parallel functions {sorted(hits)}; the "
@@ -98,7 +99,7 @@ def test_parallel_builds_no_kdtree_anywhere():
 
 def test_parallel_does_not_import_scipy_spatial():
     """The import itself is the tell: nothing in parallel.py needs it now."""
-    src = Path(ROOT, "gcmc", "engine", "parallel.py").read_text()
+    src = Path(ROOT, "gcmc", "engine", "cell_parallel.py").read_text()
     tree = ast.parse(src)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):

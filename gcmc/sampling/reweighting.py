@@ -100,7 +100,8 @@ def calculate_order_parameter(
     """
     ndim = coords.shape[1]
     if kdtree is None:
-        # EMPTY ENVIRONMENT. `MC_engine.advance` passes `tree = cl if cl.n_active
+        # EMPTY ENVIRONMENT. `metropolis_dynamics.advance` passes
+        # `tree = cl if cl.n_active
         # else None`, so an empty exclusion set arrives here as None with fully
         # padded neighbour rows, and this dereferenced `.data` on it. That is why
         # a psi6 run could not start from an empty box, and why it ran perfectly

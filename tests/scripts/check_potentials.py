@@ -10,7 +10,7 @@ import os
 import numpy as np
 from scipy.spatial import cKDTree
 
-from gcmc.forcefield.aux import HardCoreAux2D, HardCoreAux3D, aux_constants_2d
+from gcmc.forcefield.auxiliary import HardCoreAux2D, HardCoreAux3D, aux_constants_2d
 from gcmc.forcefield.hard_sphere import HardSphere
 from gcmc.forcefield.lennard_jones import LennardJones
 

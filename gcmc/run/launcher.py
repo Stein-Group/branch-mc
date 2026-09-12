@@ -10,6 +10,7 @@ Sweepable axes and where they live in the base params:
     sampler.trial_box_side
     sampler.channel_length
     sampler.channel_width
+    sampler.engine              (metropolis_dynamics / glauber_dynamics; channel only)
 
 Any axis given as a JSON list is swept; scalars are fixed. The launcher takes
 the Cartesian product of all swept axes, so two list axes build a heatmap
@@ -76,6 +77,15 @@ _AXES = (
     ("trial_box_side", "sampler", "trial_box_side"),
     ("channel_length", "sampler", "channel_length"),
     ("channel_width", "sampler", "channel_width"),
+    # THE DYNAMICS AXIS. Sweepable because the only useful comparison between
+    # `metropolis_dynamics` and `glauber_dynamics` is at the SAME state point, the
+    # same box and the same trial cloud, and tau_N per CPU-second is a ratio
+    # that means nothing otherwise. Without this axis a head-to-head is two
+    # launches whose roots have to be kept apart by hand, which is how a
+    # comparison ends up between two different experiments. Inert for every
+    # params file that does not set it: a single-valued axis is applied and
+    # kept out of the label.
+    ("engine", "sampler", "engine"),
     # The short-range auxiliary radius. Sweeping it is how the speedup/acceptance
     # trade-off gets measured, and the sweep carries its own control: the arm at
     # cutoff == run.upper_cutoff is the exact no-op, so one launch produces both

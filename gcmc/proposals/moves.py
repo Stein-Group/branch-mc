@@ -1,6 +1,7 @@
 """M8 of multispecies_plan.md: which move to propose, and what to swap into.
 
-Three loops need this decision -- `MC_engine.advance`, `MC_engine._advance_metropolis`
+Three loops need this decision -- `metropolis_dynamics.advance`,
+`metropolis_dynamics._advance_single_particle`
 and the framework adapter -- and it is exactly the kind of small numeric choice that
 gets copied rather than shared, then drifts. The probabilities and the destination
 draw live here once.
@@ -95,7 +96,7 @@ def draw_swap_target(rng: RNG, current: int, species_ids: Sequence[int]) -> int:
     than `current`.
 
     Takes the actual ids rather than a count. They are contiguous 0..T-1 in the
-    typed engine, but `engine.framework` derives its candidates from the state-point
+    typed engine, but `engine.rigid_framework` derives its candidates from the state-point
     dict, so a run over a SUBSET of a force field's guests has non-contiguous ids
     -- and `range(n)` would then swap into a species the run does not contain, or
     miss one it does. Type-indexed, sized from the model, per M13.

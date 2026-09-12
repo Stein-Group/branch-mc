@@ -29,7 +29,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _harness as H
 
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 
 # (label, box, N)
 SIZES = [("small", 12.0, 700), ("medium", 20.0, 4000), ("large", 30.0, 15000)]
@@ -73,7 +73,7 @@ def measure(make_params, box, n, window, warmup, repeat, seed=7, engine=None):
     rng = np.random.default_rng(seed)
     pos = H.lattice_seed(box, n, 3, rng)
     eng = None if engine in (None, "current") else H.load_engine(engine)
-    advance = (MC_engine if eng is None else eng[1]).advance
+    advance = (metropolis_dynamics if eng is None else eng[1]).advance
     cfg, pot, wgh, st = H.build(
         make_params(box, n, window), seed, positions=pos, engine=eng
     )

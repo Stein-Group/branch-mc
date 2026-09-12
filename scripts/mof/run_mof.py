@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from gcmc.engine.framework import (
+from gcmc.engine.rigid_framework import (
     advance_metropolis_mof_ms,
     channel_repack_move_ms,
     mof_energy_decomposition,

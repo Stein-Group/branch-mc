@@ -18,7 +18,7 @@ import pytest
 from scipy.spatial import cKDTree
 
 from gcmc import config_specs
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 from gcmc.run import sim_setup
 from gcmc.space.neighbors import CellList
 
@@ -254,10 +254,10 @@ def test_weights_are_identical_from_either_container(name):
         config_specs.potential_spec(cfg),
         config_specs.ensemble_spec(cfg),
     )
-    ts_kd, _ = MC_engine._weighted_trials(
+    ts_kd, _ = metropolis_dynamics._weighted_trials(
         raw_kd, tree, *specs, pot, "add", len(P), len(P)
     )
-    ts_cl, _ = MC_engine._weighted_trials(
+    ts_cl, _ = metropolis_dynamics._weighted_trials(
         raw_cl, cl, *specs, pot, "add", len(P), len(P)
     )
     assert np.array_equal(ts_kd.energy_weight, ts_cl.energy_weight)
@@ -284,13 +284,14 @@ def test_hard_sphere_weight_pair_never_sees_a_padded_2d_array():
     )
     pot = cfg.build_potential()
     assert isinstance(
-        MC_engine.make_weigher(config_specs.kernel_spec(cfg), pot), UniformWeigher
+        metropolis_dynamics.make_weigher(config_specs.kernel_spec(cfg), pot),
+        UniformWeigher,
     )
 
     coords = np.zeros((4, 3))
     dists = np.array([[1.2, np.inf], [1.4, 2.0], [np.inf, np.inf], [1.1, 1.9]])
     idxs = np.zeros((4, 2), dtype=int)
-    ts, _ = MC_engine._weighted_trials(
+    ts, _ = metropolis_dynamics._weighted_trials(
         (coords, dists, idxs, None, None),
         None,
         config_specs.kernel_spec(cfg),

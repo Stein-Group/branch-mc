@@ -23,7 +23,7 @@ import pytest
 from scipy.spatial import cKDTree
 
 from gcmc import config_specs
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 from gcmc.run import sim_setup
 from gcmc.system.state import ChainState
 
@@ -74,7 +74,7 @@ def _make(seed):
     }
     cfg = sim_setup.from_params(p)
     pot = cfg.build_potential()
-    w = MC_engine.make_weigher(config_specs.kernel_spec(cfg), pot)
+    w = metropolis_dynamics.make_weigher(config_specs.kernel_spec(cfg), pot)
     st = ChainState.fresh(DIM, seed=seed)
     st.positions = np.empty((0, DIM))
     return cfg, pot, w, st
@@ -90,7 +90,7 @@ def test_translation_draws_three_independent_uniforms():
     st.rng = _RecordingRNG(st.rng, log)
     steps = 0
     while len(log) < 40_000 and steps < 400_000:
-        MC_engine.advance(st, cfg, pot, w)
+        metropolis_dynamics.advance(st, cfg, pot, w)
         steps += 1
     u = np.array(log)
     assert len(u) > 5_000, (
@@ -115,7 +115,7 @@ def test_translation_displacement_is_isotropic():
     disp = []
     for i in range(N_STEPS + BURN):
         before = st.positions.copy()
-        MC_engine.advance(st, cfg, pot, w)
+        metropolis_dynamics.advance(st, cfg, pot, w)
         after = st.positions
         if i < BURN or len(before) == 0 or len(after) != len(before):
             continue

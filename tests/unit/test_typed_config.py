@@ -24,7 +24,36 @@ from gcmc import config_fields
 from gcmc.run.hash_fingerprint import identity_dict, run_id
 
 #: Pinned digest of the canonical untyped run. See point 4 below for its history.
-_UNTYPED_RUN_ID = "e864f492d3ba"
+# Regenerated THREE times for one feature and its clean-up, and only the first
+# was a change of content:
+#
+#   e864f492d3ba -> 36c18832f07b   `engine` and `kmax_margin` joined
+#                                  config_fields.SAMPLER (design plan, 3.4).
+#                                  A NEW FIELD reaching a hashed group, which
+#                                  is the whole design of `config_fields`.
+#   36c18832f07b -> e40cfc02d816   the two engine VALUES renamed:
+#                                  `metropolis_mc` -> `metropolis_dynamics`,
+#                                  `window_heat_bath` -> `glauber_dynamics`.
+#                                  The default's SPELLING is hashed.
+#   e40cfc02d816 -> 45254c9bfde0   the field `no_of_trial_molecules` renamed to
+#                                  `n_trial_molecules`. `identity_dict` keys the
+#                                  hash on `field.name`, so a field rename is a
+#                                  key rename is a different digest.
+#
+# THE LAST TWO COST NOTHING BEYOND THE FIRST, which is why they were allowed to
+# land here rather than being deferred: the first move had already invalidated
+# every pre-`engine` run directory in the project, so renaming afterwards
+# orphans nothing that was not already orphaned. Doing it later, once runs
+# existed at e40cfc02d816, would have cost a real migration.
+#
+# The alternative in each case was worse: hashing a legacy spelling or a legacy
+# field name that the code no longer uses anywhere puts a lie in the identity to
+# protect a directory that is already gone. R9 sanctions a moved run id with a
+# stated cause; all three causes are here and in
+# docs/decisions/DIGEST_PROVENANCE.md, and
+# docs/decisions/GLAUBER_DYNAMICS_REPORT.md says why the default is not
+# excluded from the digest in the first place.
+_UNTYPED_RUN_ID = "45254c9bfde0"
 from gcmc.run.sim_setup import from_params
 
 FF = Path(__file__).resolve().parents[2] / "ff"
@@ -132,12 +161,24 @@ def test_the_untyped_fingerprint_does_not_gain_a_null_key():
     assert set(ident) <= set(config_fields.PHYSICS)
     assert set(ident) == {k for k in config_fields.PHYSICS if k in ident}
 
-    # 4. Regression pin on the VALUE. Regenerated 2026-08-24 at S2, when the
-    #    identity set became `config_fields.PHYSICS` (R8). Previous values, in
-    #    order: fbdc3125c74a (pre-S1), 0c683de8d49b (S1, after lj_tail_pref and
-    #    pore_axis_len were added). Run ids moving is sanctioned by R9; what is
-    #    not sanctioned is moving one without saying why, which is how the
-    #    earlier pin 1a24fe1c17aa lost its provenance.
+    # 4. Regression pin on the VALUE. Regenerated 2026-09-10, when `engine` and
+    #    `kmax_margin` joined `config_fields.SAMPLER` for the Glauber engine.
+    #    Previous values, in order: fbdc3125c74a (pre-S1), 0c683de8d49b (S1,
+    #    after lj_tail_pref and pore_axis_len were added), e864f492d3ba (S2,
+    #    when the identity set became `config_fields.PHYSICS`). Run ids moving
+    #    is sanctioned by R9; what is not sanctioned is moving one without
+    #    saying why, which is how the earlier pin 1a24fe1c17aa lost its
+    #    provenance.
+    #
+    #    WHY THIS ONE MOVED, and why the default was not excluded to avoid it.
+    #    A new field in a physics group reaches the digest because of the group
+    #    it was declared in -- that is the whole design of `config_fields`, and
+    #    special-casing `engine == "metropolis_dynamics"` out of the hash would mean
+    #    re-introducing exactly the hand-maintained identity logic the partition
+    #    replaced. Existing Metropolis params files still validate and run
+    #    correctly; they start a fresh run directory rather than resuming an old
+    #    one, and resuming a pre-`engine` directory is explicitly not a
+    #    requirement. Precedent: `upper_cutoff` and `no_neigh`.
     assert run_id(from_params(_untyped())) == _UNTYPED_RUN_ID
 
 

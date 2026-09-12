@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from gcmc.engine.framework import advance_metropolis_mof
+from gcmc.engine.rigid_framework import advance_metropolis_mof
 from gcmc.forcefield.lj_table import FrameworkField, LennardJonesTable
 from gcmc.forcefield.pair_table import PairTable
 from gcmc.run.io_framework import load_framework_typed

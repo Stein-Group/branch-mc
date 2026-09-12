@@ -64,7 +64,8 @@ LAYERS: dict[str, int] = {
     # The Config field partition (R8) and the sub-config dataclasses it names.
     #
     # MOVED HERE FROM L7 at the parallel migration, and the ladder is what forced
-    # it: `MC_engine` (L6) taking a `KernelSpec` was an upward import, and so was
+    # it: `metropolis_dynamics` (L6) taking a `KernelSpec` was an upward import,
+    # and so was
     # every other migration R8 exists to enable. The old placement reasoned "they
     # describe Config, and Config is L7" -- true, and beside the point. What they
     # ARE is the vocabulary in which a layer states which slice of configuration
@@ -83,7 +84,7 @@ LAYERS: dict[str, int] = {
     "forcefield.lennard_jones": 1,
     "forcefield.lj_table": 1,  # S5.4: absorbed mof_field (the framework half)
     "forcefield.hard_sphere": 1,
-    "forcefield.aux": 1,
+    "forcefield.auxiliary": 1,
     "forcefield.overlap": 1,  # S2: the overlap convention, moved down from L2
     "forcefield.species": 1,
     "forcefield.species_file": 1,
@@ -106,13 +107,35 @@ LAYERS: dict[str, int] = {
     "sampling.branch": 5,
     "sampling.channel": 5,
     "sampling.channel_cyclic": 5,  # R16: shared DP, own mask policy
+    # Flat-histogram biasing in N plus the transition-matrix solve that reads it
+    # back. PROPOSAL machinery, not analysis: `eta` multiplies the weight of a
+    # macrostate inside the sampler and the engine reads it every step, so it
+    # sits with the other weighting policies. The solve rides in the same module
+    # because it consumes the same array and is what the chain reads to refresh
+    # its own bias -- it never touches a finished run.
+    "sampling.flat_histogram": 5,
     "sampling.reweighting": 5,
     # -- L6 engine ----------------------------------------------------------
-    "engine.MC_engine": 6,
-    "engine.parallel": 6,
-    "engine.framework": 6,  # S5.5: its metropolis loop merged into MC_engine
+    "engine.metropolis_dynamics": 6,
+    "engine.cell_parallel": 6,
+    "engine.rigid_framework": 6,  # S5.5: its metropolis loop merged into metropolis_dynamics
+    # The rejection-free Glauber engine: a second DYNAMICS at the same layer
+    # as `metropolis_dynamics`, not a branch inside it. `advance` is 2912 lines and its
+    # acceptance algebra is built for a different proposal; the Glauber engine has no
+    # acceptance algebra at all, so the two share the geometry (L4), the sweep
+    # (L5) and the cell list (L2) and nothing else.
+    "engine.glauber_dynamics": 6,
+    # Expanded-ensemble staged insertion: the G0 INCUMBENT BASELINE the heat
+    # bath is measured against (Siderius & Shen 2013). A separate loop rather
+    # than a branch in `metropolis_dynamics` for two reasons, in order: a new move type
+    # inside `advance` would be a change to a live chain, which the plan's
+    # group 2C must stay empty of; and a baseline computed by the code under
+    # test shares that code's mistakes, so its pair energy, minimum image and
+    # acceptance are written out and share nothing with the samplers.
+    "engine.expanded_ensemble": 6,
     # -- L7 run -------------------------------------------------------------
     "run.sim_setup": 7,
+    "run.guard_audit": 7,
     "run.hash_fingerprint": 7,
     "run.io": 7,
     "run.io_framework": 7,
@@ -122,6 +145,9 @@ LAYERS: dict[str, int] = {
     "__main__": 7,
     # -- off-ladder ---------------------------------------------------------
     "analysis.rdf": 3,
+    # Integrated autocorrelation time of a chain observable. Squarely analysis:
+    # it consumes a finished series and the engine must never reach it.
+    "analysis.autocorr": 3,
     "analysis.widom": 3,
     # Analysis over a configuration: reads positions, a species column and the
     # neighbour structure (L2), and nothing above. Sits with `rdf` because it is

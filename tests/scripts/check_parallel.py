@@ -24,14 +24,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
 
 from gcmc import config_specs
-from gcmc.engine import MC_engine as engine
-from gcmc.engine import parallel
+from gcmc.engine import cell_parallel
+from gcmc.engine import metropolis_dynamics as engine
 from gcmc.run.sim_setup import from_params
 from gcmc.system.state import ChainState, zero_counters
 
 # One cell is one core, so cfg.n_workers is the cell count; without this
 # hook a 9- or 27-cell case would spawn that many processes inside a test.
-parallel.IN_PROCESS = True
+cell_parallel.IN_PROCESS = True
 
 MU, K, CAVR, WIN, NW = 1.0, 20, 2.5, 400, 42
 
@@ -70,11 +70,11 @@ def run_parallel(n_win):
     }
     cfg = from_params(p)
     pot = cfg.build_potential()
-    w = parallel.make_weigher(config_specs.kernel_spec(cfg), pot)
+    w = cell_parallel.make_weigher(config_specs.kernel_spec(cfg), pot)
     st = _state(150, 68)
     etas, last = [], None
     for _ in range(n_win):
-        last = parallel.advance_parallel(st, cfg, pot, w)
+        last = cell_parallel.advance_parallel(st, cfg, pot, w)
         etas.append(last["packing_fraction"])
     return etas, last
 
@@ -143,7 +143,7 @@ def _run3d(sampler_block, n_win=4):
     }
     cfg = from_params(p)
     pot = cfg.build_potential()
-    w = parallel.make_weigher(config_specs.kernel_spec(cfg), pot)
+    w = cell_parallel.make_weigher(config_specs.kernel_spec(cfg), pot)
     rng = np.random.default_rng(0)
     st = ChainState(
         positions=rng.uniform(1.0, 23.0, size=(120, 3)),
@@ -153,7 +153,7 @@ def _run3d(sampler_block, n_win=4):
     )
     last = None
     for _ in range(n_win):
-        last = parallel.advance_parallel(st, cfg, pot, w)
+        last = cell_parallel.advance_parallel(st, cfg, pot, w)
     return last
 
 

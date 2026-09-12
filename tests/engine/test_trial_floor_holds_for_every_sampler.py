@@ -27,7 +27,7 @@ import numpy as np
 import pytest
 
 from gcmc import config_specs
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 from gcmc.run import runner, sim_setup
 from gcmc.system.state import ChainState
 
@@ -82,12 +82,12 @@ def test_the_validator_and_the_engine_agree_about_a_short_trial_pool(
         f"move claims {depth + 1} slots and numpy cannot draw them"
     )
     pot = cfg.build_potential()
-    weigher = MC_engine.make_weigher(config_specs.kernel_spec(cfg), pot)
+    weigher = metropolis_dynamics.make_weigher(config_specs.kernel_spec(cfg), pot)
     state = ChainState.fresh(3, seed=9)
     state.positions = runner._init_config(cfg, state.rng)
     state.species = runner._init_species(cfg, len(state.positions))
     for _ in range(3):
-        MC_engine.advance(state, cfg, pot, weigher)
+        metropolis_dynamics.advance(state, cfg, pot, weigher)
     assert len(state.positions) > 0
 
 
@@ -109,12 +109,12 @@ def test_a_short_pool_really_does_crash_the_engine_when_the_guard_is_bypassed():
     stating a preference.
     """
     cfg = sim_setup.from_params(_params("rosenbluth", 1, 2))
-    object.__setattr__(cfg, "no_of_trial_molecules", 1)
+    object.__setattr__(cfg, "n_trial_molecules", 1)
     pot = cfg.build_potential()
-    weigher = MC_engine.make_weigher(config_specs.kernel_spec(cfg), pot)
+    weigher = metropolis_dynamics.make_weigher(config_specs.kernel_spec(cfg), pot)
     state = ChainState.fresh(3, seed=9)
     state.positions = runner._init_config(cfg, state.rng)
     with pytest.raises(ValueError, match="larger sample than population"):
         for _ in range(6):
-            MC_engine.advance(state, cfg, pot, weigher)
+            metropolis_dynamics.advance(state, cfg, pot, weigher)
     assert np.isfinite(state.positions).all()

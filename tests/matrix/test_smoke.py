@@ -43,7 +43,7 @@ import numpy as np
 import pytest
 
 from gcmc import config_specs
-from gcmc.engine import MC_engine, parallel
+from gcmc.engine import cell_parallel, metropolis_dynamics
 from gcmc.run import runner, sim_setup
 from gcmc.system.state import ChainState
 
@@ -139,7 +139,7 @@ def _advance_point(point: Point, matrix_dir: Path) -> tuple[Any, list[dict[str, 
     """
     cfg = sim_setup.from_params(build_params(point, matrix_dir=matrix_dir))
     pot = cfg.build_potential()
-    wgh = MC_engine.make_weigher(config_specs.kernel_spec(cfg), pot)
+    wgh = metropolis_dynamics.make_weigher(config_specs.kernel_spec(cfg), pot)
     state = ChainState.fresh(cfg.dimension, seed=SEED)
     # THE START IS THE RUNNER'S, not an empty box. `runner._init_config` is what
     # every real run calls, and it is where NVT gets its lattice of `target_n`,
@@ -157,15 +157,15 @@ def _advance_point(point: Point, matrix_dir: Path) -> tuple[Any, list[dict[str, 
     state.species = runner._init_species(cfg, len(state.positions))
 
     # THE PARALLEL POINTS NOW RUN THE PARALLEL KERNEL. `kind` is an axis with two
-    # values and this line used to call `MC_engine.advance` for both, so every
+    # values and this line used to call `metropolis_dynamics.advance` for both, so every
     # `-parallel` point in the matrix -- nine of the pinned ones -- exercised the
     # serial engine under a label that said otherwise. The runner dispatches on
     # `exe.mode`; so does this now, which is the only way the two can be the same
     # code path.
     advance = (
-        parallel.advance_parallel
+        cell_parallel.advance_parallel
         if config_specs.execution_spec(cfg).mode == "parallel"
-        else MC_engine.advance
+        else metropolis_dynamics.advance
     )
     summaries: list[dict[str, Any]] = []
     for _ in range(N_WINDOWS):

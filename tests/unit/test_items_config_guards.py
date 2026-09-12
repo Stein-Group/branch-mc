@@ -15,7 +15,7 @@ Item 2  an NVT window with no particles returns immediately instead of looping.
 import numpy as np
 
 from gcmc import config_specs
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 from gcmc.run import sim_setup
 from gcmc.system.state import ChainState
 
@@ -160,11 +160,11 @@ def test_nvt_empty_window_returns():
     }
     cfg = sim_setup.from_params(p)
     pot = cfg.build_potential()
-    w = MC_engine.make_weigher(config_specs.kernel_spec(cfg), pot)
+    w = metropolis_dynamics.make_weigher(config_specs.kernel_spec(cfg), pot)
     st = ChainState.fresh(3, seed=0)
     st.positions = np.empty((0, 3))  # empty start: repack has nothing to do
     # must return promptly rather than spinning forever on an empty box.
-    MC_engine.advance(st, cfg, pot, w)
+    metropolis_dynamics.advance(st, cfg, pot, w)
     assert len(st.positions) == 0
 
 

@@ -61,6 +61,12 @@ from ..sampling.rosenbluth import select_forward, select_reverse
 from ..space import geometry, neighbors
 from ..system.state import zero_counters
 
+#: log-acceptance of a proposal that failed geometrically. Named rather than
+#: written as `-math.inf` at four call sites so the collection matrix and the
+#: acceptance test cannot come to disagree about what "impossible" is.
+_NINF_ACC = -math.inf
+
+
 # ---------------------------------------------------------------------------
 # VALIDATION RECORD for the short-range (dual-cutoff) auxiliary.
 #
@@ -135,7 +141,7 @@ def make_weigher(kern: KernelSpec, potential: Potential | None) -> Any:
 
     Takes a `KernelSpec` rather than a `Config`: it reads `potential_type`
     and `two_dim` and nothing else, and both are derived fields. Narrowing it
-    matters beyond tidiness -- `parallel._run_cell` calls this inside the worker,
+    matters beyond tidiness -- `cell_parallel._run_cell` calls this inside the worker,
     so a `Config` parameter here is a `Config` shipped to every process.
     """
     match kern.potential_type:
@@ -314,7 +320,7 @@ def _weighted_trials(
 class MetropolisModel:
     """Everything a single-particle Metropolis proposal has to ask about a point.
 
-    THIS EXISTS BECAUSE THERE WERE TWO LOOPS. `_advance_metropolis` and the
+    THIS EXISTS BECAUSE THERE WERE TWO LOOPS. `_advance_single_particle` and the
     framework loop that used to live in `mof_metropolis` said, in their own
     docstrings, that they mirrored each other "move for move", and they did:
     the same three-way move choice, the same textbook grand-canonical
@@ -380,6 +386,20 @@ class MetropolisModel:
     #: pore admissibility, bulk only: a callable answering "is this point inside
     #: the accessible region?"
     inside_pore: Any | None = None
+    #: FLAT-HISTOGRAM BIASING IN N, or None. G0.4 of the design plan
+    #: needs GC-TMMC on this loop as the incumbent baseline the new engine is
+    #: measured against, and TMMC is two things: a bias `eta[N]` added to the
+    #: exchange acceptance, and a collection matrix filled with the UNBIASED
+    #: acceptance of every proposal.
+    #:
+    #: NONE IS THE WHOLE BACKWARD-COMPATIBILITY ARGUMENT. With `bias is None`
+    #: not one expression below changes and not one `rng` call is added or
+    #: removed, so every chain through this loop -- 52 pinned counter digests
+    #: and two golden trajectories -- is untouched. The add and remove branches
+    #: always draw their uniform (there is no certain-acceptance short circuit
+    #: on an exchange), so even the biased path consumes the stream at the same
+    #: rate; it is simply a different chain, which is what a bias is.
+    bias: Any | None = None
 
     @property
     def n_species(self) -> int:
@@ -429,7 +449,7 @@ class MetropolisModel:
             return 0.0, False, 0
         if self.table is None:
             # one world, sigma = epsilon = 1: a scalar floor and the frozen
-            # pair energy, exactly as `_advance_metropolis` always did
+            # pair energy, exactly as `_advance_single_particle` always did
             if overlap.overlaps(d, self.lower_cutoff).any():
                 return 0.0, True, int(d.size)
             if self.hard_core:
@@ -513,8 +533,15 @@ def metropolis_window(
         return int(ids[0]) if spc is None else int(spc[j])
 
     step = 0
+    bias = model.bias
     while step < window:
         N = len(pos)
+        if bias is not None:
+            # VISITED STATES, one count per proposal, which is Errington's
+            # convention and the histogram G9.2's flatness criterion reads.
+            # Counted before the move is chosen so translations count too: the
+            # chain occupies this macrostate for this step whatever it proposes.
+            bias.visit(N)
         choice = moves.draw_move(rng, n_species)
 
         # ----- translate -----
@@ -606,11 +633,21 @@ def metropolis_window(
             s = pick_species()
             trial = rng.uniform(0, side, dim)
             if model.blocked(trial, s):
+                if bias is not None:
+                    bias.record(N, N + 1, _NINF_ACC)
                 continue  # trial hit the wall / a framework atom
             tree = cKDTree(pos, boxsize=box) if N > 0 else None
             u, ov, ne = model.pair_energy(trial, s, pos, spc, tree)
             n_evals += ne
             if ov:
+                if bias is not None:
+                    # A GEOMETRIC FAILURE IS A TRANSITION WITH ACCEPTANCE ZERO,
+                    # not an absence of data. Skipping these rows would make the
+                    # measured P(N -> N+1) the acceptance CONDITIONAL on a
+                    # non-overlapping trial, which is a different matrix and
+                    # gives a ln Pi that is wrong by the overlap fraction --
+                    # exactly the quantity that matters at high loading.
+                    bias.record(N, N + 1, _NINF_ACC)
                 continue  # hard core at the floor, every model
             n_s = N if spc is None else int(np.count_nonzero(spc == s))
             if model.hard_core:
@@ -622,9 +659,15 @@ def metropolis_window(
                 log_bf = -beta * u
             # TERM ORDER IS THE BULK ORDER, verbatim. At one species `log_z[s]`
             # is `beta * mu` and `n_s` is `N`, so this expression is textually
-            # what `_advance_metropolis` computed and the 52 pinned bulk digests
+            # what `_advance_single_particle` computed and the 52 pinned bulk digests
             # cannot move on a re-association.
             log_acc = log_v - math.log(n_s + 1) + log_z[s] + log_bf
+            if bias is not None:
+                # the UNBIASED ratio reaches the matrix; the bias reaches the
+                # chain. Getting these two the wrong way round is the one
+                # mistake that still produces a smooth ln Pi curve.
+                bias.record(N, N + 1, log_acc)
+                log_acc += bias.log_bias(N + 1) - bias.log_bias(N)
             if math.log(rng.uniform(0, 1)) <= log_acc:
                 pos = np.append(pos, [trial], axis=0) if N > 0 else trial.reshape(1, -1)
                 if spc is not None:
@@ -654,10 +697,14 @@ def metropolis_window(
                 idx_s = np.nonzero(spc == s)[0]
                 n_s = len(idx_s)
                 if n_s == 0:
+                    if bias is not None:
+                        bias.record(N, N - 1, _NINF_ACC)
                     continue  # nothing of this species: a wasted proposal
                 j = int(idx_s[int(rng.integers(n_s))])
             else:
                 if N == 0:
+                    if bias is not None:
+                        bias.record(N, N - 1, _NINF_ACC)
                     continue  # rejected attempt: nothing to remove
                 n_s = N
                 j = int(rng.integers(N))
@@ -675,6 +722,9 @@ def metropolis_window(
                     u += model.tail_pref * (2.0 * N - 1.0)
                 log_bf = -beta * u  # removing reverses the sign below
             log_acc = math.log(n_s) - log_v - log_z[s] - log_bf
+            if bias is not None:
+                bias.record(N, N - 1, log_acc)
+                log_acc += bias.log_bias(N - 1) - bias.log_bias(N)
             if math.log(rng.uniform(0, 1)) <= log_acc:
                 pos = without
                 if spc is not None:
@@ -688,7 +738,7 @@ def metropolis_window(
     return pos, spc, n_evals
 
 
-def _advance_metropolis(
+def _advance_single_particle(
     state: ChainState, cfg: Config, potential: Potential
 ) -> dict[str, Any]:
     """Standard single-particle grand-canonical Metropolis (textbook GCMC): one
@@ -723,7 +773,7 @@ def _advance_metropolis(
     # The hard-core pmf auxiliary (`aux`) is refused by `sim_setup.from_params`
     # (M15: fail at the earliest layer that can see the problem), so it cannot
     # reach here from a params file. Kept as an assertion rather than deleted:
-    # `_advance_metropolis` is also called directly by characterisation scripts
+    # `_advance_single_particle` is also called directly by characterisation scripts
     # that build a Config by other means, and a silent wrong answer is worse
     # than a loud one.
     assert kern.potential_type != "aux", (
@@ -734,7 +784,7 @@ def _advance_metropolis(
     if kern.potential_type == "ljaux":
         # with a single trial the selection bias cancels identically, so
         # metropolis + pmf IS metropolis on the plain LJ potential
-        from ..forcefield.aux import LJAux3D
+        from ..forcefield.auxiliary import LJAux3D
 
         assert isinstance(potential, LJAux3D)
         potential = potential.lj
@@ -781,7 +831,7 @@ def _advance_metropolis(
     )
 
     state.positions = pos
-    # `_advance_metropolis` does not carry a species column: it never reads one
+    # `_advance_single_particle` does not carry a species column: it never reads one
     # for the energy and never writes one on an insertion or deletion, so
     # `state.species` would desync from `state.positions` on the first accepted
     # exchange. `sim_setup` refuses typed + metropolis for exactly that reason;
@@ -928,7 +978,7 @@ def _lj_set_energy(
     do once per clique. Frozen matrix slots are dropped: obstacles interact by
     overlap exclusion only, never through the LJ sum, which is what handing a
     fluid-only `rest` array used to express. Without it, a throwaway cell list is
-    built here from `rest`, so every other caller (parallel.py) is unchanged.
+    built here from `rest`, so every other caller (cell_parallel.py) is unchanged.
     """
     coords = np.asarray(coords, float)
     if len(coords) == 0:
@@ -1189,7 +1239,7 @@ def advance(
     trial cloud -- and accepts it with the detailed-balance ratio assembled at
     the bottom of the loop (ideal-gas factor, chemical potential, Rosenbluth /
     partition-function ratio, energy terms). NVT mode restricts to number-
-    conserving moves. `_advance_metropolis` is the independent single-trial
+    conserving moves. `_advance_single_particle` is the independent single-trial
     reference implementation and is deliberately NOT this function.
 
     Engineering: one persistent CellList answers every neighbour question for
@@ -1223,7 +1273,7 @@ def advance(
     # DERIVED HERE, ahead of the dispatch, because the dispatch needs it. The
     # sampler alone does not decide which loop runs: a canonical run has no trial
     # cloud, so `sampler.type` is 'metropolis' by validation, and `metropolis`
-    # names `_advance_metropolis` -- which is single-species, has no branch for
+    # names `_advance_single_particle` -- which is single-species, has no branch for
     # the pair exchange, and raises `unhandled move choice 'swap'` on the first
     # one. That raise is how this was found. The canonical move set is the NVT
     # branch's, not the metropolis loop's, and the ensemble is what says so.
@@ -1232,7 +1282,7 @@ def advance(
 
     if kern.metropolis and not canonical:
         assert potential is not None  # metropolis never runs in reweight mode
-        return _advance_metropolis(state, cfg, potential)
+        return _advance_single_particle(state, cfg, potential)
     if kern.potential_type == "reweight" and not kern.two_dim:
         raise NotImplementedError(
             "3D reweighting (Q6) is not a coherent estimator in the original "
@@ -1283,7 +1333,7 @@ def advance(
     rc_sel = uc if _aux_rc is None else float(_aux_rc)
     nn = kern.no_neigh
     mf = samp.move_factor
-    n_trials = samp.no_of_trial_molecules
+    n_trials = samp.n_trial_molecules
     depth = samp.depth
     gdict = pot_spec.gamma_dict
     beta = kern.beta
@@ -1717,7 +1767,7 @@ def advance(
         # n_species > 1 since M8, and `advance` fell through to the raise below,
         # so EVERY multi-species run crashed within a handful of steps. That is
         # the 8 remaining tier-2 failures, and it is the good failure mode: the
-        # same omission in `_advance_metropolis` was a bare `else` that executed
+        # same omission in `_advance_single_particle` was a bare `else` that executed
         # the swap as a deletion instead.
         #
         # WHY THERE IS NO COMBINATORIAL TERM. A specific labelled particle changes

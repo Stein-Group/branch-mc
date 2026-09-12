@@ -31,7 +31,7 @@ import _harness as H
 import numpy as np
 import pytest
 
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 from gcmc.proposals import channel_move
 
 _BOX = 12.0
@@ -124,7 +124,7 @@ def test_the_cyclic_rod_runs_at_depth_two_and_three(dim, depth) -> None:
     cfg, potential, weigher, state = H.build(params, 7, positions=pos)
     exchanges = 0
     for _ in range(3):
-        c = MC_engine.advance(state, cfg, potential, weigher)["counters"]
+        c = metropolis_dynamics.advance(state, cfg, potential, weigher)["counters"]
         exchanges += c["add_step"] + c["remove_step"] + c["repack_step"]
     assert exchanges >= 500, (
         f"{dim}D depth {depth}: only {exchanges} exchange proposals ran, too few "

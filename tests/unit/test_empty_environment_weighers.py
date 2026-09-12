@@ -1,6 +1,7 @@
 """The two geometry-aware weighers survive an empty environment.
 
-WHY THIS EXISTS. `MC_engine.advance` passes `tree = cl if cl.n_active else None`,
+WHY THIS EXISTS. `metropolis_dynamics.advance` passes
+`tree = cl if cl.n_active else None`,
 so an empty exclusion set -- no fluid left and no frozen matrix -- reaches every
 weigher as `kdtree=None` with fully padded neighbour rows. The distance-only
 weighers have always handled that: an infinite distance contributes zero energy
@@ -84,7 +85,7 @@ def test_psi6_agrees_with_the_sparse_case_it_generalises() -> None:
 def test_the_pmf_auxiliary_on_an_empty_environment_applies_no_bias() -> None:
     """An empty product is 1: the g3 factor is three-body, and with no
     neighbours there is no triplet to weight."""
-    aux = pytest.importorskip("gcmc.forcefield.aux")
+    aux = pytest.importorskip("gcmc.forcefield.auxiliary")
     HardCoreAux3D = aux.HardCoreAux3D
 
     obj = HardCoreAux3D.__new__(
@@ -109,7 +110,7 @@ def test_the_pmf_auxiliary_on_an_empty_environment_applies_no_bias() -> None:
 def test_the_pmf_per_pair_recompute_honours_the_undefined_reference() -> None:
     """`weight_pair` must take the same no-bias branch, or the bulk weight and
     the recompute would disagree on the same move."""
-    aux = pytest.importorskip("gcmc.forcefield.aux")
+    aux = pytest.importorskip("gcmc.forcefield.auxiliary")
     obj = aux.HardCoreAux3D.__new__(aux.HardCoreAux3D)
     obj.side = 10.0
 

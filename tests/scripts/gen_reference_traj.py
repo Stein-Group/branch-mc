@@ -21,7 +21,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _harness as H
 
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 
 
 def run_mode(name):
@@ -29,7 +29,7 @@ def run_mode(name):
     cfg, pot, wgh, st = H.make_mode(name)
     frames, stats = [], []
     for _ in range(H.REF_WINDOWS):
-        s = MC_engine.advance(st, cfg, pot, wgh)
+        s = metropolis_dynamics.advance(st, cfg, pot, wgh)
         frames.append(np.array(st.positions, dtype=np.float64, copy=True))
         stats.append(
             {

@@ -81,7 +81,7 @@ if MODE == "aux3d":
 import cav_n_d_3d_g3_LJ as orig
 
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
-from gcmc.forcefield.aux import HardCoreAux2D, HardCoreAux3D, aux_constants_2d
+from gcmc.forcefield.auxiliary import HardCoreAux2D, HardCoreAux3D, aux_constants_2d
 from gcmc.forcefield.lennard_jones import LennardJones
 from gcmc.proposals.trials import TrialSet
 from gcmc.sampling.base import EnergyWeigher, UniformWeigher
@@ -144,7 +144,7 @@ elif MODE == "aux3d":
             diameter=lower,
             upper_cutoff=upper,
             side=side,
-            n_trials=orig.no_of_trial_molecules,
+            n_trials=orig.n_trial_molecules,
             g3_csv=os.path.join(ORIG, "g3_analysis_data.csv"),
         )
     )

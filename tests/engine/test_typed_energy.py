@@ -30,7 +30,7 @@ import numpy as np
 import pytest
 
 from gcmc import config_specs
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 from gcmc.forcefield.lennard_jones import LennardJones
 from gcmc.forcefield.lj_table import LennardJonesTable
 from gcmc.forcefield.pair_table import PairTable
@@ -60,7 +60,7 @@ def _params(species_file: str | None, sampler: str = "rosenbluth") -> dict:
 def _advance(species_file: str | None, n_windows: int = 4) -> tuple:
     cfg = sim_setup.from_params(_params(species_file))
     pot = cfg.build_potential()
-    wgh = MC_engine.make_weigher(config_specs.kernel_spec(cfg), pot)
+    wgh = metropolis_dynamics.make_weigher(config_specs.kernel_spec(cfg), pot)
     rng = np.random.default_rng(3)
     state = ChainState(
         positions=rng.uniform(0, _BOX, (_N0, 3)),
@@ -69,7 +69,9 @@ def _advance(species_file: str | None, n_windows: int = 4) -> tuple:
     )
     if species_file is not None:
         state.species = np.zeros(_N0, dtype=np.int64)
-    summaries = [MC_engine.advance(state, cfg, pot, wgh) for _ in range(n_windows)]
+    summaries = [
+        metropolis_dynamics.advance(state, cfg, pot, wgh) for _ in range(n_windows)
+    ]
     return cfg, state, summaries
 
 

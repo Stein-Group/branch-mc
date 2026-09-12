@@ -38,7 +38,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gcmc.engine.framework import advance_metropolis_mof_ms
+from gcmc.engine.rigid_framework import advance_metropolis_mof_ms
 from gcmc.forcefield.lj_table import FrameworkField
 from gcmc.forcefield.pair_table import PairTable
 
@@ -307,7 +307,7 @@ def test_the_swap_move_actually_fires():
 # Everything above runs through `advance_metropolis_mof_ms`, which was the only
 # multi-species sampler that existed when P3's gates were written. The engine's
 # own typed path -- branch and the transfer-matrix sweeps, reached through
-# `MC_engine.advance` -- shares none of that code: a different move split, a
+# `metropolis_dynamics.advance` -- shares none of that code: a different move split, a
 # different insertion (a clique out of a trial cloud rather than one atom), a
 # different activity assembly, and the species-draw correction on top. So the
 # gates below are not duplicates; they are the same physical claims asked of the
@@ -324,7 +324,7 @@ def _engine_mean_N(species_file: str, mu_per_species: dict, seed: int, windows: 
     import numpy as _np
 
     from gcmc import config_specs
-    from gcmc.engine import MC_engine
+    from gcmc.engine import metropolis_dynamics
     from gcmc.run import sim_setup
     from gcmc.system.state import ChainState
 
@@ -342,14 +342,16 @@ def _engine_mean_N(species_file: str, mu_per_species: dict, seed: int, windows: 
     }
     cfg = sim_setup.from_params(params)
     pot = cfg.build_potential()
-    wgh = MC_engine.make_weigher(config_specs.kernel_spec(cfg), pot)
+    wgh = metropolis_dynamics.make_weigher(config_specs.kernel_spec(cfg), pot)
     rng = _np.random.default_rng(seed)
     state = ChainState(
         positions=rng.uniform(0, 0.6 * box, (20, 3)),
         rng=_np.random.default_rng(seed + 1),
         step=0,
     )
-    counts = [MC_engine.advance(state, cfg, pot, wgh)["N"] for _ in range(windows)]
+    counts = [
+        metropolis_dynamics.advance(state, cfg, pot, wgh)["N"] for _ in range(windows)
+    ]
     return float(_np.mean(counts[windows // 2 :])), cfg, state
 
 

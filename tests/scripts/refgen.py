@@ -164,7 +164,7 @@ elif MODE == "aux3d":
     out["idxs"] = idxs
     out["tree_data"] = tree.data
     out["side"] = side
-    out["n_trials"] = orig.no_of_trial_molecules
+    out["n_trials"] = orig.n_trial_molecules
     out["upper_cutoff"] = orig.upper_cutoff
     out["diameter"] = orig.diameter_of_disk
     out["g3_bulk"] = g_r

@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 
 from gcmc import config_specs
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 from gcmc.run import sim_setup
 from gcmc.system.state import ChainState
 
@@ -48,12 +48,12 @@ def _sample_pn(sampler_block, steps=N_STEPS, seed=1):
     }
     cfg = sim_setup.from_params(p)
     pot = cfg.build_potential()
-    w = MC_engine.make_weigher(config_specs.kernel_spec(cfg), pot)
+    w = metropolis_dynamics.make_weigher(config_specs.kernel_spec(cfg), pot)
     st = ChainState.fresh(DIM, seed=seed)
     st.positions = np.empty((0, DIM))
     counts = {}
     for i in range(steps + BURN):
-        MC_engine.advance(st, cfg, pot, w)
+        metropolis_dynamics.advance(st, cfg, pot, w)
         if i >= BURN:
             n = len(st.positions)
             counts[n] = counts.get(n, 0) + 1

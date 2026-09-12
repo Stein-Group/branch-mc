@@ -28,7 +28,7 @@ import numpy as np
 import pytest
 from scipy.spatial import cKDTree
 
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 
 # R1: this module's oracle is the frozen stage-A engine, which lives in tag
 # v2-engineA rather than in the tree. Skipped as a module when it is absent --
@@ -44,7 +44,7 @@ _frozen.skip_module_without(_frozen.ENGINEA)
 def test_invariants_after_five_windows(mode):
     cfg, pot, wgh, st = H.make_mode(mode)
     for _ in range(5):
-        stats = MC_engine.advance(st, cfg, pot, wgh)
+        stats = metropolis_dynamics.advance(st, cfg, pot, wgh)
 
     p = np.asarray(st.positions, float)
     assert len(p) == stats["N"], "reported N disagrees with the configuration"
@@ -94,7 +94,7 @@ def test_nvt_conserves_n_exactly():
     pos = H.lattice_seed(12.0, 400, 3, rng)
     cfg, pot, wgh, st = H.build(_nvt_channel_params(60), 3, positions=pos)
     for _ in range(5):
-        stats = MC_engine.advance(st, cfg, pot, wgh)
+        stats = metropolis_dynamics.advance(st, cfg, pot, wgh)
         assert stats["N"] == 400, f"NVT lost particles: N = {stats['N']}"
         assert len(st.positions) == 400
 
@@ -120,7 +120,7 @@ def test_nvt_conserves_n_exactly():
 # on that quantity fails for an unchanged engine. So the LJ mode is run in NVT
 # instead, where N is conserved exactly and every remaining observable is
 # stationary; muVT LJ is validated by the EOS gate in B3, against the
-# never-converted `_advance_metropolis`.
+# never-converted `_advance_single_particle`.
 _HS_CHANNEL = H._p(
     {"main": "hard_core"},
     {
@@ -163,7 +163,7 @@ def _run_chain(params, n_seed, seed, engine, rates):
     rng = np.random.default_rng(500 + seed)
     pos = H.lattice_seed(params["ensemble"]["box"], n_seed, 3, rng)
     eng = None if engine == "current" else H.load_engine(engine)
-    advance = (MC_engine if eng is None else eng[1]).advance
+    advance = (metropolis_dynamics if eng is None else eng[1]).advance
     cfg, pot, wgh, st = H.build(params, seed, positions=pos, engine=eng)
     for _ in range(BURN):
         advance(st, cfg, pot, wgh)
@@ -254,7 +254,7 @@ def test_same_seed_same_chain(mode):
     def run():
         cfg, pot, wgh, st = H.make_mode(mode)
         for _ in range(3):
-            MC_engine.advance(st, cfg, pot, wgh)
+            metropolis_dynamics.advance(st, cfg, pot, wgh)
         return np.asarray(st.positions, float)
 
     a, b = run(), run()

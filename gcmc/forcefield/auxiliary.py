@@ -16,6 +16,11 @@ name:
 
 The constant derivations and both weight expressions are transcribed verbatim
 from the original so they can be characterised against it.
+
+Named `auxiliary.py`, not `aux.py`: `AUX` is a reserved DOS device name that
+Windows still enforces, so a file called `aux.py` cannot exist in a checkout on
+that platform. Registry names (`"aux"`, `"aux2d"`, `"ljaux"`) and every config
+key are unchanged.
 """
 
 from __future__ import annotations
@@ -249,7 +254,7 @@ class HardCoreAux3D(Potential):
         assert coords is not None and idxs is not None
         N, k = dists.shape
         if kdtree is None:
-            # EMPTY ENVIRONMENT. `MC_engine.advance` passes `tree = cl if
+            # EMPTY ENVIRONMENT. `metropolis_dynamics.advance` passes `tree = cl if
             # cl.n_active else None`, so an empty exclusion set -- no fluid left
             # and no frozen matrix -- arrives here as None with fully padded
             # neighbour rows. Every other weigher handles that already: an

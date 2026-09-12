@@ -1,6 +1,6 @@
 """The framework run: its move set and its reporting, in a rigid host.
 
-The move loop itself is NOT here. It is `MC_engine.metropolis_window`, shared
+The move loop itself is NOT here. It is `metropolis_dynamics.metropolis_window`, shared
 with the bulk path, because the two were once separate implementations of the
 same textbook grand-canonical acceptance and one acceptance criterion with two
 homes gets fixed in one of them. What is here is what is genuinely about the
@@ -40,11 +40,20 @@ from ..forcefield.lj_table import FrameworkField, LennardJonesTable
 from ..forcefield.overlap import OVERLAP_TOL as _TOL
 from ..forcefield.pair_table import PairTable, table_pair_energy_sq
 from ..proposals import moves
-from ..proposals.channel_move import assign_species, window_guard_ok
-from ..sampling.channel import ChannelSweepLJ
+from ..proposals.channel_move import (
+    assign_species,
+    frozen_neighbours_from_array,
+    pool_one_body_logweights,
+    window_guard_ok,
+)
+from ..sampling.channel import (
+    ChannelSweepLJ,
+    ladder_probs,
+    window_ladder_logw,
+)
 from ..space.body import cuboid_members, local_from_box, oriented_cuboid_trials
 from ..system.state import zero_counters
-from .MC_engine import MetropolisModel, metropolis_window
+from .metropolis_dynamics import MetropolisModel, metropolis_window
 
 
 @dataclass
@@ -205,7 +214,7 @@ def advance_metropolis_mof_ms(
 ) -> MofResult:
     """One sampling window of multi-species GCMC in the framework.
 
-    A FRAMEWORK ADAPTER over `MC_engine.metropolis_window`. What is
+    A FRAMEWORK ADAPTER over `metropolis_dynamics.metropolis_window`. What is
     framework-specific is three answers a `MetropolisModel` gives -- a framework
     overlap, a per-pair typed energy, a one-body host term -- and the move set
     and the acceptance algebra are shared with every other single-particle path.
@@ -585,3 +594,171 @@ def channel_repack_move_ms(
     if stats is not None:
         stats["accepts"] = stats.get("accepts", 0.0) + 1.0
     return pos, spc, True
+
+
+def glauber_window_move_ms(
+    pos: FloatArray,
+    spc: IntArray,
+    rng: RNG,
+    *,
+    field: FrameworkField,
+    table: PairTable,
+    z_star: dict[int, float],
+    beta: float,
+    box: FloatArray,
+    rc: float,
+    guest_types: list[int],
+    L_long: float,
+    w: float,
+    n_pool: int,
+    kmax: int,
+    species_probs: FloatArray | None = None,
+    stats: dict[str, float] | None = None,
+) -> tuple[FloatArray, IntArray, int]:
+    """G8: ONE rejection-free Glauber engine inside a rigid framework.
+
+    The number-changing sibling of `channel_repack_move_ms`, and the difference
+    is exactly the ladder. That move resamples a window's content at FIXED k, so
+    the combinatorial and activity factors cancel between the forward and
+    reverse legs and it is accepted unconditionally by cancellation. This one
+    draws k from the exact conditional
+
+        P(k)  prop  (M - k)! * W_k * exp(...)      (window_ladder_logw)
+
+    and is accepted unconditionally by CONSTRUCTION: dN = k_new - k_in takes any
+    sign and any magnitude up to kmax, so insertion and deletion cease to be
+    separate moves in the pore as well as in the bulk.
+
+    THE POOL IS ALWAYS EXACTLY `n_pool` POINTS -- the window's current occupants
+    first, then `n_pool - k_in` fresh trials -- with inadmissible rows kept at
+    weight zero rather than dropped, because the (M-k)! counts orderings of an
+    M-element pool (section 2B.5). The one-body weight of each row carries the
+    activity, the window volume, the species-draw probability and the framework
+    plus frozen-exterior energy, once each, through the same
+    `pool_one_body_logweights` the bulk engine uses.
+
+    THE GUARD RAISES HERE, and that is G8.5. `channel_repack_move_ms` treats a
+    guard failure as a silent runtime no-op -- it returns the state untouched
+    with a `stats["attempts"]` bump -- and copying that would be the worst
+    available choice for this engine: under the Glauber engine it means the chain never
+    exchanges and produces a plausible-looking wrong isotherm with nothing in the
+    log to say so. A geometry that does not fit is a configuration error, so it
+    is an exception.
+
+    Returns (positions, species, k_new - k_in).
+    """
+    box = np.asarray(box, float)
+    gt = list(guest_types)
+    if species_probs is None:
+        species_probs = np.full(len(gt), 1.0 / len(gt))
+    if kmax < 1 or kmax > n_pool:
+        raise ValueError(
+            f"the Glauber engine needs 1 <= kmax <= M, got kmax={kmax} and M={n_pool}"
+        )
+    if not window_guard_ok(L_long, w, box, float(rc)):
+        raise ValueError(
+            f"channel window violates the periodic guard: "
+            f"sqrt(L_long^2 + 2 w^2) must be <= min(box) - rc ({float(rc):.3f}). "
+            "Under the Glauber engine this cannot be a runtime no-op: the chain would "
+            "never exchange and would produce a plausible-looking wrong "
+            "isotherm with nothing in the log to say so."
+        )
+    if stats is not None:
+        stats["attempts"] = stats.get("attempts", 0.0) + 1.0
+
+    center = rng.uniform(0.0, 1.0, size=3) * box
+    _, R = oriented_cuboid_trials(rng, center, 1, L_long, w, box)
+    half_long, half_w = 0.5 * L_long, 0.5 * w
+    inside = cuboid_members(pos, center, R, half_long, half_w, box)
+    k_in = len(inside)
+    if stats is not None:
+        stats["k_sum"] = stats.get("k_sum", 0.0) + float(k_in)
+        stats["k_max"] = max(stats.get("k_max", 0.0), float(k_in))
+    if k_in > min(kmax, n_pool):
+        # section 3.7: the construction is defined only for
+        # k_in <= min(kmax, M), and the kernel is the identity elsewhere -- a
+        # legal kernel, provided the identity is COUNTED
+        if stats is not None:
+            stats["truncated"] = stats.get("truncated", 0.0) + 1.0
+        return pos, spc, 0
+
+    v_w = float(L_long) * float(w) ** 2
+    a, b = half_long, half_w
+    n_new = n_pool - k_in
+    Uf = np.column_stack(
+        [
+            rng.uniform(-a, a, n_new),
+            rng.uniform(-b, b, n_new),
+            rng.uniform(-b, b, n_new),
+        ]
+    )
+    Pf = np.mod(center + Uf @ R.T, box)
+    sf = assign_species(n_new, gt, species_probs, rng)
+
+    outside = np.ones(len(pos), dtype=bool)
+    outside[inside] = False
+    ext_P, ext_s = pos[outside], spc[outside].astype(np.int64)
+    pool_P = np.vstack([pos[inside], Pf]) if k_in else Pf
+    pool_s = np.concatenate([spc[inside].astype(np.int64), sf])
+    assert len(pool_P) == n_pool, (
+        f"pool has {len(pool_P)} rows for M = {n_pool}: inadmissible trials must "
+        "be kept at weight zero, never dropped"
+    )
+
+    floor = table.core_floor
+    logw, adm = pool_one_body_logweights(
+        pool_P,
+        pool_s,
+        beta=beta,
+        log_z={t: math.log(z_star[t]) for t in gt},
+        log_volume=math.log(v_w),
+        log_p={int(t): float(np.log(species_probs[i])) for i, t in enumerate(gt)},
+        neighbours=frozen_neighbours_from_array(
+            ext_P, ext_s, box, max(float(rc), float(np.max(floor)))
+        ),
+        floor=floor,
+        field=field,
+        table=table,
+        lj=True,
+    )
+    member_weights = np.where(adm, np.exp(np.clip(logw, -700, 700)), 0.0)
+    U = local_from_box(pool_P, center, R, box)
+    sweep = ChannelSweepLJ(
+        U,
+        member_weights,
+        float("nan"),
+        float(rc),
+        beta,
+        kmax,
+        species=pool_s,
+        floor=floor,
+        table=table,
+    )
+    # NO TAIL, on either side: a pore's uniform space-filling assumption does
+    # not hold and the species file forbids the correction outright, so the
+    # ladder term is the (M-k)! alone.
+    logw_ladder = window_ladder_logw(sweep, kmax)
+    p_k = ladder_probs(logw_ladder)
+    if not p_k.any():
+        if stats is not None:
+            stats["infeasible"] = stats.get("infeasible", 0.0) + 1.0
+        return pos, spc, 0
+    if stats is not None:
+        ks = np.arange(kmax + 1, dtype=float)
+        stats["n_hat"] = (
+            stats.get("n_hat", 0.0) + float(len(ext_P)) + float((ks * p_k).sum())
+        )
+        stats["n_hat_n"] = stats.get("n_hat_n", 0.0) + 1.0
+    k_new = int(rng.choice(kmax + 1, p=p_k))
+    idx = sweep.sample(k_new, rng) if k_new else ()
+    assert idx is not None and len(idx) == k_new
+
+    chosen = list(idx)
+    new_P = pool_P[chosen] if chosen else np.empty((0, 3))
+    new_s = pool_s[chosen] if chosen else np.empty(0, dtype=np.int64)
+    out_pos = np.vstack([ext_P, new_P]) if len(new_P) else ext_P
+    out_spc = np.concatenate([ext_s, new_s])
+    if stats is not None:
+        stats["accepts"] = stats.get("accepts", 0.0) + 1.0
+        stats["dN_abs"] = stats.get("dN_abs", 0.0) + abs(float(k_new - k_in))
+    return out_pos, out_spc, k_new - k_in

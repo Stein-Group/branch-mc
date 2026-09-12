@@ -1,7 +1,7 @@
 """Per-species occupancy reaches the run's FILES, not just `state.species`.
 
 The gap this closes: composition is the entire output of a multi-species run,
-and until S4 phase 11 no run wrote it anywhere. `MC_engine.advance` returned
+and until S4 phase 11 no run wrote it anywhere. `metropolis_dynamics.advance` returned
 `{N, packing_fraction, counters, n_cav}` and the log had one `N` column, so a
 cluster run of a mixture produced a file in which A and B are indistinguishable.
 Every composition number in this suite was read out of `state.species` by a test

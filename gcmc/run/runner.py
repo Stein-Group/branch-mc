@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from .sim_setup import Config
 
 from .. import config_specs
-from ..engine import MC_engine
+from ..engine import metropolis_dynamics
 from ..space import geometry
 from ..system.state import ChainState
 from . import hash_fingerprint, io, sim_setup
@@ -81,12 +81,87 @@ logger = logging.getLogger(__name__)
 # working on old and new alike.
 
 _FORCED_GROUPS = ("core", "species")
-_OPTIONAL_GROUPS = ("state", "moves", "clique", "clique_acc")
+_OPTIONAL_GROUPS = ("state", "moves", "clique", "clique_acc", "glauber")
 LOG_GROUPS = _FORCED_GROUPS + _OPTIONAL_GROUPS
 
 
+def _glauber_cols() -> list[tuple[str, int, str, str]]:
+    """The Glauber engine's diagnostics, which REPLACE the acceptance ratio.
+
+    Section 3.6 of the design plan: this engine has no acceptance test,
+    so `add_acc / add_att` say nothing about it and the questions a reader needs
+    answered are different ones -- how often the occupancy actually moved, how
+    much of the ladder the window explores, and whether the truncation is being
+    hit.
+
+    RAW PER-WINDOW SUMS, never means, for the reason the clique columns state:
+    a statistic over any span of rows is then exact rather than a mean of means
+    as soon as the reporting interval changes. So `n_hat` is reported as the SUM
+    and the COUNT, and the reader divides.
+
+      glb_step       window moves proposed
+      glb_same       of those, ones that returned the incoming occupancy
+      glb_dN         sum |k_new - k_in|, the exchange flux this engine achieves
+      glb_dN_sq      sum (k_new - k_in)^2, the EXPECTED SQUARED JUMP in N. The
+                     one column here that cannot be reconstructed from the
+                     others: this engine moves N by more than one in a single
+                     move, so the mean square and the mean modulus are
+                     different numbers. Divided by glb_step it is E[dN^2] per
+                     move; divided by wall_s it is E[dN^2] per second, which is
+                     the only quantity an accept/reject engine and a
+                     rejection-free one can be raced on directly.
+      glb_cut_M      k_in > M: the body held more guests than the pool has
+                     rows. Raise sampler.trial_density.
+      glb_cut_k      k_in > kmax: the ladder truncated below the occupancy.
+                     With a rigorous packing bound this can only appear
+                     TOGETHER with glb_cut_M, so it firing alone means the
+                     bound is wrong -- it is a self-check on
+                     `cuboid_packing_bound`, not a request for a larger
+                     kmax_margin. Counted independently of glb_cut_M, or the
+                     sequential test would have made glb_cut_M dead.
+      glb_infeas     no rung feasible at all (the pool admitted no placement)
+      glb_kmax       largest k ever drawn
+      glb_p_kmax     sum of P(k = kmax): the measured truncation weight, which
+                     is what G6.3 requires a high-N discrepancy to be explained
+                     by
+      glb_entropy    sum of the ladder's Shannon entropy: how many occupancies
+                     the window is genuinely choosing between
+      glb_nhat_sum   sum of N_hat = N_out + sum_k k P(k), the Rao-Blackwellised
+      glb_nhat_sq    sum of N_hat^2, so the BETWEEN-window variance of N_hat is
+                     recoverable from any span of rows. The other half of the
+                     law of total variance
+      glb_nhat_wthn  sum of the within-pool variance of k. HALF of the law of
+                     total variance: the compressibility gate needs this PLUS
+                     the between-window variance of N_hat, and the naive
+                     variance of N_hat alone reads as a false failure.
+      glb_nhat_n     how many windows contributed to the two sums above
+
+    THE NAMES SAY WHAT THEY COUNT, which the first version did not: `wnd_id`
+    read as an identifier and meant identity moves, and `wnd_ovf` / `wnd_ovk`
+    were indistinguishable at a glance from each other. No chain reads the log,
+    so renaming a column cannot move a counter digest -- which is why this was
+    cheap to fix and would not have been later.
+    """
+    return [
+        ("glb_step", 9, "glauber", "glauber.step"),
+        ("glb_same", 9, "glauber", "glauber.same"),
+        ("glb_dN", 10, "glauber", "glauber.dN_abs"),
+        ("glb_dN_sq", 11, "glauber", "glauber.dN_sq"),
+        ("glb_cut_k", 10, "glauber", "glauber.cut_k"),
+        ("glb_cut_M", 10, "glauber", "glauber.cut_M"),
+        ("glb_infeas", 11, "glauber", "glauber.infeasible"),
+        ("glb_kmax", 9, "glauber", "glauber.max_k"),
+        ("glb_p_kmax", 12, "glauber", "glauber.p_at_kmax"),
+        ("glb_entropy", 13, "glauber", "glauber.entropy"),
+        ("glb_nhat_sum", 14, "glauber", "glauber.n_hat_sum"),
+        ("glb_nhat_sq", 16, "glauber", "glauber.n_hat_sumsq"),
+        ("glb_nhat_wthn", 15, "glauber", "glauber.n_hat_within"),
+        ("glb_nhat_n", 11, "glauber", "glauber.n_hat_count"),
+    ]
+
+
 def _column_table(
-    *, nvt: bool, typed: bool, canonical: bool = False
+    *, nvt: bool, typed: bool, canonical: bool = False, glauber: bool = False
 ) -> list[tuple[str, int, str, str]]:
     """(name, width, group, value key) for every column this run can fill.
 
@@ -148,9 +223,10 @@ def _column_table(
         ("avg_n_cav", 12, "state", "avg_ncav"),
         ("density", 14, "state", "density"),
     ]
-    # CLIQUE COMPOSITION (MC_engine._clq): raw per-window integer SUMS. A = add,
-    # R = remove, P = repack. clq*_n counts scored moves, clq*_pos sums the
-    # clique sizes, clq*_new sums the positions in those cliques that were NOT a
+    # CLIQUE COMPOSITION (metropolis_dynamics._clq): raw per-window integer
+    # SUMS. A = add, R = remove, P = repack. clq*_n counts scored moves,
+    # clq*_pos sums the clique sizes, clq*_new sums the positions in those
+    # cliques that were NOT a
     # removed member put back. Never log a ratio here: summing these columns over
     # any span of rows and dividing at the end is exact, whereas a per-window
     # fraction would become a mean of means as soon as the reporting interval
@@ -178,6 +254,11 @@ def _column_table(
             (f"clq{tag}_pos_a", 11, "clique_acc", f"clique.{tag}_pos_acc"),
             (f"clq{tag}_new_a", 11, "clique_acc", f"clique.{tag}_new_acc"),
         ]
+    # PRESENT ONLY UNDER THE HEAT BATH, so a `metropolis_dynamics` header is
+    # byte-identical to every log this project has written and the twelve
+    # columns below are never twelve permanently-zero integers.
+    if glauber:
+        cols += _glauber_cols()
     return cols
 
 
@@ -823,7 +904,7 @@ def _save(
     and `load_checkpoint` returns it, and the resume path below never looked at
     it. So a typed run's checkpoint carried no species, and a resumed run started
     with every particle relabelled species 0 -- the same loss as the window
-    boundary (see `MC_engine.advance`), one level up and across a restart.
+    boundary (see `metropolis_dynamics.advance`), one level up and across a restart.
 
     None for a single-species run, which is what keeps a schema-2 checkpoint and
     a schema-3 single-species checkpoint identical in content.
@@ -951,6 +1032,7 @@ def run(
     ens = config_specs.ensemble_spec(cfg)
     exe = config_specs.execution_spec(cfg)
     io_ = config_specs.io_spec(cfg)
+    samp = config_specs.sampler_spec(cfg)
 
     if exe.mode == "parallel":
         # stdout, not run.log: this belongs in the scheduler's .out next to any
@@ -1007,13 +1089,30 @@ def run(
                 io.trim_trajectory(paths.trajectory, state.step)
 
         potential = cfg.build_potential()
-        weigher = MC_engine.make_weigher(config_specs.kernel_spec(cfg), potential)
+        weigher = metropolis_dynamics.make_weigher(
+            config_specs.kernel_spec(cfg), potential
+        )
+        # THE DYNAMICS DISPATCH. Two axes, resolved in the order that makes
+        # each one legible: the execution mode picks serial or parallel, and
+        # within serial the `engine` field picks the dynamics.
+        #
+        # `glauber_dynamics` is a SIBLING of `metropolis_dynamics.advance`
+        # and never an extra branch inside it: `advance` is 2912 lines and its
+        # acceptance algebra is built for a different proposal, while the
+        # Glauber engine has no acceptance algebra at all. `sim_setup` refuses
+        # it under
+        # `run.kind="parallel"` (the channel sampler is serial only), so the
+        # nesting below cannot lose a case.
         if exe.mode == "parallel":
-            from ..engine import parallel
+            from ..engine import cell_parallel
 
-            advance = parallel.advance_parallel
+            advance = cell_parallel.advance_parallel
+        elif samp.engine == "glauber_dynamics":
+            from ..engine import glauber_dynamics
+
+            advance = glauber_dynamics.advance
         else:
-            advance = MC_engine.advance
+            advance = metropolis_dynamics.advance
         # Per-species occupancy columns (absent on a single-species run, where
         # the header stays byte-identical to every log ever written here). The
         # names come from the species file, so the header says which column is
@@ -1026,6 +1125,7 @@ def run(
                 nvt=ens.ensemble_type in ("NVT", "semigrand"),
                 typed=_species_names is not None,
                 canonical=(ens.ensemble_type == "NVT" and _species_names is not None),
+                glauber=samp.engine == "glauber_dynamics",
             )
             + _species_cols(_species_names),
             include=io_.log_columns,
@@ -1119,6 +1219,13 @@ def run(
                         values[f"clique.{_tag}_{_suffix}"] = clq.get(
                             f"{_tag}_{_suffix}", 0
                         )
+                # The Glauber engine's diagnostics, absent on every other
+                # engine (where the block is missing and the columns are not
+                # declared either, so nothing is looked up).
+                for _k, _v in (stats.get("glauber") or {}).items():
+                    values[f"glauber.{_k}"] = (
+                        f"{_v:.6g}" if isinstance(_v, float) else _v
+                    )
                 if _species_names is not None:
                     # Indexed BY NAME rather than `.get`-ed: on a typed run the
                     # engine always emits the composition, so a missing key is a

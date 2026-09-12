@@ -124,7 +124,7 @@ def test_channel_trial_count_from_density_times_volume():
         }
     )
     expected = round(density * length * width * width)  # 2.0 * 6 * 2.25 = 27
-    assert cfg.no_of_trial_molecules == expected, cfg.no_of_trial_molecules
+    assert cfg.n_trial_molecules == expected, cfg.n_trial_molecules
     assert cfg.trial_box_side == 0.0
     # trials given directly is also accepted and back-fills a density
     cfg2 = from_params(
@@ -141,7 +141,7 @@ def test_channel_trial_count_from_density_times_volume():
             "run": {},
         }
     )
-    assert cfg2.no_of_trial_molecules == 30
+    assert cfg2.n_trial_molecules == 30
 
 
 def test_channel_density_too_low_raises():

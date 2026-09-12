@@ -23,7 +23,7 @@ import numpy as np
 import pytest
 
 from gcmc import config_specs
-from gcmc.engine import MC_engine
+from gcmc.engine import metropolis_dynamics
 from gcmc.run.hash_fingerprint import run_id
 from gcmc.run.sim_setup import from_params
 from gcmc.system.state import ChainState
@@ -45,10 +45,10 @@ def _p(box, sampler="metropolis", extra_ens=None, extra_run=None):
 def _run(params, seed, windows):
     cfg = from_params(params)
     pot = cfg.build_potential()
-    wgh = MC_engine.make_weigher(config_specs.kernel_spec(cfg), pot)
+    wgh = metropolis_dynamics.make_weigher(config_specs.kernel_spec(cfg), pot)
     st = ChainState.fresh(cfg.dimension, seed=seed)
     for _ in range(windows):
-        MC_engine.advance(st, cfg, pot, wgh)
+        metropolis_dynamics.advance(st, cfg, pot, wgh)
     return cfg, st
 
 

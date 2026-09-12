@@ -33,7 +33,7 @@ Silently getting 3 cells where 4 were asked for wastes a quarter of the node
 and moves the cell/cavity ratio, which is exactly what the depth>=1 bias
 depends on. See parallel_input_plan.md, decision D7.
 
-This module is deliberately free of any dependency on `sim_setup`, `parallel`
+This module is deliberately free of any dependency on `sim_setup`, `cell_parallel`
 and `decomposition`: it is a pure function of numbers, so it is tested as one
 and cannot grow an engine dependency.
 """
