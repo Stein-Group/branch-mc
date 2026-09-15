@@ -145,6 +145,7 @@ def test_docstring_schema_documents_every_key():
         # sampler.engine -- the DYNAMICS axis, orthogonal to sampler.type
         "metropolis_dynamics",
         "glauber_dynamics",
+        "suwa_todo_dynamics",
         # sampler.channel_length: "cyclic" is current, the rest legacy synonyms
         "cyclic",
         "full",

@@ -44,7 +44,15 @@ of this block is examples/schema.json, which validation uses.
 
   "sampler":    {"type": "metropolis" | "rosenbluth" | "branch" | "channel"
                          | "channel_cyclic" | "reweight",
-                 "engine": "metropolis_dynamics" | "glauber_dynamics",
+                 "engine": "metropolis_dynamics" | "glauber_dynamics"
+                           | "suwa_todo_dynamics",
+                                                           # THREE DYNAMICS. The last two are
+                                                           #   siblings: same window, same pool,
+                                                           #   same exact occupancy ladder, and a
+                                                           #   different kernel drawing k from it
+                                                           #   (categorical vs the Suwa-Todo
+                                                           #   geometric allocation). Both require
+                                                           #   sampler.type = "channel".
                                                            # default metropolis_dynamics; ABSENT MEANS
                                                            #   metropolis_dynamics, which is the
                                                            #   backward-compatibility contract.
@@ -361,8 +369,18 @@ _MAIN = {"hard_core", "lennard_jones"}
 #: it is stated here, in the schema and in the refusal messages -- not left
 #: implied -- because every params file written before this field existed relies
 #: on it.
-_ENGINES = {"metropolis_dynamics", "glauber_dynamics"}
+_ENGINES = {"metropolis_dynamics", "glauber_dynamics", "suwa_todo_dynamics"}
 _ENGINE_DEFAULT = "metropolis_dynamics"
+#: THE TWO LADDER DYNAMICS, which are siblings and not a parent and a variant.
+#: Both build the window, the pool and the exact occupancy ladder identically;
+#: they differ in the kernel that draws k from it -- a categorical draw (a heat
+#: bath) against the Suwa-Todo geometric allocation. Every refusal below that
+#: exists BECAUSE there is a ladder therefore applies to both, and naming the
+#: family once is what stops the second engine from inheriting half of them:
+#: `kmax_margin`, `depth >= 1`, the auxiliary refusals, serial-only and the
+#: lambda cap are all statements about the ladder, not about which kernel reads
+#: it.
+_LADDER_ENGINES = ("glauber_dynamics", "suwa_todo_dynamics")
 # R16: `channel_cyclic` is its own sampler, not a value of `channel_length`.
 # The two share a dynamic program and nothing else; the cyclic rod lifts the
 # locality guard, pays a full minimum-image pair pass, and sizes its trial count
@@ -1068,7 +1086,11 @@ def from_params(p: dict[str, Any]) -> Config:
             "Glauber engine's exact conditional draw); `sampler.type` selects "
             "how a trial cloud is proposed. They are different axes."
         )
-    glauber = engine == "glauber_dynamics"
+    # THE FAMILY, not the name. Every check below that reads this flag is a
+    # statement about the occupancy ladder, which both ladder dynamics build the
+    # same way; the two places that care WHICH kernel draws from it name the
+    # engine directly instead.
+    ladder = engine in _LADDER_ENGINES
     # ---- the Glauber engine's refusal table (section 3.5) ---------------
     #
     # ERROR TEXT NAMES THE AXIS, NOT JUST THE VALUES. `engine` selects the
@@ -1077,7 +1099,7 @@ def from_params(p: dict[str, Any]) -> Config:
     # unreadable -- and an unreadable refusal is the failure mode here, which is
     # why `tests/unit/test_glauber_config.py` asserts on the MESSAGE and not only
     # on the raise.
-    if glauber and sampler != "channel":
+    if ladder and sampler != "channel":
         _why = {
             "metropolis": (
                 "sampler=metropolis proposes a single trial with no cloud, "
@@ -1105,7 +1127,7 @@ def from_params(p: dict[str, Any]) -> Config:
             ),
         }[sampler]
         raise ValueError(
-            f"engine=glauber_dynamics requires sampler=channel, got "
+            f"engine={engine} requires sampler=channel, got "
             f"sampler={sampler}.\n"
             "These are different axes: `engine` selects the dynamics "
             "(Metropolis accept/reject vs Glauber conditional draw), "
@@ -1122,12 +1144,13 @@ def from_params(p: dict[str, Any]) -> Config:
             "the kernel the identity on states the chain can actually reach and "
             "silently biases <N> low (design plan, section 3.7)."
         )
-    if "kmax_margin" in smp and not glauber:
+    if "kmax_margin" in smp and not ladder:
         raise ValueError(
-            "sampler.kmax_margin only means something under "
-            'sampler.engine="glauber_dynamics": it sets where that engine '
-            "truncates its occupancy ladder. Metropolis dynamics has no ladder. "
-            "Remove it, or set the engine."
+            "sampler.kmax_margin only means something under a LADDER dynamics "
+            '(sampler.engine="glauber_dynamics" or "suwa_todo_dynamics"): it '
+            "sets where the occupancy ladder is truncated, and both build that "
+            "ladder the same way. Metropolis dynamics has no ladder. Remove it, "
+            "or set the engine."
         )
     # Only this sampler's keys, from here on. Every check below is one this
     # sampler can actually fail.
@@ -2329,12 +2352,16 @@ def from_params(p: dict[str, Any]) -> Config:
                 "decomposition carries only the fluid in each cell and would "
                 "drop the frozen matrix. Use run.kind='single'."
             )
-    # ---- the Glauber engine's remaining refusals (section 3.5) ----------
-    if glauber:
+    # ---- the ladder dynamics' remaining refusals (section 3.5) ----------
+    #
+    # ALL OF THEM ARE ABOUT THE LADDER and none about the kernel, which is why
+    # `suwa_todo_dynamics` inherits every one without a line of its own. A
+    # refusal that were really about the heat bath would have to name it.
+    if ladder:
         if full_repacking or int(smp.get("depth", 0)) < 1:
             raise ValueError(
-                "engine=glauber_dynamics requires sampler.depth >= 1 and takes "
-                "no sampler.full_repacking. The Glauber engine replaces add / remove "
+                f"engine={engine} requires sampler.depth >= 1 and takes "
+                "no sampler.full_repacking. A ladder dynamics replaces add / remove "
                 "/ repack with ONE move that draws the window's whole occupancy "
                 "from its exact conditional, so dN is free and neither knob "
                 "selects a move type any more; depth >= 1 is kept because it is "
@@ -2351,8 +2378,8 @@ def from_params(p: dict[str, Any]) -> Config:
             # exact but not rejection-free and must log its acceptance; it is out
             # of scope.
             raise ValueError(
-                "engine=glauber_dynamics refuses the short-range (dual-cutoff) "
-                "auxiliary. The Glauber engine has no acceptance step to divide a "
+                f"engine={engine} refuses the short-range (dual-cutoff) "
+                "auxiliary. A ladder dynamics has no acceptance step to divide a "
                 "shortened selection radius back out of, so it scores every "
                 "pair at run.upper_cutoff; the dual-cutoff correction depends on "
                 "the drawn arrangement rather than on the occupancy k, so it "
@@ -2362,13 +2389,13 @@ def from_params(p: dict[str, Any]) -> Config:
             )
         if pmf:
             raise ValueError(
-                "engine=glauber_dynamics refuses the pmf auxiliary: the pmf is a "
+                f"engine={engine} refuses the pmf auxiliary: the pmf is a "
                 "SELECTION bias divided back out in an acceptance ratio, and "
                 "this engine has no acceptance ratio to divide it out of."
             )
         if ens_type == "NVT" and typed:
             raise ValueError(
-                "engine=glauber_dynamics does not support the CANONICAL "
+                f"engine={engine} does not support the CANONICAL "
                 "ensemble (ensemble.type='NVT' with a species file), which "
                 "fixes every species count and not just the total. The window "
                 "move resamples a whole block's occupancy from its exact "
@@ -2380,7 +2407,7 @@ def from_params(p: dict[str, Any]) -> Config:
             )
         if ens_type not in ("muVT", "NVT", "semigrand"):
             raise ValueError(
-                f"engine=glauber_dynamics does not support "
+                f"engine={engine} does not support "
                 f"ensemble.type={ens_type!r}. It is derived for muVT with a "
                 "separable frozen exterior (and its fixed-N restriction, where "
                 "the ladder collapses to k = k_in); a pore or a quenched matrix "
@@ -2412,13 +2439,13 @@ def from_params(p: dict[str, Any]) -> Config:
     # against configurations with different k_in and requires the same M.
     window_M = 0
     window_kmax = 0
-    if glauber:
+    if ladder:
         window_M = int(n_trials)
         _bound = cuboid_packing_bound(channel_length, channel_width, dim, diameter)
         window_kmax = min(window_M, int(math.ceil(_bound)) + kmax_margin)
         if not (1 <= window_kmax <= window_M):
             raise ValueError(
-                f"engine=glauber_dynamics needs 1 <= kmax <= M, derived "
+                f"engine={engine} needs 1 <= kmax <= M, derived "
                 f"kmax={window_kmax} and M={window_M} from trial_density="
                 f"{trial_density:g} on a {channel_length:g} x {channel_width:g} "
                 f"body (V_W = {channel_length * channel_width ** (dim - 1):g}). "
@@ -2447,7 +2474,7 @@ def from_params(p: dict[str, Any]) -> Config:
         _lambda = window_M * diameter / channel_length
         if lj and _lambda > 4.0 + 1e-9:
             raise ValueError(
-                f"engine=glauber_dynamics refuses {_lambda:.2f} trials per sigma "
+                f"engine={engine} refuses {_lambda:.2f} trials per sigma "
                 f"of channel length (M={window_M} over L={channel_length:g} at "
                 f"sigma={diameter:g}); the limit is 4. With the selection radius "
                 "forced to run.upper_cutoff the transfer matrix's eviction "
@@ -2503,9 +2530,9 @@ def from_params(p: dict[str, Any]) -> Config:
             # SINGLE-COMPONENT floor, so a typed hard-core run whose largest
             # `c * sigma_ij` exceeds it was guarded at too short a radius. Under
             # Metropolis a wrapped pair beyond the guard is divided back out of
-            # the acceptance; under the Glauber engine there is nothing to divide it
-            # out of, so it has to be excluded geometrically.
-            if glauber and not lj and species is not None:
+            # the acceptance; under either LADDER dynamics there is nothing to
+            # divide it out of, so it has to be excluded geometrically.
+            if ladder and not lj and species is not None:
                 guard_cut = max(guard_cut, max_core_floor(species.table.core_floor))
             assert_channel_guard(
                 channel_length, channel_width, dim, box, guard_cut, span_name="box"

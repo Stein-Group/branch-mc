@@ -107,6 +107,12 @@ LAYERS: dict[str, int] = {
     "sampling.branch": 5,
     "sampling.channel": 5,
     "sampling.channel_cyclic": 5,  # R16: shared DP, own mask policy
+    # The Suwa-Todo geometric allocation. LAYER 5 AND NOT 6, although only the
+    # L6 Glauber engine calls it: it is a weighting policy over an occupancy
+    # ladder and imports nothing but numpy, which is the same reason
+    # `flat_histogram` sits here rather than with the engine that reads it. A
+    # module's layer is what it depends on, never who happens to call it.
+    "sampling.suwa_todo": 5,
     # Flat-histogram biasing in N plus the transition-matrix solve that reads it
     # back. PROPOSAL machinery, not analysis: `eta` multiplies the weight of a
     # macrostate inside the sampler and the engine reads it every step, so it
@@ -125,6 +131,12 @@ LAYERS: dict[str, int] = {
     # acceptance algebra at all, so the two share the geometry (L4), the sweep
     # (L5) and the cell list (L2) and nothing else.
     "engine.glauber_dynamics": 6,
+    # The Suwa-Todo dynamics: the THIRD dynamics, at the same layer as the
+    # other two because it is one of them and not a helper to one. It holds
+    # no loop of its own -- the ladder move is shared and picks its kernel
+    # from `engine` -- so its only import is its sibling, which is why it
+    # sits beside rather than above it.
+    "engine.suwa_todo_dynamics": 6,
     # Expanded-ensemble staged insertion: the G0 INCUMBENT BASELINE the heat
     # bath is measured against (Siderius & Shen 2013). A separate loop rather
     # than a branch in `metropolis_dynamics` for two reasons, in order: a new move type

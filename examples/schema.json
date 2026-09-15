@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "gcmc params.json",
-  "description": "Input template for a GCMC run or sweep. Pass to `python -m gcmc run` for one run, or to `python -m gcmc.launcher` for a sweep. For sweeps, set ensemble.mu, sampler.trial_density, and/or sampler.trial_box_side to a LIST; the launcher takes the Cartesian product (two lists = a heatmap). Every other field stays scalar. Ensembles: muVT (grand canonical), NVT (canonical, repacking), QA (quenched-annealed fluid in a frozen matrix; set ensemble.type='QA' and run.matrix_config). Any key beginning with an underscore is ignored by the validator, so a params file can carry its own explanation; every examples/*.json uses \"_comment\" for that.",
+  "description": "Input template for a GCMC run or sweep. Pass to `python -m gcmc run` for one run, or to `python -m gcmc.launcher` for a sweep. For sweeps, set ensemble.mu, sampler.trial_density, and/or sampler.trial_box_side to a LIST; the launcher takes the Cartesian product (two lists = a heatmap). Every other field stays scalar. Ensembles: muVT (grand canonical), NVT (canonical: fixed N, and with a species file fixed counts PER SPECIES), semigrand (fixed total N, free composition), QA (quenched-annealed fluid in a frozen matrix; set ensemble.type='QA' and run.matrix_config). Any key beginning with an underscore is ignored by the validator, so a params file can carry its own explanation; every examples/*.json uses \"_comment\" for that.",
   "type": "object",
   "required": [
     "potential",
@@ -33,6 +33,10 @@
           "type": "boolean",
           "default": true,
           "description": "LJ long-range tail correction; lennard_jones only."
+        },
+        "species_file": {
+          "type": "string",
+          "description": "Path to a schema-2 reduced species yaml (ff/species_*.yaml). Present selects typed multi-species mode: the file owns sigma, epsilon, lambda, p_trial, symbol, k_ij, rc, core_floor.c and the auxiliary, so run.radius, run.lower_cutoff, run.upper_cutoff and the auxiliary block are forbidden. Requires main == lennard_jones."
         }
       }
     },
@@ -84,20 +88,20 @@
             "rosenbluth",
             "branch",
             "channel",
-            "reweight"
+            "reweight",
+            "channel_cyclic"
           ],
-          "description": "metropolis: single-particle. rosenbluth/branch: cavity-biased insertion (depth 0-3). channel: oriented-cuboid transfer-matrix sweep (3D, serial, depth >= 1 unless full_repacking). reweight: 2D hexatic."
+          "description": "metropolis: single-particle. rosenbluth/branch: cavity-biased insertion (depth 0-3). channel: oriented-cuboid transfer-matrix sweep (3D, serial, depth >= 1 unless full_repacking). reweight: 2D hexatic. \"channel_cyclic\" is the wall-to-wall rod: it shares the dynamic program with \"channel\" but lifts the locality guard, computes true minimum-image distances over the whole pool, and sizes its trial count per move from the orientation -- substantially more expensive. Until 2026-08 it was selected by sampler.channel_length = \"cyclic\" (or the aliases \"full\", \"box\", \"full_box\", \"span\"), which made a different move look like a length; those spellings are now refused with a pointer to this sampler."
         },
         "depth": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 3,
-          "description": "Cavity recursion depth; forbidden for metropolis. Validated 0-3. Mutually exclusive with full_repacking."
+          "description": "Cavity recursion depth; forbidden for metropolis. Any depth >= 0 is supported, serially and in parallel -- the cap of 3 that stood here until 2026-08 was a stale claim, not a constraint, and it REJECTED runs the engine handles. Mutually exclusive with full_repacking. Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side; channel takes those minus trial_box_side plus channel_length and channel_width; channel_cyclic takes depth, full_repacking, trial_density and channel_width (it spans the box, so it has no fixed length or trial count)."
         },
         "full_repacking": {
           "type": "boolean",
           "default": false,
-          "description": "XOR alternative to depth: repack the whole cavity each exchange, removing every sphere found and inserting one more (add), one fewer (remove), or the same count (repack). Ignores depth; do not give both. Cavity samplers only (not metropolis)."
+          "description": "XOR alternative to depth: repack the whole cavity each exchange, removing every sphere found and inserting one more (add), one fewer (remove), or the same count (repack). Ignores depth; do not give both. Cavity samplers only (not metropolis). Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side; channel takes those minus trial_box_side plus channel_length and channel_width; channel_cyclic takes depth, full_repacking, trial_density and channel_width (it spans the box, so it has no fixed length or trial count)."
         },
         "channel_length": {
           "oneOf": [
@@ -118,20 +122,20 @@
               "description": "cyclic rod: the rod runs wall to wall along a freely drawn orientation, so its length is set per move by where the line meets the box (box for an axis line, up to box*sqrt(3) for the body diagonal). The periodic guard is lifted and the sweep uses minimum-image distances with retention eviction, so a clique that closes through the periodic boundary (the seam) is scored exactly once. Requires trial_density; sampler.trials is rejected because the length, hence the trial count, varies per move."
             }
           ],
-          "description": "channel only: length of the long axis of the oriented trial cuboid. A positive number selects the fixed-length rod; the string \"cyclic\" selects the wall-to-wall rod whose ends meet through the periodic boundary. \"full\", \"box\", \"full_box\" and \"span\" are accepted legacy spellings of \"cyclic\"."
+          "description": "Rod length for sampler.type = \"channel\", in reduced units. Numeric only: the string spellings that used to select the cyclic rod are refused -- use sampler.type = \"channel_cyclic\". Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side; channel takes those minus trial_box_side plus channel_length and channel_width; channel_cyclic takes depth, full_repacking, trial_density and channel_width (it spans the box, so it has no fixed length or trial count)."
         },
         "channel_width": {
           "type": "number",
           "exclusiveMinimum": 0,
-          "description": "channel only: side of the square cross-section, required in [sigma, 2 sigma]. The trial cuboid volume is channel_length * channel_width^2."
+          "description": "channel only: side of the square cross-section, required in [sigma, 2 sigma]. The trial cuboid volume is channel_length * channel_width^2. Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side; channel takes those minus trial_box_side plus channel_length and channel_width; channel_cyclic takes depth, full_repacking, trial_density and channel_width (it spans the box, so it has no fixed length or trial count)."
         },
         "trials": {
           "type": "integer",
           "minimum": 1,
-          "description": "Fixed trial count per cavity. Mutually exclusive with trial_density; forbidden for metropolis."
+          "description": "Fixed trial count per cavity. Mutually exclusive with trial_density; forbidden for metropolis. Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side; channel takes those minus trial_box_side plus channel_length and channel_width; channel_cyclic takes depth, full_repacking, trial_density and channel_width (it spans the box, so it has no fixed length or trial count)."
         },
         "trial_density": {
-          "description": "Trial count set by density x trial-box span. Forbidden for metropolis. SWEEPABLE: a list builds one run per value.",
+          "description": "Trial count set by density x trial-box span. Forbidden for metropolis. SWEEPABLE: a list builds one run per value. Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side; channel takes those minus trial_box_side plus channel_length and channel_width; channel_cyclic takes depth, full_repacking, trial_density and channel_width (it spans the box, so it has no fixed length or trial count).",
           "oneOf": [
             {
               "type": "number",
@@ -148,7 +152,7 @@
           ]
         },
         "trial_box_side": {
-          "description": "rosenbluth/branch only: full side of the square trial box (twice the legacy cavity radius). Forbidden for metropolis and rejected for channel (which uses channel_length/channel_width with trial_density). SWEEPABLE: a list builds one run per value (pair with trial_density for a heatmap).",
+          "description": "rosenbluth/branch only: full side of the square trial box (twice the legacy cavity radius). Forbidden for metropolis and rejected for channel (which uses channel_length/channel_width with trial_density). SWEEPABLE: a list builds one run per value (pair with trial_density for a heatmap). Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side; channel takes those minus trial_box_side plus channel_length and channel_width; channel_cyclic takes depth, full_repacking, trial_density and channel_width (it spans the box, so it has no fixed length or trial count).",
           "oneOf": [
             {
               "type": "number",
@@ -163,8 +167,24 @@
               "minItems": 1
             }
           ]
+        },
+        "engine": {
+          "enum": [
+            "metropolis_dynamics",
+            "glauber_dynamics",
+            "suwa_todo_dynamics"
+          ],
+          "default": "metropolis_dynamics",
+          "description": "The DYNAMICS axis, which is not the same axis as sampler.type. `sampler.type` says how a trial cloud is PROPOSED; `engine` says what is then done with it. metropolis_dynamics (the default, and what an absent key means -- that is the backward-compatibility contract) is accept/reject dynamics: everything shipped before this key existed. glauber_dynamics computes the exact conditional distribution of a window's whole guest content and draws from it, so its exchange path has no acceptance test: dN = k_new - k_in may take any sign and any magnitude, and add/remove/repack cease to be separate move types. Same muVT ensemble, same z, same U -- a different transition kernel. Both ladder dynamics REQUIRE sampler.type='channel' with depth >= 1; refused with metropolis, rosenbluth, branch, reweight and channel_cyclic (the cyclic rod spans the box, so its exterior is not separable from its interior and the frozen-exterior argument the conditional is derived from has no meaning). Refuses the pmf and short-range auxiliaries: both are selection biases divided back out in an acceptance ratio, and this engine has none. Caps the trial density at 4 trials per sigma of channel length on the LJ path. Adding this key moves every run id, by decision: resuming a pre-engine run directory is not supported. Serial only. Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type and engine; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side and engine; channel takes those minus trial_box_side plus channel_length, channel_width and kmax_margin; channel_cyclic takes depth, full_repacking, trial_density, channel_width and engine (it spans the box, so it has no fixed length or trial count). suwa_todo_dynamics is the THIRD dynamics and the sibling of glauber_dynamics, not a variant of it: it builds the same window, the same pool and the same exact occupancy ladder, and then draws k from that ladder by the Suwa-Todo geometric allocation (PRL 105, 120603 (2010)) conditioned on the incoming occupancy, rather than categorically. glauber_dynamics is a heat bath and returns the incoming occupancy with probability P(k_in); the allocation is the pi-invariant kernel that MINIMISES that rate, and it achieves it by giving up detailed balance and keeping only global balance. Same muVT ensemble, same z, same U, same stationary distribution, so every physics gate written for glauber_dynamics applies verbatim. It takes exactly the keys glauber_dynamics takes, has the same refusals (sampler.type='channel', depth >= 1, no pmf or short-range auxiliary, serial only, lambda <= 4 on the LJ path), and adds none of its own. The gain is bounded: the rate at which k changes improves by at most a factor 2 over the heat bath and by much less for a ladder concentrated on one rung, so a run logs glb_st_hb and glb_st_rej and the ratio is measured rather than assumed."
+        },
+        "kmax_margin": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "The ladder dynamics (glauber_dynamics, suwa_todo_dynamics) only, and its ONLY new tunable: how far above the body's geometric packing bound the occupancy ladder is truncated. kmax = min(M, ceil(packing_bound(body)) + kmax_margin) and M = round(trial_density * channel_length * channel_width^(dim-1)); both are derived, so neither appears here. The bound is a rigorous over-estimate, so 0 is the honest default and a positive margin only widens the transfer matrix. Refused under engine=metropolis_dynamics, which has no ladder. Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type and engine; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side and engine; channel takes those minus trial_box_side plus channel_length, channel_width and kmax_margin; channel_cyclic takes depth, full_repacking, trial_density, channel_width and engine (it spans the box, so it has no fixed length or trial count)."
         }
-      }
+      },
+      "description": "Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side; channel takes those minus trial_box_side plus channel_length and channel_width; channel_cyclic takes depth, full_repacking, trial_density and channel_width (it spans the box, so it has no fixed length or trial count). A CANONICAL run (ensemble.type='NVT' with a species file) proposes translations and pair identity exchanges and runs no trial cloud, so its whole sampler block is {\"type\": \"metropolis\"}."
     },
     "ensemble": {
       "type": "object",
@@ -174,7 +194,7 @@
       "additionalProperties": false,
       "properties": {
         "mu": {
-          "description": "Chemical potential mu* (TOTAL: activity z = exp(beta*mu)). REQUIRED for muVT and QA; forbidden for NVT. QA may use mu < 0. SWEEPABLE: a list builds one run per value. With a target, mu is an OPTIONAL starting seed (default: the ideal-gas guess ln(rho_target)).",
+          "description": "Chemical potential mu* (TOTAL: activity z = exp(beta*mu)). REQUIRED for muVT and QA; forbidden for NVT. QA may use mu < 0. SWEEPABLE: a list builds one run per value. With a target, mu is an OPTIONAL starting seed (default: the ideal-gas guess ln(rho_target)). In typed mode this is a map {species: number}, one entry per species, and z_s = exp(beta*mu_s)/lambda_s**dim.",
           "oneOf": [
             {
               "type": "number"
@@ -223,11 +243,12 @@
           "enum": [
             "muVT",
             "NVT",
+            "semigrand",
             "QA",
             "confined"
           ],
           "default": "muVT",
-          "description": "muVT: grand canonical (give mu). NVT: canonical (give exactly one of N or packing_fraction, no mu). QA: quenched-annealed = muVT in a frozen matrix (give mu AND run.matrix_config; mu may be < 0 for the dilute isotherm). confined: grand canonical in a hard slit or cylinder pore (give mu and ensemble.pore; 3D only; no matrix)."
+          "description": "muVT: grand canonical (give mu). NVT: CANONICAL -- give exactly one of N or packing_fraction and no mu. With a species file NVT means every species count is fixed, not just the total: the composition is the one in run.initial_config (which is then required), the move set becomes translation plus a pair identity exchange, and two coexisting phases are the equilibrium rather than a transient. semigrand: SEMI-GRAND -- total N fixed, composition FREE under the activity ratio. Species file required, plus exactly one state-point route (mu/fugacity/z) whose RATIO does the work; give N or packing_fraction as in NVT. This is what typed NVT used to mean, and it was renamed because the two are different ensembles and one name for both had already produced three cluster campaigns that dissolved into a single phase. QA: quenched-annealed = muVT in a frozen matrix (give mu AND run.matrix_config; mu may be < 0 for the dilute isotherm). confined: grand canonical in a hard slit or cylinder pore (give mu and ensemble.pore; 3D only; no matrix)."
         },
         "pore": {
           "type": "object",
@@ -275,7 +296,7 @@
               "minItems": 1
             }
           ],
-          "description": "NVT only: exact particle count, held fixed by repacking. SWEEPABLE. Mutually exclusive with packing_fraction."
+          "description": "NVT and semigrand only: exact particle count, held fixed. SWEEPABLE. Mutually exclusive with packing_fraction."
         },
         "packing_fraction": {
           "oneOf": [
@@ -344,6 +365,22 @@
             }
           ],
           "description": "muVT target control: drive mu until the running-mean particle count <N> reaches this value. SWEEPABLE: a list runs one job per value (launch with gcmc.launcher). When swept against a matrix FOLDER, each value is paired by index with one realization matrix."
+        },
+        "fugacity": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "description": "Typed mode only: per-species fugacity map; z_s = beta*f_s, and lambda is not consulted. Mutually exclusive with mu and z."
+        },
+        "z": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "description": "Typed mode only: per-species activity map, used directly. Mutually exclusive with mu and fugacity."
         }
       }
     },
@@ -435,6 +472,34 @@
           "type": "number",
           "minimum": 0,
           "description": "Seconds; default 0.0, which flushes the log on every row (unchanged). A TIME FLOOR between log flushes: the log batches only when rows arrive faster than this, so a slow producer still flushes every row and a fast one batches by however much the observed row rate implies. What is bounded is the window of loss IN TIME -- a kill costs at most this many seconds of log at any row rate -- rather than a row count, which bounds memory and lets the loss window grow. Rarely needed: measured, the log is 0.02% of runtime at the default sampling_window, where the write amplification is checkpoint_every=1 (~10%) and traj_every=1 (+100%)."
+        },
+        "log_columns": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "core",
+              "species",
+              "state",
+              "moves",
+              "clique",
+              "clique_acc"
+            ]
+          },
+          "description": "The optional groups to KEEP. Column GROUPS for the run log. The set written is already a function of the run -- a column appears when the run CAN put a nonzero value in it, so an NVT run gets the repack counters and not add/remove/translate, and a typed run gets one N_<species> column each -- and these two keys narrow it further. Groups: core, species, state, moves, clique, clique_acc. 'core' (the cycle, N, the wall clock) and 'species' (the composition, which is the entire output of a mixture run) are FORCED and cannot be dropped. log_columns and log_drop are mutually exclusive; giving both raises, as does an unknown group name."
+        },
+        "log_drop": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "core",
+              "species",
+              "state",
+              "moves",
+              "clique",
+              "clique_acc"
+            ]
+          },
+          "description": "The optional groups to REMOVE from the default. Column GROUPS for the run log. The set written is already a function of the run -- a column appears when the run CAN put a nonzero value in it, so an NVT run gets the repack counters and not add/remove/translate, and a typed run gets one N_<species> column each -- and these two keys narrow it further. Groups: core, species, state, moves, clique, clique_acc. 'core' (the cycle, N, the wall clock) and 'species' (the composition, which is the entire output of a mixture run) are FORCED and cannot be dropped. log_columns and log_drop are mutually exclusive; giving both raises, as does an unknown group name."
         },
         "seed": {
           "type": "integer"

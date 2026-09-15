@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
 from .. import config_specs
 from ..engine import metropolis_dynamics
+from ..engine.glauber_dynamics import LADDER_ENGINES
 from ..space import geometry
 from ..system.state import ChainState
 from . import hash_fingerprint, io, sim_setup
@@ -85,7 +86,7 @@ _OPTIONAL_GROUPS = ("state", "moves", "clique", "clique_acc", "glauber")
 LOG_GROUPS = _FORCED_GROUPS + _OPTIONAL_GROUPS
 
 
-def _glauber_cols() -> list[tuple[str, int, str, str]]:
+def _glauber_cols(*, suwa_todo: bool = False) -> list[tuple[str, int, str, str]]:
     """The Glauber engine's diagnostics, which REPLACE the acceptance ratio.
 
     Section 3.6 of the design plan: this engine has no acceptance test,
@@ -136,13 +137,32 @@ def _glauber_cols() -> list[tuple[str, int, str, str]]:
                      variance of N_hat alone reads as a false failure.
       glb_nhat_n     how many windows contributed to the two sums above
 
+    THREE MORE UNDER `suwa_todo_dynamics` ONLY, and they are what decides
+    whether that dynamics was worth running:
+
+      glb_st_hb      sum over windows of sum_k P(k)^2 -- the rate at which the
+                     HEAT BATH would have returned the incoming occupancy. The
+                     counterfactual, computed on the same ladder the allocation
+                     used, so the comparison needs no second run
+      glb_st_rej     sum over windows of max(0, 2 P_max - 1) -- the rate the
+                     allocation attains, which is the minimum any pi-invariant
+                     kernel can. Both are EXACT per window rather than sampled,
+                     so (glb_step - glb_st_rej) / (glb_step - glb_st_hb) is the
+                     gain in the rate at which k changes, with no Monte Carlo
+                     error of its own. The theorem caps that ratio at 2; a run
+                     where it sits near 1 has a ladder concentrated on one rung
+                     and this sampler is doing nothing for it
+      glb_st_fb      windows where the incoming rung had zero weight under the
+                     bias, so the allocation had nothing to reallocate and fell
+                     back to the heat bath. Nonzero only on a flat-histogram run
+
     THE NAMES SAY WHAT THEY COUNT, which the first version did not: `wnd_id`
     read as an identifier and meant identity moves, and `wnd_ovf` / `wnd_ovk`
     were indistinguishable at a glance from each other. No chain reads the log,
     so renaming a column cannot move a counter digest -- which is why this was
     cheap to fix and would not have been later.
     """
-    return [
+    cols: list[tuple[str, int, str, str]] = [
         ("glb_step", 9, "glauber", "glauber.step"),
         ("glb_same", 9, "glauber", "glauber.same"),
         ("glb_dN", 10, "glauber", "glauber.dN_abs"),
@@ -158,10 +178,22 @@ def _glauber_cols() -> list[tuple[str, int, str, str]]:
         ("glb_nhat_wthn", 15, "glauber", "glauber.n_hat_within"),
         ("glb_nhat_n", 11, "glauber", "glauber.n_hat_count"),
     ]
+    if suwa_todo:
+        cols += [
+            ("glb_st_hb", 12, "glauber", "glauber.st_hb_rej"),
+            ("glb_st_rej", 13, "glauber", "glauber.st_rej"),
+            ("glb_st_fb", 10, "glauber", "glauber.st_fallback"),
+        ]
+    return cols
 
 
 def _column_table(
-    *, nvt: bool, typed: bool, canonical: bool = False, glauber: bool = False
+    *,
+    nvt: bool,
+    typed: bool,
+    canonical: bool = False,
+    glauber: bool = False,
+    suwa_todo: bool = False,
 ) -> list[tuple[str, int, str, str]]:
     """(name, width, group, value key) for every column this run can fill.
 
@@ -254,11 +286,14 @@ def _column_table(
             (f"clq{tag}_pos_a", 11, "clique_acc", f"clique.{tag}_pos_acc"),
             (f"clq{tag}_new_a", 11, "clique_acc", f"clique.{tag}_new_acc"),
         ]
-    # PRESENT ONLY UNDER THE HEAT BATH, so a `metropolis_dynamics` header is
-    # byte-identical to every log this project has written and the twelve
-    # columns below are never twelve permanently-zero integers.
+    # PRESENT ONLY UNDER A LADDER DYNAMICS, so a `metropolis_dynamics` header
+    # is byte-identical to every log this project has written and the columns
+    # below are never a block of permanently-zero integers. `suwa_todo` gates
+    # three more inside that block by the same rule and for the same reason: a
+    # `glauber_dynamics` log stays byte-identical to the ones already written,
+    # and the three columns appear exactly where they can vary.
     if glauber:
-        cols += _glauber_cols()
+        cols += _glauber_cols(suwa_todo=suwa_todo)
     return cols
 
 
@@ -1096,13 +1131,19 @@ def run(
         # each one legible: the execution mode picks serial or parallel, and
         # within serial the `engine` field picks the dynamics.
         #
-        # `glauber_dynamics` is a SIBLING of `metropolis_dynamics.advance`
+        # THE TWO LADDER DYNAMICS are SIBLINGS of `metropolis_dynamics.advance`
         # and never an extra branch inside it: `advance` is 2912 lines and its
-        # acceptance algebra is built for a different proposal, while the
-        # Glauber engine has no acceptance algebra at all. `sim_setup` refuses
-        # it under
-        # `run.kind="parallel"` (the channel sampler is serial only), so the
-        # nesting below cannot lose a case.
+        # acceptance algebra is built for a different proposal, while neither
+        # ladder dynamics has any acceptance algebra at all. `sim_setup` refuses
+        # both under `run.kind="parallel"` (the channel sampler is serial only),
+        # so the nesting below cannot lose a case.
+        #
+        # THEY DISPATCH TO TWO MODULES AND ONE LOOP. `suwa_todo_dynamics.advance`
+        # delegates to `glauber_dynamics.advance`, which reads `engine` and
+        # picks the kernel that draws k from the ladder. Dispatching by name
+        # here rather than collapsing the two branches keeps this table a
+        # complete list of the dynamics this project has -- which is what a
+        # reader comes to it for.
         if exe.mode == "parallel":
             from ..engine import cell_parallel
 
@@ -1111,6 +1152,10 @@ def run(
             from ..engine import glauber_dynamics
 
             advance = glauber_dynamics.advance
+        elif samp.engine == "suwa_todo_dynamics":
+            from ..engine import suwa_todo_dynamics
+
+            advance = suwa_todo_dynamics.advance
         else:
             advance = metropolis_dynamics.advance
         # Per-species occupancy columns (absent on a single-species run, where
@@ -1125,7 +1170,8 @@ def run(
                 nvt=ens.ensemble_type in ("NVT", "semigrand"),
                 typed=_species_names is not None,
                 canonical=(ens.ensemble_type == "NVT" and _species_names is not None),
-                glauber=samp.engine == "glauber_dynamics",
+                glauber=samp.engine in LADDER_ENGINES,
+                suwa_todo=samp.engine == "suwa_todo_dynamics",
             )
             + _species_cols(_species_names),
             include=io_.log_columns,
