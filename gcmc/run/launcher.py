@@ -10,7 +10,11 @@ Sweepable axes and where they live in the base params:
     sampler.trial_box_side
     sampler.channel_length
     sampler.channel_width
-    sampler.engine              (metropolis_dynamics / glauber_dynamics; channel only)
+    engine.type                 (metropolis_dynamics / glauber_dynamics /
+                                 suwa_todo_dynamics; any sampler that can
+                                 supply the dynamics a pool)
+    engine.depth                (metropolis_dynamics only)
+    engine.kmax_margin          (ladder dynamics only)
 
 Any axis given as a JSON list is swept; scalars are fixed. The launcher takes
 the Cartesian product of all swept axes, so two list axes build a heatmap
@@ -63,7 +67,7 @@ _AXES = (
     ("target_N", "ensemble", "target_N"),
     ("target_eta", "ensemble", "target_eta"),
     ("target_density", "ensemble", "target_density"),
-    ("depth", "sampler", "depth"),
+    ("depth", "engine", "depth"),
     ("seed", "run", "seed"),
     # `trials` (absolute count) and `trial_density` (count per unit measure of
     # the trial body) are the two ways to say how big the trial pool is, and
@@ -85,7 +89,7 @@ _AXES = (
     # comparison ends up between two different experiments. Inert for every
     # params file that does not set it: a single-valued axis is applied and
     # kept out of the label.
-    ("engine", "sampler", "engine"),
+    ("engine", "engine", "type"),
     # The short-range auxiliary radius. Sweeping it is how the speedup/acceptance
     # trade-off gets measured, and the sweep carries its own control: the arm at
     # cutoff == run.upper_cutoff is the exact no-op, so one launch produces both

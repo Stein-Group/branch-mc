@@ -911,7 +911,8 @@ def _ljbranch_forward(
     Returns (chosen_coords, log W_new, chosen_pool_rows) or (None, None, None)
     if no clique exists. The rows are what the typed insert path reads the
     inserted species off, and what M21's provenance is decided by."""
-    logW, count, chosen, rows = branch_mod.ljbranch_weight_sum(
+    #logW, count, chosen, rows = branch_mod.ljbranch_weight_sum(
+    logW, count, chosen, rows = branch_mod.lj_clique_weight_sum(
         pool.coords,
         pool.energy_weight,
         k,

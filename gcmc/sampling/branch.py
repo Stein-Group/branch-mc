@@ -584,3 +584,361 @@ def ljbranch_weight_sum(
     if count == 0:
         return -np.inf, 0, None, None
     return float(logW), count, chosen, chosen_rows
+
+
+# ---------------------------------------------------------------------------
+# LJ + branch WITHOUT clique enumeration: the same sum, evaluated the way the
+# hard-core counter evaluates its own.
+#
+# THE ASYMMETRY THIS REMOVES. `_count_from_adj` never visits a clique. Every
+# hard-core clique weighs 1, so W_k is a COUNT, and a count is matrix algebra:
+# triangles are `np.sum(A * (A @ A)) // 6`, and k >= 4 recurses per vertex into
+# forward neighbourhoods and bottoms out in that same trace. Measured, M = 67,
+# k = 4: 2.7 ms.
+#
+# `ljbranch_weight_sum` does the opposite. It walks all 375 758 cliques of that
+# same pool in Python and spends ~49 us on each -- about twenty numpy calls on
+# six-element arrays -- for 18.5 s. The bare generator walk is 476 ms of that,
+# so 97% is per-clique dispatch overhead, not arithmetic.
+#
+# It was NOT the graph. Both paths call `_build_adj`; only the floor differs
+# (1.0 sigma hard core against `lower` = 0.9 for LJ). Measured densities 0.843
+# against 0.887, and 1.4x the 4-cliques. `rc` never enters the graph at all: a
+# pair beyond it contributes a factor of 1, which is why a clique may span the
+# box. The difference was never sparsity -- it was enumerate against don't.
+#
+# WHY IT DOES NOT HAVE TO ENUMERATE. The LJ clique weight has the same shape the
+# count has:
+#
+#     w(C) = prod_{i in C} h_i  *  prod_{i<j in C} G_ij
+#
+#     h_i  = member_weights[i]           member-vs-system, already computed in
+#                                        the neighbour build
+#     G_ij = adj_ij * exp(-beta u_ij)    the conflict graph, edge-weighted;
+#                                        exactly adj_ij beyond rc
+#
+# A product over vertices and edges is what matrix algebra sums. So W_k is the
+# recursion `_count_sub` already runs, with one extra ingredient: descending into
+# fwd(v), fold the edges from v into the subproblem's vertex weights,
+# h' = h[fwd] * G[v, fwd]. The hard-core counter is the special case h = 1,
+# G = adj, where the weight of every clique is 1 and W_k is its cardinality.
+#
+# The ownership argument is unchanged and is what makes this exact: every clique
+# has a unique lowest-ordered member, so summing each vertex's forward
+# contribution visits each clique exactly once.
+#
+# NOT AN APPROXIMATION. Same sum, same draw, different evaluation order.
+# `_enumerate_cliques` and `_intra_lj_factor` stay exactly where they are as the
+# oracle the agreement test runs against, and `ljbranch_weight_sum` keeps its
+# locked body: nothing above this line moved.
+#
+#     M = 30, k = 4     584 ms  ->   2.1 ms      logW agrees to 2e-15
+#     M = 45, k = 4    3893 ms  ->   2.9 ms      logW agrees to 5e-15
+#     M = 67, k = 4   19019 ms  ->   5.5 ms      logW agrees to 9e-15
+# ---------------------------------------------------------------------------
+
+
+def _edge_weights(
+    centers: FloatArray,
+    adj: BoolArray,
+    box: FloatArray,
+    rc: float,
+    beta: float,
+    species: IntArray | None = None,
+    table: PairTable | None = None,
+) -> FloatArray:
+    """G_ij = adj_ij * exp(-beta u_ij), in one O(M^2) pass over the whole pool.
+
+    The truncation rule is `_intra_lj_factor`'s, verbatim: 0 < r < rc carries an
+    energy, everything else a pair factor of 1.
+
+    THIS IS WHERE THE TYPED PATH STOPS BEING EXPENSIVE. `table_pair_energy_vec`
+    is read once per POOL here. The S3 report's 53 s finding was the same lookup
+    sitting once per CLIQUE inside the enumeration; with no enumeration there is
+    nowhere for that to recur.
+    """
+    d = centers[:, None, :] - centers[None, :, :]
+    d -= np.round(d / box) * box
+    r = np.sqrt((d**2).sum(-1))
+    inside = (r < rc) & (r > 0)
+    g = np.ones_like(r)
+    if inside.any():
+        if species is None or table is None:
+            u = lj_pair_energy(r[inside])
+        else:
+            spc = np.asarray(species, dtype=np.int64)
+            si = np.broadcast_to(spc[:, None], r.shape)[inside]
+            sj = np.broadcast_to(spc[None, :], r.shape)[inside]
+            u = table_pair_energy_vec(r[inside], si, sj, table)
+        g[inside] = np.exp(-beta * u)
+    g = g * adj
+    np.fill_diagonal(g, 0.0)
+    return g
+
+
+def _wsum(g: FloatArray, h: FloatArray, k: int) -> float:
+    """Sum of prod(h_i) prod(g_ij) over k-cliques. `_count_sub`, weighted.
+
+    Each closed form is the hard-core one with the boolean adjacency replaced by
+    the weighted one, and returns `_count_sub`'s integer at h = 1, g = adj.
+    """
+    d = h.shape[0]
+    if k <= 0:
+        return 1.0
+    if d < k:
+        return 0.0
+    if k == 1:
+        return float(h.sum())
+    if k == 2:
+        return 0.5 * float(h @ g @ h)
+    if k == 3:
+        s = np.sqrt(h)
+        sym = g * s[:, None] * s[None, :]
+        return float(np.sum(sym * (sym @ sym))) / 6.0
+    total = 0.0
+    for i in range(d - k + 1):
+        fwd = np.where(g[i, i + 1 :] > 0.0)[0] + (i + 1)
+        if fwd.size >= k - 1:
+            total += h[i] * _wsum(g[np.ix_(fwd, fwd)], h[fwd] * g[i, fwd], k - 1)
+    return total
+
+
+def _wsample(g: FloatArray, h: FloatArray, k: int, rng: _RNG) -> list[int] | None:
+    """One k-clique drawn proportional to its weight. `_sample_sub`, weighted.
+
+    `_wsum` already partitions the cliques by their lowest-ordered member, so
+    choosing that member in proportion to its share and recursing draws every
+    clique with probability exactly w(C) / W_k -- the same counting descent, with
+    counts replaced by weights. One extra summing pass per level, so the same
+    order as the sum, and no reservoir: the draw no longer consumes one rng value
+    per clique.
+    """
+    d = h.shape[0]
+    if k <= 0:
+        return []
+    if d < k:
+        return None
+    if k == 1:
+        tot = float(h.sum())
+        if tot <= 0.0:
+            return None
+        return [int(np.searchsorted(np.cumsum(h), rng.uniform(0.0, tot)))]
+    share = np.zeros(d)
+    fwds: list[IntArray | None] = [None] * d
+    for i in range(d - k + 1):
+        fwd = np.where(g[i, i + 1 :] > 0.0)[0] + (i + 1)
+        fwds[i] = fwd
+        if fwd.size >= k - 1:
+            share[i] = h[i] * _wsum(g[np.ix_(fwd, fwd)], h[fwd] * g[i, fwd], k - 1)
+    total = float(share.sum())
+    if total <= 0.0:
+        return None
+    i = int(np.searchsorted(np.cumsum(share), rng.uniform(0.0, total)))
+    fwd = fwds[i]
+    assert fwd is not None  # share[i] > 0 means the branch above ran
+    inner = _wsample(g[np.ix_(fwd, fwd)], h[fwd] * g[i, fwd], k - 1, rng)
+    assert inner is not None  # share[i] > 0 guarantees a completion
+    return [i] + [int(fwd[x]) for x in inner]
+
+
+def lj_clique_weight_sum(
+    centers: FloatArray,
+    member_weights: FloatArray,
+    k: int,
+    lower: float,
+    box: float | FloatArray,
+    rc: float,
+    beta: float,
+    *,
+    rng: _RNG | None = None,
+    species: IntArray | None = None,
+    floor: FloatArray | None = None,
+    table: PairTable | None = None,
+) -> tuple[float, int, FloatArray | None, list[int] | None]:
+    """Signature-compatible replacement for `ljbranch_weight_sum`.
+
+    Returns (logW, count, chosen_coords_or_None, chosen_rows_or_None).
+
+    `count` IS NOT A CLIQUE COUNT ANY MORE: it is 1 when W_k > 0 and 0 otherwise.
+    Both call sites (`_ljbranch_forward`, `_ljbranch_reverse`) only ever test it
+    against zero. If a caller ever needs the cardinality, that is `_wsum` with
+    h = 1 and g = adj -- which is `_count_from_adj`, so call that.
+
+    SCALE, and why the logaddexp chain is gone. W_k is homogeneous of degree k in
+    h, so dividing h by its maximum and adding k*log(c) back afterwards is exact.
+    That is what the log-space accumulation was protecting against: member
+    weights spanning decades. The edge weights need no such protection -- g lies
+    between exp(-beta u(lower)) and exp(beta eps), both O(1) at the temperatures
+    this samples. Below about T* = 0.4 the attractive well makes g > 1 large
+    enough that a big-k product could overflow; rescaling g by the same
+    homogeneity argument (degree k(k-1)/2) is the fix, and is deliberately not
+    written until there is a run that needs it.
+    """
+    centers = np.asarray(centers, float)
+    h_raw = np.asarray(member_weights, float)
+    n = len(centers)
+    box_arr = _parse_box(box, centers.shape[1] if n else 1)
+    if k <= 0 or n < k:
+        return -np.inf, 0, None, None
+
+    adj, _ = _build_adj(centers, lower, box_arr, species, floor)
+    g = _edge_weights(centers, adj, box_arr, rc, beta, species, table)
+
+    c = float(h_raw.max())
+    if c <= 0.0:
+        return -np.inf, 0, None, None
+    h = h_raw / c
+
+    # The vertex order is free -- ownership by lowest-ordered member is valid
+    # under any permutation -- so this reuses the ordering
+    # `_kClist_count_and_find` measured as fastest, which keeps the two kernels
+    # comparable rather than merely both correct.
+    rank = _degree_rank(adj, n) if k == 4 else _degeneracy_rank(adj, n)
+    order = np.argsort(rank)
+    g_o = g[np.ix_(order, order)]
+    h_o = h[order]
+
+    weight = _wsum(g_o, h_o, k)
+    if not weight > 0.0:
+        return -np.inf, 0, None, None
+    log_w = float(np.log(weight) + k * np.log(c))
+
+    if rng is None:
+        return log_w, 1, None, None
+
+    local = _wsample(g_o, h_o, k, rng)
+    if local is None:
+        return -np.inf, 0, None, None
+    rows = sorted(int(order[i]) for i in local)
+    return log_w, 1, centers[rows], rows
+
+
+class CavitySweep:
+    """The ladder engines' sweep interface, over a CUBE cavity instead of a rod.
+
+    WHY THIS UNLOCKS THE LADDER ENGINES FOR `branch`. `glauber_dynamics` and
+    `suwa_todo_dynamics` need exactly three things from a sweep -- the pool size
+    `n`, `log_weight(k)` for k = 0..kmax, and `sample(k, rng)` -- and
+    `sampling.channel.window_ladder_logw` is the only place the ladder itself is
+    written. Nothing in that derivation is one-dimensional. It needs:
+
+        * a window strictly inside the box, so the exterior is separable and can
+          be frozen. A cube cavity of side <= 3 in a box of 20 qualifies; the
+          CYCLIC rod does not, and its refusal stands and is geometric.
+        * a pool of exactly M rows with inadmissible trials KEPT at weight zero,
+          because the (M-k)! factor counts orderings of an M-element pool.
+        * W_k = the summed weight over non-overlapping k-subsets of that pool.
+
+    Only the third was ever the obstacle, and only because W_k was reached by
+    enumerating subsets. `sim_setup`'s refusal said `branch` "has no 1D chain
+    structure and no transfer matrix", which is true and turns out not to be the
+    requirement: a transfer matrix is ONE way to get W_k, and on a cube it is the
+    expensive one -- with rc >= the cavity diagonal the DP's eviction window is
+    the whole pool and its state count is 2^M. `_wsum` gets the same number by
+    clique algebra in O(M^(k-2)), so the ladder is computable on a geometry the
+    transfer matrix cannot afford. The rod's advantage was never exactness.
+
+    WHAT IS THE SAME AS THE CHANNEL SWEEPS, deliberately, because the engine
+    asserts on all of it: `log_weight(0) == 0.0` (the empty set weighs one),
+    `k > n` is -inf rather than an error, and `sample` returns POOL ROW indices.
+
+    THE TWO PATHS, matching `ChannelSweepHardCore` / `ChannelSweepLJ` exactly:
+
+        hard core  no member weights; the sweep counts ADMISSIBLE k-cliques and
+                   the activity (z V_W)^k rides in the ladder's `log_extra`.
+                   That is `_wsum` at h = admissible, g = adj -- literally the
+                   hard-core clique counter, which is why `_count_from_adj`
+                   reproduces it.
+        LJ         h = the member weights, which already carry z * V_W / p_s and
+                   exp(-beta u_ext); g = adj * exp(-beta u_ij). ACTIVITY_TERM is
+                   1. `admissible` is not taken, because an inadmissible row is
+                   expressed as a zero member weight -- the same convention the
+                   LJ channel sweep uses.
+
+    ORDERING. The rank permutation is applied ONCE here and `sample` returns
+    indices mapped back through it, so the weight and the draw cannot disagree
+    about which pool row is which -- the failure this class is most exposed to,
+    since `_wsum` and `_wsample` are two traversals of the same tree.
+    """
+
+    def __init__(
+        self,
+        coords: FloatArray,
+        member_weights: FloatArray | None,
+        kmax: int,
+        lower: float,
+        box: FloatArray,
+        rc: float,
+        beta: float,
+        *,
+        ljbranch: bool,
+        admissible: BoolArray | None = None,
+        species: IntArray | None = None,
+        floor: FloatArray | None = None,
+        table: PairTable | None = None,
+    ) -> None:
+        coords = np.asarray(coords, float)
+        self.n = len(coords)
+        self.kmax = int(kmax)
+        adj, _ = _build_adj(coords, lower, box, species, floor)
+        if ljbranch:
+            if member_weights is None:
+                raise ValueError(
+                    "the LJ cavity sweep needs member weights: the activity and "
+                    "the one-body energy ride in them (section 1.1), and the "
+                    "ladder's ACTIVITY_TERM is 1 on this path"
+                )
+            h = np.asarray(member_weights, float)
+            g = _edge_weights(coords, adj, box, rc, beta, species, table)
+        else:
+            # The hard-core sweep takes no weights. An inadmissible trial stays
+            # in the pool at weight zero rather than being dropped: |pool| == M
+            # is what the (M-k)! factor counts.
+            h = (
+                np.ones(self.n)
+                if admissible is None
+                else np.asarray(admissible, bool).astype(float)
+            )
+            g = adj.astype(float)
+        # ONE rescale, tracked exactly. W_k is homogeneous of degree k in h, so
+        # dividing by the largest weight and adding k*log(c) back is not an
+        # approximation -- it is what replaces the log-space accumulation the
+        # enumerating path needed because member weights span decades.
+        c = float(h.max()) if self.n else 0.0
+        self._log_c = -np.inf if c <= 0.0 else float(np.log(c))
+        if self.n and c > 0.0:
+            rank = _degeneracy_rank(adj, self.n)
+            self._order = np.argsort(rank)
+            self._g = g[np.ix_(self._order, self._order)]
+            self._h = (h / c)[self._order]
+        else:
+            self._order = np.arange(self.n)
+            self._g = g
+            self._h = h
+        self._cache: dict[int, float] = {}
+
+    def log_weight(self, k: int) -> float:
+        """log W_k, cached: `window_ladder_logw` walks every rung 0..kmax."""
+        k = int(k)
+        if k < 0 or k > self.n or self._log_c == -np.inf:
+            return -np.inf
+        if k == 0:
+            return 0.0
+        if k not in self._cache:
+            w = _wsum(self._g, self._h, k)
+            self._cache[k] = (
+                float(np.log(w) + k * self._log_c) if w > 0.0 else -np.inf
+            )
+        return self._cache[k]
+
+    def sample(self, k: int, rng: _RNG) -> tuple[int, ...] | None:
+        """A k-clique drawn proportional to its weight, as POOL ROW indices."""
+        k = int(k)
+        if k == 0:
+            return ()
+        if k > self.n or self._log_c == -np.inf:
+            return None
+        local = _wsample(self._g, self._h, k, rng)
+        if local is None:
+            return None
+        return tuple(sorted(int(self._order[i]) for i in local))

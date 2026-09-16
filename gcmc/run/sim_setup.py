@@ -42,77 +42,39 @@ of this block is examples/schema.json, which validation uses.
                  "eta": float,                       # default 0.69 (2D)
                  "gamma_max": float, "delta_eta": float},
 
+  "engine":     {"type": "metropolis_dynamics"        # default; accept/reject exchange
+                         | "glauber_dynamics"          # exact conditional draw of the
+                         | "suwa_todo_dynamics",       #   window occupancy; the last two are
+                                                       #   siblings, same window, same pool,
+                                                       #   same ladder, different kernel.
+                 "depth": int,                         # metropolis_dynamics ONLY. Exchange group
+                                                       #   size minus one: an add proposes
+                                                       #   (d+1, d), a remove (d, d+1).
+                 "full_repacking": bool,               # metropolis_dynamics ONLY; XOR with depth.
+                 "kmax_margin": int}                   # LADDER ONLY, and only over sampler=channel:
+                                                       #   how far above the body's Steiner packing
+                                                       #   bound the occupancy ladder truncates. A
+                                                       #   cube's bound already exceeds the pool,
+                                                       #   so sampler=branch refuses it.
+
   "sampler":    {"type": "metropolis" | "rosenbluth" | "branch" | "channel"
                          | "channel_cyclic" | "reweight",
-                 "engine": "metropolis_dynamics" | "glauber_dynamics"
-                           | "suwa_todo_dynamics",
-                                                           # THREE DYNAMICS. The last two are
-                                                           #   siblings: same window, same pool,
-                                                           #   same exact occupancy ladder, and a
-                                                           #   different kernel drawing k from it
-                                                           #   (categorical vs the Suwa-Todo
-                                                           #   geometric allocation). Both require
-                                                           #   sampler.type = "channel".
-                                                           # default metropolis_dynamics; ABSENT MEANS
-                                                           #   metropolis_dynamics, which is the
-                                                           #   backward-compatibility contract.
-                                                           # THE DYNAMICS AXIS, not the proposal
-                                                           #   axis `type`: metropolis_dynamics is
-                                                           #   accept/reject, glauber_dynamics
-                                                           #   draws the window's whole occupancy
-                                                           #   from its exact conditional and has
-                                                           #   no acceptance test at all (dN of
-                                                           #   any sign and magnitude; add /
-                                                           #   remove / repack stop being separate
-                                                           #   moves). Same muVT ensemble, same z,
-                                                           #   same U -- a different kernel.
-                                                           # glauber_dynamics REQUIRES
-                                                           #   type = "channel" and depth >= 1,
-                                                           #   takes no full_repacking, refuses
-                                                           #   both auxiliaries and
-                                                           #   channel_cyclic, caps the LJ path at
-                                                           #   4 trials per sigma of rod length,
-                                                           #   and is serial only. It moves every
-                                                           #   run id: pre-`engine` directories
-                                                           #   are not resumed, by decision.
-                 "kmax_margin": int,                       # default 0; glauber_dynamics ONLY, and
-                                                           #   its only new tunable. kmax =
-                                                           #   min(M, ceil(packing_bound) +
-                                                           #   kmax_margin); M and kmax are both
-                                                           #   DERIVED, so neither is a key.
-                 # EVERY OTHER KEY BELONGS TO SOME SAMPLERS AND NOT OTHERS, and a
-                 # sampler refuses the ones it does not read rather than ignoring
-                 # them (`_SAMPLER_KEYS`). Two of them are identity fields, so an
-                 # ignored key is not harmless: it gives the same chain a
-                 # different run directory.
-                 #
-                 #   metropolis      no other key but `engine`
-                 #   rosenbluth      depth, full_repacking, trials,
-                 #   branch          trial_density, trial_box_side
-                 #   reweight
-                 #   channel         depth, full_repacking, trials,
-                 #                   trial_density, channel_length,
-                 #                   channel_width, kmax_margin
-                 #   channel_cyclic  depth, full_repacking, trial_density,
-                 #                   channel_width
-                 #
-                 # `engine` is a key of EVERY sampler: stating the default is
-                 # always legal. WHICH VALUES a sampler admits is a different
-                 # question -- only `channel` may set glauber_dynamics.
-                 "depth": int,                             # default 0; channel needs >= 1; XOR full_repacking
-                 "full_repacking": bool,                   # default False; repacks the whole cavity instead
-                                                           #   of a fixed depth. XOR depth.
                  "trials": int | "trial_density": float,   # trials default 30; XOR
-                 "trial_box_side": float,                  # default 3.0; the cube trial box
-                 "channel_length": float | "cyclic",        # rod length along the sweep
-                                                           #   axis, or "cyclic" for a wall-to-wall rod
-                                                           #   whose ends meet through the boundary.
-                                                           #   Legacy spellings "full" | "box" |
-                                                           #   "full_box" | "span" are equivalent.
-                 "channel_width": float},                  # square cross-section side
-                 # A CANONICAL run (ensemble.type='NVT' with a species file) runs
-                 # no trial cloud, so its sampler block is exactly
-                 # {"type": "metropolis"} and nothing else is accepted.
+                 "trial_box_side": float,                  # default 3.0; the cube trial region
+                                                           #   (rosenbluth, branch, reweight)
+                 "channel_length": float,                  # the oriented cuboid (channel)
+                 "channel_width": float}
+                                                           # GEOMETRY ONLY. `sampler` says WHERE
+                                                           #   trial points come from; `engine`
+                                                           #   says WHAT IS DONE WITH THEM. The two
+                                                           #   are orthogonal and every dynamics
+                                                           #   runs over every sampler that can
+                                                           #   supply it a pool -- including
+                                                           #   branch x glauber/suwa_todo, where a
+                                                           #   cube cavity reaches the occupancy
+                                                           #   ladder by clique algebra
+                                                           #   (`sampling.branch.CavitySweep`)
+                                                           #   instead of by a transfer matrix.
 
   "ensemble":   {"dimension": 2 | 3,                 # required
                  "type": "muVT" | "NVT" | "semigrand" | "QA" | "confined",  # default muVT
@@ -421,17 +383,16 @@ _SAMPLERS = {
 #: is refused by the same mechanism for every sampler. What remains as a separate
 #: check is only what a table cannot express: CONFLICTS between two keys the
 #: sampler does read (trials XOR trial_density, depth XOR full_repacking).
-_CAVITY_KEYS = frozenset(
-    {"trials", "trial_density", "trial_box_side", "depth", "full_repacking"}
-)
-#: `engine` is a key of EVERY sampler, because stating the default is always
-#: legal and a reader should be able to write `engine: metropolis_dynamics` next to any
-#: sampler and have it mean what it says. Which VALUES each sampler admits is a
-#: different question, answered by the refusal table further down: only
-#: `channel` may set `glauber_dynamics`. Refusing the key here instead would
-#: give the reader "sampler.type='rosenbluth' does not read ['engine']", which
-#: is true of the value and misleading about the key.
-_ENGINE_KEY = frozenset({"engine"})
+#: GEOMETRY ONLY, now that `depth` and `full_repacking` live under `engine`.
+#: What is left is one question -- where do trial points come from -- which is
+#: what `sampler.type` selects and therefore the only thing its keys should
+#: describe.
+_CAVITY_KEYS = frozenset({"trials", "trial_density", "trial_box_side"})
+#: Empty, kept as a name so the rows below still read as "geometry + dynamics".
+#: `engine` is its own top-level block: it is not a sampler key, and the two
+#: questions it and `sampler.type` answer are orthogonal -- every dynamics runs
+#: over every sampler that can supply it a pool.
+_ENGINE_KEY: frozenset[str] = frozenset()
 _SAMPLER_KEYS: dict[str, tuple[frozenset[str], str]] = {
     # Standard GCMC: one uniform trial insertion, no cavity, no trial cloud.
     "metropolis": (_ENGINE_KEY, "it proposes one uniform insertion and no cloud"),
@@ -439,6 +400,11 @@ _SAMPLER_KEYS: dict[str, tuple[frozenset[str], str]] = {
         _CAVITY_KEYS | _ENGINE_KEY,
         "its trial region is a cube of side trial_box_side",
     ),
+    # `branch` is the second sampler that can run a ladder engine, and it still
+    # does not read `kmax_margin`. The margin raises kmax above the body's
+    # Steiner packing bound, and for a CUBE that bound already exceeds the pool
+    # size, so `kmax = min(M, bound + margin)` is M for every margin. A knob that
+    # cannot change the chain must not reach the run id.
     "branch": (
         _CAVITY_KEYS | _ENGINE_KEY,
         "its trial region is a cube of side trial_box_side",
@@ -451,21 +417,73 @@ _SAMPLER_KEYS: dict[str, tuple[frozenset[str], str]] = {
     # `kmax_margin` is the Glauber engine's one tunable and only this sampler can run
     # that engine, so only this sampler reads it.
     "channel": (
-        frozenset(
-            {"trials", "trial_density", "channel_length", "channel_width"}
-            | {"depth", "full_repacking", "kmax_margin"}
-        )
+        frozenset({"trials", "trial_density", "channel_length", "channel_width"})
         | _ENGINE_KEY,
         "its trial region is an oriented cuboid of channel_length x channel_width",
     ),
     # R16: the cyclic rod spans the box, so its LENGTH is set per move by the
     # orientation and there is no fixed trial count either.
     "channel_cyclic": (
-        frozenset({"trial_density", "channel_width", "depth", "full_repacking"})
-        | _ENGINE_KEY,
+        frozenset({"trial_density", "channel_width"}) | _ENGINE_KEY,
         "it spans the box, so its length and trial count are set per move",
     ),
 }
+
+
+#: Which keys of the `engine` block each dynamics READS, and one line saying
+#: what it does with them so a refusal can explain itself. The sampler twin of
+#: this table is `_SAMPLER_KEYS`, and splitting them is the whole point of the
+#: `engine` block:
+#:
+#:   `sampler` says WHERE the trial cloud comes from -- a cube of side
+#:   trial_box_side, an oriented cuboid, one uniform point.
+#:   `engine` says WHAT IS DONE WITH IT -- propose a group of `depth + 1` and
+#:   test it, or draw the window's whole occupancy from its exact conditional.
+#:
+#: `depth` was a sampler key and belonged here all along, and the cost of that
+#: was a contradiction shipped in the config surface: a ladder dynamics has no
+#: exchange group size at all, and yet `sampler.depth: 1` was not merely
+#: accepted under one, it was REQUIRED -- the message even said the requirement
+#: was the channel sampler's, not the ladder's. Anyone sweeping `depth` under
+#: `glauber_dynamics` got N run directories of the same chain under N ids.
+#: With `depth` under `engine`, that configuration cannot be written down.
+_ENGINE_KEYS: dict[str, tuple[frozenset[str], str]] = {
+    "metropolis_dynamics": (
+        frozenset({"depth", "full_repacking"}),
+        "it proposes an exchange of a fixed group size and accepts or rejects "
+        "it, so the group size is its knob",
+    ),
+    "glauber_dynamics": (
+        frozenset({"kmax_margin"}),
+        "it draws the window's whole occupancy k from the exact conditional "
+        "P(k), so there is no group size to choose -- kmax_margin sets how far "
+        "the ladder runs instead",
+    ),
+    "suwa_todo_dynamics": (
+        frozenset({"kmax_margin"}),
+        "it draws the window's whole occupancy k from the exact conditional "
+        "P(k) through the Suwa-Todo allocation, so there is no group size to "
+        "choose -- kmax_margin sets how far the ladder runs instead",
+    ),
+}
+
+
+def _check_engine(eng: dict[str, Any], engine: str) -> None:
+    """Refuse any `engine` key the chosen dynamics does not read.
+
+    The twin of `_check_sampler`, and for the same reason: "unknown key" is
+    true and useless when the key is a real key of a different dynamics.
+    """
+    reads, why = _ENGINE_KEYS[engine]
+    extra = sorted(set(eng) - reads - {"type"})
+    if extra:
+        raise ValueError(
+            f"engine.type={engine!r} does not read {extra}: {why}. "
+            f"It reads {sorted(reads) or 'no other key'}. "
+            "Delete them rather than leaving them: this run would not change "
+            "if you did, and they are identity fields, so leaving one gives "
+            "the same chain a different run directory."
+        )
 
 
 def assert_channel_guard(
@@ -1026,7 +1044,7 @@ def from_params(p: dict[str, Any]) -> Config:
     changing the physics silently."""
     _check(
         p,
-        {"potential", "auxiliary", "sampler", "ensemble", "run"},
+        {"potential", "auxiliary", "engine", "sampler", "ensemble", "run"},
         {"potential", "sampler", "ensemble"},
     )
 
@@ -1056,14 +1074,24 @@ def from_params(p: dict[str, Any]) -> Config:
 
     # ---- sampler ----
     smp = p["sampler"]
+    _moved = sorted(
+        {"engine", "depth", "full_repacking", "kmax_margin"} & set(smp)
+    )
+    if _moved:
+        raise ValueError(
+            f"sampler.{_moved} moved to the top-level `engine` section. "
+            'Write {"engine": {"type": "metropolis_dynamics", "depth": 1}} '
+            'beside "sampler". `sampler` says WHERE the trial cloud comes '
+            "from; `engine` says WHAT IS DONE WITH IT, and the group size, the "
+            "repacking switch and the ladder truncation are all the second "
+            "question. They are not aliased: a ladder dynamics has no depth at "
+            "all, so there is no value of the old key that could be carried "
+            "over honestly."
+        )
     _check(
         smp,
         {
             "type",
-            "engine",
-            "kmax_margin",
-            "depth",
-            "full_repacking",
             "trials",
             "trial_density",
             "trial_box_side",
@@ -1075,22 +1103,38 @@ def from_params(p: dict[str, Any]) -> Config:
     sampler = smp["type"]
     if sampler not in _SAMPLERS:
         raise ValueError(f"unknown sampler {sampler!r}; allowed {sorted(_SAMPLERS)}")
-    # THE DYNAMICS, read before anything else about the sampler, because several
-    # refusals below are conditional on it. Absent means `metropolis_dynamics`
-    # (`_ENGINES`), which is the backward-compatibility contract.
-    engine = str(smp.get("engine", _ENGINE_DEFAULT))
+    # ---- engine ----
+    #
+    # READ BEFORE THE SAMPLER'S OWN CHECKS, because several of them are
+    # conditional on the dynamics. Absent means `metropolis_dynamics`, so a
+    # params file that never mentions an engine still means what it says.
+    eng = p.get("engine", {})
+    if not isinstance(eng, dict):
+        raise ValueError(
+            f'the "engine" section must be an object, got {type(eng).__name__}. '
+            'Write {"engine": {"type": "glauber_dynamics"}}, not a bare string: '
+            "the dynamics carries its own keys (depth, full_repacking, "
+            "kmax_margin) and they need somewhere to live."
+        )
+    engine = str(eng.get("type", _ENGINE_DEFAULT))
     if engine not in _ENGINES:
         raise ValueError(
-            f"unknown sampler.engine {engine!r}; allowed {sorted(_ENGINES)}. "
-            "`engine` selects the DYNAMICS (Metropolis accept/reject vs the "
-            "Glauber engine's exact conditional draw); `sampler.type` selects "
-            "how a trial cloud is proposed. They are different axes."
+            f"unknown engine.type {engine!r}; allowed {sorted(_ENGINES)}. "
+            "`engine.type` selects the DYNAMICS (Metropolis accept/reject vs an "
+            "exact conditional draw); `sampler.type` selects how a trial cloud "
+            "is proposed. They are orthogonal: every dynamics runs over every "
+            "sampler that can supply it a pool."
         )
+    _check_engine(eng, engine)
     # THE FAMILY, not the name. Every check below that reads this flag is a
     # statement about the occupancy ladder, which both ladder dynamics build the
     # same way; the two places that care WHICH kernel draws from it name the
     # engine directly instead.
     ladder = engine in _LADDER_ENGINES
+    #: The complement, named because three refusals read it and "not ladder"
+    #: at a call site invites the reader to check whether a fourth dynamics
+    #: exists that is neither.
+    metro_dyn = engine == "metropolis_dynamics"
     # ---- the Glauber engine's refusal table (section 3.5) ---------------
     #
     # ERROR TEXT NAMES THE AXIS, NOT JUST THE VALUES. `engine` selects the
@@ -1099,7 +1143,7 @@ def from_params(p: dict[str, Any]) -> Config:
     # unreadable -- and an unreadable refusal is the failure mode here, which is
     # why `tests/unit/test_glauber_config.py` asserts on the MESSAGE and not only
     # on the raise.
-    if ladder and sampler != "channel":
+    if ladder and sampler not in ("channel", "branch"):
         _why = {
             "metropolis": (
                 "sampler=metropolis proposes a single trial with no cloud, "
@@ -1109,10 +1153,6 @@ def from_params(p: dict[str, Any]) -> Config:
                 "sampler=rosenbluth proposes a cube cavity and selects "
                 "sequentially; there is no transfer matrix over it, so the "
                 "local conditional cannot be computed exactly"
-            ),
-            "branch": (
-                "sampler=branch enumerates cliques in a cube cavity, which "
-                "has no 1D chain structure and no transfer matrix"
             ),
             "reweight": (
                 "sampler=reweight is the 2D hexatic psi6 method, an "
@@ -1127,7 +1167,7 @@ def from_params(p: dict[str, Any]) -> Config:
             ),
         }[sampler]
         raise ValueError(
-            f"engine={engine} requires sampler=channel, got "
+            f"engine={engine} requires sampler=channel or sampler=branch, got "
             f"sampler={sampler}.\n"
             "These are different axes: `engine` selects the dynamics "
             "(Metropolis accept/reject vs Glauber conditional draw), "
@@ -1135,7 +1175,7 @@ def from_params(p: dict[str, Any]) -> Config:
             f"{_why}."
         )
 
-    kmax_margin = int(smp.get("kmax_margin", 0))
+    kmax_margin = int(eng.get("kmax_margin", 0))
     if kmax_margin < 0:
         raise ValueError(
             f"sampler.kmax_margin must be >= 0, got {kmax_margin}: it is how far "
@@ -1144,7 +1184,7 @@ def from_params(p: dict[str, Any]) -> Config:
             "the kernel the identity on states the chain can actually reach and "
             "silently biases <N> low (design plan, section 3.7)."
         )
-    if "kmax_margin" in smp and not ladder:
+    if "kmax_margin" in eng and not ladder:
         raise ValueError(
             "sampler.kmax_margin only means something under a LADDER dynamics "
             '(sampler.engine="glauber_dynamics" or "suwa_todo_dynamics"): it '
@@ -1152,6 +1192,30 @@ def from_params(p: dict[str, Any]) -> Config:
             "ladder the same way. Metropolis dynamics has no ladder. Remove it, "
             "or set the engine."
         )
+    #: `sampler=branch` under a ladder engine: a CUBE cavity window instead of a
+    #: rod. Bound once here because four places downstream ask the question, and
+    #: `sampler == "branch"` alone is not the question -- the Metropolis branch
+    #: path is untouched by every one of them.
+    branch_cavity = ladder and sampler == "branch"
+    if branch_cavity:
+        # `depth` and `full_repacking` are refused for every ladder dynamics by
+        # `_check_engine`, so nothing about the group size needs saying here.
+        # `kmax_margin` is refused only on THIS sampler, because it is a real
+        # key of the ladder and inert only on a cube: the margin raises kmax
+        # above the body's Steiner packing bound, and for a cube that bound
+        # already exceeds the pool size, so kmax = min(M, bound + margin) is M
+        # for every margin. The ladder truncates itself instead -- rungs above
+        # the largest clique the cavity admits come back at -inf and cost
+        # almost nothing.
+        if "kmax_margin" in eng:
+            raise ValueError(
+                f"engine.kmax_margin does nothing under sampler={sampler}: a "
+                "cube's Steiner packing bound already exceeds the pool size, "
+                f"so kmax is M ({sampler} sets it from trial_box_side and "
+                "trial_density) whatever the margin. Remove it, or use "
+                "sampler=channel, whose rod has a bound the margin can bite on."
+            )
+
     # Only this sampler's keys, from here on. Every check below is one this
     # sampler can actually fail.
     _check_sampler(smp, sampler)
@@ -1166,13 +1230,18 @@ def from_params(p: dict[str, Any]) -> Config:
     # every sphere it finds and inserting one more (add), one fewer (remove), or
     # the same count (repack). depth is then meaningless and must not be given.
     full_repacking = _as_bool(
-        smp.get("full_repacking", False), "sampler.full_repacking"
+        eng.get("full_repacking", False), "engine.full_repacking"
     )
-    if full_repacking and "depth" in smp:
+    #: THE EXCHANGE GROUP SIZE, bound once. Only `metropolis_dynamics` reads it
+    #: -- `_check_engine` has already refused the key under the ladder dynamics,
+    #: so this is 0 there by construction rather than by a guard someone has to
+    #: remember at each of the five sites that used to read `smp["depth"]`.
+    depth_cfg = int(eng.get("depth", 0))
+    if full_repacking and "depth" in eng:
         raise ValueError(
-            "depth and full_repacking are mutually exclusive: full_repacking "
-            "repacks the whole cavity and ignores depth, so give one or the "
-            "other, not both"
+            "engine.depth and engine.full_repacking are mutually exclusive: "
+            "full_repacking repacks the whole cavity and ignores depth, so give "
+            "one or the other, not both"
         )
 
     # ---- ensemble ----
@@ -1864,8 +1933,8 @@ def from_params(p: dict[str, Any]) -> Config:
             f"seconds and cannot be negative (got "
             f"{run['log_flush_interval']}); 0.0 means flush every row"
         )
-    if int(smp.get("depth", 0)) < 0:
-        raise ValueError("depth must be >= 0")
+    if depth_cfg < 0:
+        raise ValueError("engine.depth must be >= 0")
     # WHAT IS LEFT HERE is only a conflict between two keys the sampler DOES
     # read; everything about which keys belong to which sampler is `_SAMPLER_KEYS`
     # and `_check_sampler` above. The metropolis "takes no depth/trials/..." and
@@ -2358,16 +2427,13 @@ def from_params(p: dict[str, Any]) -> Config:
     # `suwa_todo_dynamics` inherits every one without a line of its own. A
     # refusal that were really about the heat bath would have to name it.
     if ladder:
-        if full_repacking or int(smp.get("depth", 0)) < 1:
-            raise ValueError(
-                f"engine={engine} requires sampler.depth >= 1 and takes "
-                "no sampler.full_repacking. A ladder dynamics replaces add / remove "
-                "/ repack with ONE move that draws the window's whole occupancy "
-                "from its exact conditional, so dN is free and neither knob "
-                "selects a move type any more; depth >= 1 is kept because it is "
-                "the channel sampler's own precondition (depth 0 has no clique "
-                "structure to sweep). Set depth: 1 and drop full_repacking."
-            )
+        # THE `depth >= 1` REQUIREMENT USED TO BE HERE, and moving `depth` under
+        # `engine` is what killed it. It was the CHANNEL SAMPLER's precondition
+        # ("depth 0 has no clique structure to sweep") demanded of a DYNAMICS
+        # that has no depth at all, so every ladder run had to write `depth: 1`
+        # for a knob nothing read -- and sweeping it produced N directories of
+        # one chain. `_check_engine` refuses the key outright now, and the
+        # precondition is stated once, under `if channel`, where it is true.
         if short_range:
             # SECTION 3.5, the config twin of the assertion in the engine
             # module. The dual-cutoff correction depends on the drawn
@@ -2439,6 +2505,19 @@ def from_params(p: dict[str, Any]) -> Config:
     # against configurations with different k_in and requires the same M.
     window_M = 0
     window_kmax = 0
+    if ladder and branch_cavity:
+        # THE CUBE CAVITY IS A CUBOID WITH L == w. Everything downstream --
+        # `ChannelBody.build`, `volume()`, `members()`, `trial_cloud()`,
+        # `cuboid_packing_bound` -- is written for an oriented cuboid and needs
+        # no cube-specific case, so the whole of `sampler=branch` under a ladder
+        # engine is this one line plus the sweep. `trial_box_side` stays the user
+        # -facing name because it is the name the Metropolis path already uses for
+        # the same length, and a second name for one number is how a sweep ends up
+        # comparing a run against itself.
+        channel_length = channel_width = trial_box_side
+        assert_channel_guard(
+            channel_length, channel_width, dim, box, uc, span_name="box"
+        )
     if ladder:
         window_M = int(n_trials)
         _bound = cuboid_packing_bound(channel_length, channel_width, dim, diameter)
@@ -2471,8 +2550,47 @@ def from_params(p: dict[str, Any]) -> Config:
         # states / 20 ms at rc 1.5 to 283339 / 217 ms at rc 3.0). LJ path only:
         # the hard-core sweep's eviction window is the contact distance and does
         # not widen.
+        if branch_cavity:
+            # THE CAVITY'S COST RULE, and it is a different quantity from the
+            # rod's lambda. Lambda <= 4 bounds the TRANSFER MATRIX's state count,
+            # which widens with the eviction window; the cavity has no transfer
+            # matrix and no eviction window. What it has is `_wsum`, whose cost
+            # grows with the pool size AND with the cavity side -- the side sets
+            # how large a clique can be, and the top rungs are where the time
+            # goes. The empty rungs above the largest clique are nearly free (the
+            # recursion dies at its first level), which is why `kmax = M` costs
+            # no more than `kmax = the true capacity` and why there is no
+            # truncation knob here.
+            #
+            # MEASURED, one full ladder over k = 0..M, a cube at rc = 3.0,
+            # T* = 1.5, single core (ms):
+            #
+            #     a \ M     10     15     20     25     30     40      50
+            #       1.50    1.1    1.8    4.3     12     15     36     117
+            #       1.75    0.6    2.4     12     40    188    549    1048
+            #       2.00    1.3    7.6     14     65    595   2919    2554
+            #       2.25    1.2    5.3     26    195   1273   3738       -
+            #       2.50    2.2    9.6     65    236   1882  34220       -
+            #
+            # Least squares on those 36 points gives ms ~ M^(2.9 + 1.2a) / 2.3e5
+            # to within a factor of about three either way, which is the accuracy
+            # a refusal needs: it exists to stop a 47-second-per-move launch, not
+            # to tune anything. The run log's `wall_s` is the real number.
+            _ms = float(window_M) ** (2.9 + 1.2 * channel_length) / 2.3e5
+            if _ms > 25.0:
+                raise ValueError(
+                    f"engine={engine} on sampler=branch estimates {_ms:.3g} ms "
+                    f"per window move at M={window_M} in a "
+                    f"{channel_length:g}-cube, against a budget of 25 ms (the "
+                    "fit is good to about 3x either way). The clique ladder "
+                    "costs roughly M^(2.9 + 1.2 * trial_box_side). Lower "
+                    "sampler.trial_density or sampler.trial_box_side -- the side "
+                    "is the harsher of the two, since it sets how large a clique "
+                    "can be. This is a COST bound, not a scoping one: the ladder "
+                    "stays exact at any M and any cavity size."
+                )
         _lambda = window_M * diameter / channel_length
-        if lj and _lambda > 4.0 + 1e-9:
+        if lj and not branch_cavity and _lambda > 4.0 + 1e-9:
             raise ValueError(
                 f"engine={engine} refuses {_lambda:.2f} trials per sigma "
                 f"of channel length (M={window_M} over L={channel_length:g} at "
@@ -2483,13 +2601,27 @@ def from_params(p: dict[str, Any]) -> Config:
                 f"most {4.0 * channel_length / (diameter * channel_length * channel_width ** (dim - 1)):.4g} "
                 "or lengthen the rod. This is a scoping rule, not a tunable."
             )
-    if channel:
+    if channel or branch_cavity:
         if parallel:
-            raise ValueError("channel sampler is serial only")
-        if not full_repacking and int(smp.get("depth", 0)) < 1:
+            # The window move freezes the exterior of the body it draws, which a
+            # domain decomposition cannot guarantee across a cell boundary. True
+            # of the cube cavity for the same reason it is true of the rod, so
+            # the refusal is shared rather than restated.
             raise ValueError(
-                "channel sampler needs depth >= 1 (depth 0 has no "
-                "clique structure to sweep), or set full_repacking"
+                f"sampler={sampler}"
+                + (f" under engine={engine}" if branch_cavity else "")
+                + " is serial only"
+            )
+    if channel:
+        if metro_dyn and not full_repacking and depth_cfg < 1:
+            # The channel sampler's own precondition, and now stated only where
+            # it applies: depth 0 has no clique structure to sweep. Under a
+            # ladder dynamics there is no depth at all, so there is nothing to
+            # require.
+            raise ValueError(
+                "sampler=channel under engine.type=metropolis_dynamics needs "
+                "engine.depth >= 1 (depth 0 has no clique structure to sweep), "
+                "or engine.full_repacking"
             )
         # periodic guard: for the FIXED-length rod, insertion and removal share
         # one oriented cuboid, so the whole pool lives in that body. Its space
@@ -2575,7 +2707,7 @@ def from_params(p: dict[str, Any]) -> Config:
     if sampling_window < 1:
         raise ValueError("run.sampling_window must be >= 1 exchange step")
     if not metropolis:
-        _depth = int(smp.get("depth", 0))
+        _depth = depth_cfg
         if n_trials < 1:
             raise ValueError(
                 f"the trial pool is empty: the requested trial_density/trials "
@@ -2757,7 +2889,7 @@ def from_params(p: dict[str, Any]) -> Config:
         cavity_radius=cav,
         trial_box_side=trial_box_side,
         trial_density=trial_density,
-        depth=(0 if (metropolis or full_repacking) else int(smp.get("depth", 0))),
+        depth=(0 if (metropolis or full_repacking) else depth_cfg),
         branch=branch,
         metropolis=metropolis,
         channel=channel,
