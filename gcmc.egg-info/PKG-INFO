@@ -1,8 +1,0 @@
-Metadata-Version: 2.4
-Name: gcmc
-Version: 0.1.0
-Summary: Modular Grand Canonical Monte Carlo (BRANCH-MC)
-Requires-Python: >=3.9
-Requires-Dist: numpy
-Requires-Dist: scipy
-Requires-Dist: ase

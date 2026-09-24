@@ -1,5 +1,7 @@
 mnt/
 runs/
+docs/
+structures/
 __pycache__/
 *.pyc
 *.egg-info/
