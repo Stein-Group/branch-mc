@@ -37,17 +37,17 @@ This repository is the reference implementation for:
 
 ```mermaid
 flowchart LR
-  A["Place trial box<br/><sub>uniform for insertion,<br/>anchored for removal</sub>"] --> B["Drop k trial positions"]
+  A["Place trial box<br/><sub>uniform for insertion,<br/>anchored for removal</sub>"] --> B["Generate k trial positions"]
   B --> C["Discard overlaps<br/><sub>persistent cell list</sub>"]
   C --> D["Build compatibility graph<br/><sub>edge = pair can coexist</sub>"]
   D --> E["Count cliques<br/><sub>kClist, degeneracy order</sub>"]
   E --> F["Draw one clique uniformly,<br/>accept or reject"]
 ```
 
-An insertion empties the trial box and refills it with one more particle than it
-held (*full repacking*); a removal refills it with one fewer. The acceptance
-probability depends on the ratio of clique counts before and after, so every
-possible refill contributes, not only the one that was proposed.
+An insertion empties the trial box and packs it with one more particle than it
+held (*full repacking*); a removal packs it with one fewer. The acceptance
+criterion depends on the ratio of clique counts before and after, so every
+possible non-overlapping configuration contributes, not only the one that was proposed.
 
 ## How it's built
 
