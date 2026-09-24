@@ -14,7 +14,8 @@ from gcmc.run.sim_setup import from_params
 
 _BASE = {
     "potential": {"main": "hard_core"},
-    "sampler": {"type": "branch", "depth": 1, "trials": 10, "trial_box_side": 3.0},
+    "sampler": {"type": "branch", "trials": 10, "trial_box_side": 3.0},
+    "engine": {"depth": 1},
     "ensemble": {"mu": 2.0, "dimension": 3, "box": 12.0},
     "run": {"seed": 1},
 }
@@ -28,7 +29,8 @@ def test_run_id_ignores_key_order_and_float_spelling():
     reordered = {
         "run": {"seed": 1},
         "ensemble": {"box": 12.0, "dimension": 3, "mu": 2e0},
-        "sampler": {"trial_box_side": 3.0, "trials": 10, "depth": 1, "type": "branch"},
+        "sampler": {"trial_box_side": 3.0, "trials": 10, "type": "branch"},
+        "engine": {"depth": 1},
         "potential": {"main": "hard_core"},
     }
     assert _rid(_BASE) == _rid(reordered)

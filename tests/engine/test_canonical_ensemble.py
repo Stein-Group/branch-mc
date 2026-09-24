@@ -215,7 +215,8 @@ def test_untyped_nvt_is_not_canonical_and_needs_no_start_file(tmp_path):
     """
     p = {
         "potential": {"main": "hard_core"},
-        "sampler": {"type": "branch", "depth": 1, "trials": 10, "trial_box_side": 3.0},
+        "sampler": {"type": "branch", "trials": 10, "trial_box_side": 3.0},
+        "engine": {"depth": 1},
         "ensemble": {"type": "NVT", "dimension": 3, "box": 12.0, "N": 100},
         "run": {"kind": "single", "radius": 0.5, "seed": 1},
     }
@@ -270,25 +271,29 @@ def test_the_sampler_is_pinned_because_it_cannot_change_the_chain(tmp_path):
     first and the refusal above should go with it.
     """
     start = _start(tmp_path, MODEL_DEMIX)
-    for block in (
-        {
-            "type": "channel",
-            "trial_density": 10.0,
-            "full_repacking": True,
-            "channel_length": 5.0,
-            "channel_width": 1.0,
-        },
-        {"type": "rosenbluth", "trials": 20, "trial_box_side": 3.0},
-        {"type": "branch", "depth": 2, "trials": 20, "trial_box_side": 3.0},
-        {
-            "type": "channel_cyclic",
-            "trial_density": 2.0,
-            "channel_width": 1.2,
-            "depth": 1,
-        },
+    # (sampler block, engine block): the group-size knobs moved out of the
+    # sampler, and they have to travel with their case or the refusal under test
+    # is not the one that fires
+    for block, engine in (
+        (
+            {
+                "type": "channel",
+                "trial_density": 10.0,
+                "channel_length": 5.0,
+                "channel_width": 1.0,
+            },
+            {"full_repacking": True},
+        ),
+        ({"type": "rosenbluth", "trials": 20, "trial_box_side": 3.0}, {}),
+        ({"type": "branch", "trials": 20, "trial_box_side": 3.0}, {"depth": 2}),
+        (
+            {"type": "channel_cyclic", "trial_density": 2.0, "channel_width": 1.2},
+            {"depth": 1},
+        ),
     ):
         p = _params(start, MODEL_DEMIX)
         p["sampler"] = block
+        p["engine"] = engine
         with pytest.raises(ValueError, match="runs no trial cloud"):
             sim_setup.from_params(p)
 

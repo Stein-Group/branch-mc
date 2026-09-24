@@ -79,8 +79,8 @@ def test_branch_needs_depth_plus_one_trials():
                 "type": "branch",
                 "trials": 2,
                 "trial_box_side": 3.0,
-                "depth": 3,
             },
+            "engine": {"depth": 3},
             "run": {},
         },
         needle="depth+1",
@@ -97,10 +97,10 @@ def test_channel_rejects_trial_box_side():
                 "type": "channel",
                 "trials": 30,
                 "trial_box_side": 3.0,
-                "depth": 1,
                 "channel_length": 6.0,
                 "channel_width": 1.5,
             },
+            "engine": {"depth": 1},
             "run": {},
         },
         needle="trial_box_side",
@@ -116,10 +116,10 @@ def test_channel_trial_count_from_density_times_volume():
             "sampler": {
                 "type": "channel",
                 "trial_density": density,
-                "depth": 1,
                 "channel_length": length,
                 "channel_width": width,
             },
+            "engine": {"depth": 1},
             "run": {},
         }
     )
@@ -134,10 +134,10 @@ def test_channel_trial_count_from_density_times_volume():
             "sampler": {
                 "type": "channel",
                 "trials": 30,
-                "depth": 1,
                 "channel_length": length,
                 "channel_width": width,
             },
+            "engine": {"depth": 1},
             "run": {},
         }
     )
@@ -152,10 +152,10 @@ def test_channel_density_too_low_raises():
             "sampler": {
                 "type": "channel",
                 "trial_density": 0.0001,
-                "depth": 1,
                 "channel_length": 6.0,
                 "channel_width": 1.5,
             },
+            "engine": {"depth": 1},
             "run": {},
         },
         needle="trial pool is empty",

@@ -71,11 +71,11 @@ def test_the_scan_records_a_guard_refusal_rather_than_skipping_it():
         "potential": {"main": "hard_core"},
         "sampler": {
             "type": "channel",
-            "depth": 1,
             "trial_density": 1.0,
             "channel_length": 6.0,
             "channel_width": 1.5,
         },
+        "engine": {"depth": 1},
         "ensemble": {"dimension": 3, "box": 6.0, "mu": 2.0},
     }
     with pytest.raises(ValueError, match="periodic guard"):
@@ -102,11 +102,11 @@ def test_the_glauber_tightens_the_hard_core_radius_to_the_pair_floor():
         },
         "sampler": {
             "type": "channel",
-            "depth": 1,
             "trial_density": 1.0,
             "channel_length": 6.0,
             "channel_width": 1.5,
         },
+        "engine": {"depth": 1},
         "ensemble": {"dimension": 3, "box": 8.0, "z": {"A": 0.1, "B": 0.1}},
     }
     try:

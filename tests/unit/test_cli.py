@@ -19,7 +19,8 @@ from gcmc.__main__ import main
 def _params(**over):
     p = {
         "potential": {"main": "hard_core"},
-        "sampler": {"type": "branch", "depth": 1, "trials": 20, "trial_box_side": 3.0},
+        "sampler": {"type": "branch", "trials": 20, "trial_box_side": 3.0},
+        "engine": {"depth": 1},
         "ensemble": {"type": "muVT", "dimension": 3, "box": 10.0, "mu": 1.0},
         "run": {
             "kind": "single",

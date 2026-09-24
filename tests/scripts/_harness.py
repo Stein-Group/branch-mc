@@ -125,6 +125,15 @@ def _back_translate(params):
         general rule for this function: translate into the vocabulary the
         FROZEN engine had, which is not necessarily the most recent spelling
         the current engine deprecated.
+
+    The engine block (2026-09)
+        `depth`, `full_repacking` and `kmax_margin` moved out of `sampler` into
+        a top-level `engine` block, whose `type` is the dynamics that used to be
+        `sampler.engine`. A frozen engine has no `engine` block at all and reads
+        those keys where they used to be, so they go back. A RENAME and nothing
+        more: the same values reach the same Config fields, and an absent
+        dynamics meant metropolis_dynamics before the move exactly as it does
+        after, so the key is dropped rather than spelled out.
     """
     import copy
 
@@ -133,6 +142,17 @@ def _back_translate(params):
     if smp.get("type") == "channel_cyclic":
         smp["type"] = "channel"
         smp["channel_length"] = "full"
+    eng = out.pop("engine", None)
+    if eng:
+        for key, value in eng.items():
+            if key == "type":
+                # engineA's default is the same dynamics, so the default needs
+                # no spelling; anything else it would not recognise at all.
+                if value != "metropolis_dynamics":
+                    smp["engine"] = value
+            else:
+                smp[key] = value
+        out["sampler"] = smp
     return out
 
 
@@ -163,13 +183,42 @@ _HS = {"main": "hard_core"}
 _LJ = {"main": "lennard_jones", "T": 0.85}
 
 
+#: Keys that moved from the `sampler` block to the top-level `engine` block.
+#: `engine` itself is in the list because it moved from a sampler key naming the
+#: dynamics to that block's own `type`.
+ENGINE_KEYS = ("engine", "depth", "full_repacking", "kmax_margin")
+
+
+def split_engine(sampler):
+    """(sampler block, engine block), splitting `sampler` on `ENGINE_KEYS`.
+
+    `sampler` says WHERE the trial cloud comes from; `engine` says what is done
+    with it, and the group size, the repacking switch and the ladder truncation
+    are all the second question. `from_params` refuses the old spelling by name
+    rather than aliasing it, so the split has to happen somewhere -- and it
+    happens here, in the one constructor every mode in this file goes through,
+    rather than in two hundred literals. `_back_translate` does the reverse for
+    a frozen engine that only knows the old spelling.
+    """
+    smp = dict(sampler)
+    eng = {}
+    for key in ENGINE_KEYS:
+        if key in smp:
+            eng["type" if key == "engine" else key] = smp.pop(key)
+    return smp, eng
+
+
 def _p(potential, sampler, ensemble, run=None):
-    return {
+    smp, eng = split_engine(sampler)
+    out = {
         "potential": dict(potential),
-        "sampler": dict(sampler),
+        "sampler": smp,
         "ensemble": dict(ensemble),
         "run": dict(run or {}),
     }
+    if eng:
+        out["engine"] = eng
+    return out
 
 
 REF_MODES = {

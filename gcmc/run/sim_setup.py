@@ -35,6 +35,26 @@ of this block is examples/schema.json, which validation uses.
   "auxiliary":  {"type": "pmf" | "short_range",      # OPTIONAL block; omit = no aux. Forbidden in
                                                      #   typed mode: the species file states `aux`.
                  "g3_csv": str,                      # pmf only; required iff 3D
+                 "gamma": float | [float, ...],      # pmf only; OPTIONAL. The selection-bias exponent
+                                                     #   per Rosenbluth level, in place of the fitted
+                                                     #   schedule. A SCALAR applies at every level; an
+                                                     #   ARRAY of 1..9 values gives the first levels and
+                                                     #   leaves the rest at 0 (bias off). Both dimensions.
+                                                     #   Refused with sampler.gamma_mode='adaptive', which
+                                                     #   solves the same number instead. Swept by the
+                                                     #   launcher as a list of arms, each arm a scalar or
+                                                     #   an array.
+                 "g3_r_cut": float,                  # 3D pmf only; OPTIONAL. Neighbours beyond this
+                                                     #   radius contribute NOTHING to the bias. The
+                                                     #   table's angular structure dies by r = 1.9, so
+                                                     #   the far pairs cost and add count-dependence
+                                                     #   without adding ranking. Absent = every neighbour
+                                                     #   inside run.upper_cutoff contributes, as shipped.
+                 "min_g3": float,                    # 3D pmf only; OPTIONAL. The floor applied to the
+                                                     #   tabulated g3, 0 < min_g3 <= 1. Omit for the
+                                                     #   historical default 1/sampler.trials, which moves
+                                                     #   whenever the trial count moves; pin it to make the
+                                                     #   bias independent of k.
                  "cutoff": float,                    # short_range only, required for it:
                                                      #   the proposal/selection radius, e.g. 1.5.
                                                      #   lower_cutoff < cutoff <= upper_cutoff.
@@ -62,6 +82,27 @@ of this block is examples/schema.json, which validation uses.
                  "trials": int | "trial_density": float,   # trials default 30; XOR
                  "trial_box_side": float,                  # default 3.0; the cube trial region
                                                            #   (rosenbluth, branch, reweight)
+                 "gamma_mode": "fixed" | "adaptive",       # default "fixed": read the nine fitted pmf
+                                                           #   exponents. "adaptive" solves one per
+                                                           #   Rosenbluth level to hit `pr_target`, and
+                                                           #   requires rosenbluth + 3D pmf under
+                                                           #   metropolis_dynamics.
+                 "pr_target": float,                       # adaptive only, and required by it: the target
+                                                           #   participation fraction PR / k in (0, 1],
+                                                           #   e.g. 0.4. A variance knob; it cannot move an
+                                                           #   equilibrium average.
+                 "gamma_criterion":                        # adaptive only; OPTIONAL, default
+                     "participation" | "perplexity",       #   "participation". Which spread pr_target is
+                                                           #   measured with: PR = (sum w)^2 / sum w^2, or
+                                                           #   perplexity = exp(-sum p log p). Applies at
+                                                           #   every level, depth included.
+                 "gamma_solver":                           # adaptive only; OPTIONAL, default "moments".
+                     "moments" | "grid",                   #   "moments" is the closed form (two weighted
+                                                           #   moments of log b, one square root, no
+                                                           #   exponentials); "grid" searches 17 candidate
+                                                           #   exponents and costs ~13% of move time.
+                                                           #   Same question, two answers within a percent
+                                                           #   of each other, two run identities.
                  "channel_length": float,                  # the oriented cuboid (channel)
                  "channel_width": float}
                                                            # GEOMETRY ONLY. `sampler` says WHERE
@@ -143,6 +184,15 @@ of this block is examples/schema.json, which validation uses.
                                                      #   remove; giving both raises. Default is every group
                                                      #   the run can fill, which for a single-species muVT
                                                      #   run is exactly the historical layout.
+                 "esjd": bool,                       # default false. Record the expected squared jump
+                                                     #   distance in the window summary and the log:
+                                                     #   esjd_dNsq (sum (dN)^2 over PROPOSED MOVES, which on this
+                                                     #   engine is the accepted exchange count, since an
+                                                     #   exchange moves N by +/-1 at every depth) and
+                                                     #   esjd_drsq (sum of squared translation displacement,
+                                                     #   minimum imaged). Divide either by wall_s for the
+                                                     #   per-second form. MEASUREMENT: it changes nothing
+                                                     #   the chain does and never reaches the run id.
                  "seed": int, "initial_config": str,
                                                      #   a path (file or equilibrated library), or the
                                                      #   literal token "grid" / "grid:<eta>" to bootstrap
@@ -254,6 +304,7 @@ import logging
 import math
 from dataclasses import dataclass
 
+from ..forcefield import auxiliary
 from ..forcefield.overlap import max_core_floor
 from ..forcefield.species import (
     STATE_POINT_ROUTES,
@@ -304,6 +355,73 @@ _GAMMA_AUX_3D = {
 }
 
 
+#: How many Rosenbluth levels the exponent table covers. The engine reads
+#: `gamma_schedule[min(level, 9)]`, so level 10 and deeper reuse level 9's
+#: value; with the padding rule below that means an array shorter than the move
+#: is deep turns the bias OFF past its last entry rather than extrapolating.
+_GAMMA_LEVELS = 9
+
+
+def _gamma_override(value: Any, name: str = "auxiliary.gamma") -> dict[int, float]:
+    """`auxiliary.gamma` as a level -> exponent table.
+
+    A SCALAR applies at every level: `0.1` is the nine-vector of 0.1. An ARRAY
+    gives the first levels explicitly and the rest are ZERO, so
+    `[0.29, 0.10, 0.03]` biases the first three placements of a move and leaves
+    the rest unbiased. Padding with zero rather than repeating the last value is
+    the choice the fitted table already made -- its levels 7 to 9 are 0.0 -- and
+    it is the safe direction: a missing entry costs efficiency, while an
+    extrapolated one applies a bias nobody chose at a depth nobody measured.
+
+    A NESTED list is refused rather than flattened. `[[0.1], [0.2]]` is a SWEEP,
+    and reaching this function means the launcher did not expand it, so the run
+    would otherwise silently use one arm of an experiment as if it were the
+    whole thing.
+    """
+    if isinstance(value, (list, tuple)):
+        if any(isinstance(x, (list, tuple)) for x in value):
+            raise ValueError(
+                f"{name} contains a list of lists, which is a SWEEP over "
+                f"several gamma arms, but a single run got it unexpanded. "
+                f"Launch sweeps with `python -m gcmc.run.launcher` (not "
+                f"`gcmc run`); if you already did, the launcher on this machine "
+                f"is an older version that does not expand 'gamma' -- update "
+                f"gcmc/run/launcher.py."
+            )
+        vals = [float(x) for x in value]
+        if not vals:
+            raise ValueError(
+                f"{name} is an empty list. Give a scalar (one exponent for "
+                f"every level) or 1 to {_GAMMA_LEVELS} values (the first "
+                f"levels, the rest unbiased), or drop the key to read the "
+                f"fitted schedule."
+            )
+        if len(vals) > _GAMMA_LEVELS:
+            raise ValueError(
+                f"{name} has {len(vals)} values but the schedule covers "
+                f"{_GAMMA_LEVELS} Rosenbluth levels (the engine reads level "
+                f"min(level, {_GAMMA_LEVELS})). Values past the ninth would "
+                f"never be read, so a longer array means the array was meant "
+                f"for something else -- most often a SWEEP, which is written as "
+                f"a list of arms and expanded by the launcher."
+            )
+        vals += [0.0] * (_GAMMA_LEVELS - len(vals))
+    else:
+        vals = [float(value)] * _GAMMA_LEVELS
+    for i, g in enumerate(vals, start=1):
+        if not math.isfinite(g):
+            raise ValueError(f"{name} level {i} is {g!r}, which is not finite.")
+        if g < 0.0:
+            raise ValueError(
+                f"{name} level {i} is {g!r}. A negative exponent inverts the "
+                f"bias -- it would select AGAINST the configurations the "
+                f"auxiliary says are likely -- which is legal arithmetic and "
+                f"almost never what a params file means. Use 0.0 to switch the "
+                f"bias off at a level."
+            )
+    return {i: vals[i - 1] for i in range(1, _GAMMA_LEVELS + 1)}
+
+
 def _gamma_dict(pmf: bool, reweight: bool, two_dim: bool) -> dict[int, float]:
     """Per-nesting-level bias exponents gamma_k for k = 1..9: the tuned PMF
     schedules (2D and 3D differ; fitted in the original work) when the pmf
@@ -331,6 +449,25 @@ _MAIN = {"hard_core", "lennard_jones"}
 #: it is stated here, in the schema and in the refusal messages -- not left
 #: implied -- because every params file written before this field existed relies
 #: on it.
+#: The exponent policy for the pmf selection bias. `fixed` reads the nine
+#: fitted per-level numbers in `_GAMMA_AUX_2D` / `_GAMMA_AUX_3D`; `adaptive`
+#: solves one exponent per Rosenbluth level from the trial weights to hit a
+#: target participation fraction. Two values and not a boolean, because a third
+#: policy (perplexity in place of the participation ratio) is a one-line swap in
+#: `sampling.participation` and would need a name rather than a second flag.
+_GAMMA_MODES = {"fixed", "adaptive"}
+#: How the spread of a level's trial weights is measured. Named rather than a
+#: boolean because a third measure is a function and an entry in
+#: `sampling.participation.CRITERIA`, and because a run's log should say which
+#: one it used in words.
+_GAMMA_CRITERIA = {"participation", "perplexity"}
+#: How the exponent is obtained. `moments` solves the second-order expansion of
+#: the spread in closed form; `grid` evaluates the spread at 17 candidate
+#: exponents and takes the closest. Named and not a boolean for the reason above,
+#: and kept as a key at all because the grid was the measured cost of the method
+#: (13% of move time) and a run that wants to show the closed form loses nothing
+#: has to be able to ask for the thing it is compared against.
+_GAMMA_SOLVERS = {"moments", "grid"}
 _ENGINES = {"metropolis_dynamics", "glauber_dynamics", "suwa_todo_dynamics"}
 _ENGINE_DEFAULT = "metropolis_dynamics"
 #: THE TWO LADDER DYNAMICS, which are siblings and not a parent and a variant.
@@ -393,12 +530,22 @@ _CAVITY_KEYS = frozenset({"trials", "trial_density", "trial_box_side"})
 #: questions it and `sampler.type` answer are orthogonal -- every dynamics runs
 #: over every sampler that can supply it a pool.
 _ENGINE_KEY: frozenset[str] = frozenset()
+#: The adaptive-gamma pair, and ONLY `rosenbluth` reads it. The exponent is a
+#: property of a level loop over a weighted trial cloud: `metropolis` draws one
+#: trial, the clique samplers score a whole pool by a dynamic program with no
+#: per-level exponent, and `reweight` selects on psi6. Listing the keys against
+#: the one sampler that reads them is what makes the refusal for the others come
+#: out of `_check_sampler` with the axis already named, rather than needing a
+#: separate check further down that says the same thing worse.
+_GAMMA_KEYS = frozenset({"gamma_mode", "pr_target", "gamma_criterion", "gamma_solver"})
 _SAMPLER_KEYS: dict[str, tuple[frozenset[str], str]] = {
     # Standard GCMC: one uniform trial insertion, no cavity, no trial cloud.
     "metropolis": (_ENGINE_KEY, "it proposes one uniform insertion and no cloud"),
     "rosenbluth": (
-        _CAVITY_KEYS | _ENGINE_KEY,
-        "its trial region is a cube of side trial_box_side",
+        _CAVITY_KEYS | _ENGINE_KEY | _GAMMA_KEYS,
+        "its trial region is a cube of side trial_box_side, and it is the only "
+        "sampler with a per-level selection over a cloud for gamma_mode to act "
+        "on",
     ),
     # `branch` is the second sampler that can run a ladder engine, and it still
     # does not read `kmax_margin`. The margin raises kmax above the body's
@@ -477,9 +624,25 @@ def _check_engine(eng: dict[str, Any], engine: str) -> None:
     reads, why = _ENGINE_KEYS[engine]
     extra = sorted(set(eng) - reads - {"type"})
     if extra:
+        # WHICH DYNAMICS DOES READ IT, named from the same table. Without this
+        # the message says only that the current engine ignores the key, which
+        # sends a reader who has already chosen their dynamics to guess; and
+        # when a key belongs to a FAMILY (`kmax_margin` is read by both ladder
+        # dynamics) a message naming one member tells a user of the other to set
+        # an engine they have set.
+        owners = {
+            key: sorted(name for name, (ks, _) in _ENGINE_KEYS.items() if key in ks)
+            for key in extra
+        }
+        where = "; ".join(
+            f"{key!r} is read by {', '.join(names)}"
+            if names
+            else f"{key!r} is read by no dynamics at all"
+            for key, names in owners.items()
+        )
         raise ValueError(
             f"engine.type={engine!r} does not read {extra}: {why}. "
-            f"It reads {sorted(reads) or 'no other key'}. "
+            f"It reads {sorted(reads) or 'no other key'}, and {where}. "
             "Delete them rather than leaving them: this run would not change "
             "if you did, and they are identity fields, so leaving one gives "
             "the same chain a different run directory."
@@ -723,6 +886,14 @@ class Config:
     gamma_max: float | None
     delta_eta: float | None
     g3_csv: str | None
+    min_g3: float | None
+    g3_r_cut: float | None
+    g3_reader: str | None
+    gamma_mode: str | None
+    pr_target: float | None
+    gamma_criterion: str | None
+    gamma_solver: str | None
+    esjd: bool
     # derived
     two_dim: bool
     parallel: bool
@@ -992,6 +1163,8 @@ class Config:
                     side=self.box,
                     n_trials=self.n_trial_molecules,
                     g3_csv=self.g3_csv,
+                    min_g3=self.min_g3,
+                    g3_r_cut=self.g3_r_cut,
                 )
             case "aux" if self.two_dim:
                 return make_potential(
@@ -1005,6 +1178,8 @@ class Config:
                     side=self.box,
                     n_trials=self.n_trial_molecules,
                     g3_csv=self.g3_csv,
+                    min_g3=self.min_g3,
+                    g3_r_cut=self.g3_r_cut,
                 )
             case "reweight":
                 return None
@@ -1074,9 +1249,7 @@ def from_params(p: dict[str, Any]) -> Config:
 
     # ---- sampler ----
     smp = p["sampler"]
-    _moved = sorted(
-        {"engine", "depth", "full_repacking", "kmax_margin"} & set(smp)
-    )
+    _moved = sorted({"engine", "depth", "full_repacking", "kmax_margin"} & set(smp))
     if _moved:
         raise ValueError(
             f"sampler.{_moved} moved to the top-level `engine` section. "
@@ -1097,6 +1270,10 @@ def from_params(p: dict[str, Any]) -> Config:
             "trial_box_side",
             "channel_length",
             "channel_width",
+            "gamma_mode",
+            "pr_target",
+            "gamma_criterion",
+            "gamma_solver",
         },
         {"type"},
     )
@@ -1229,9 +1406,7 @@ def from_params(p: dict[str, Any]) -> Config:
     # instead of a fixed depth, an exchange repacks the whole cavity, removing
     # every sphere it finds and inserting one more (add), one fewer (remove), or
     # the same count (repack). depth is then meaningless and must not be given.
-    full_repacking = _as_bool(
-        eng.get("full_repacking", False), "engine.full_repacking"
-    )
+    full_repacking = _as_bool(eng.get("full_repacking", False), "engine.full_repacking")
     #: THE EXCHANGE GROUP SIZE, bound once. Only `metropolis_dynamics` reads it
     #: -- `_check_engine` has already refused the key under the ladder dynamics,
     #: so this is 0 there by construction rather than by a guard someone has to
@@ -1242,6 +1417,30 @@ def from_params(p: dict[str, Any]) -> Config:
             "engine.depth and engine.full_repacking are mutually exclusive: "
             "full_repacking repacks the whole cavity and ignores depth, so give "
             "one or the other, not both"
+        )
+    if metropolis and ({"depth", "full_repacking"} & set(eng)):
+        # A HOLE THE `engine` MOVE OPENED, and it is the exact failure this file
+        # exists to prevent: a declared knob that nothing reads. While these
+        # were sampler keys, `_check_sampler` refused them here for free --
+        # metropolis reads no key but `type`, so `{"type": "metropolis",
+        # "depth": 2}` could not be written down. As engine keys they are legal
+        # for metropolis_dynamics, which is the DYNAMICS and is correct; what
+        # they need is a sampler with a trial cloud, and `sampler=metropolis`
+        # draws a single trial and has none. Silently zeroing them (which is
+        # what `depth=(0 if metropolis else depth_cfg)` below does) would let a
+        # sweep over depth produce N run directories of one chain.
+        #
+        # The SAMPLER axis, not the dynamics: every other sampler proposes a
+        # cloud and reads both keys under this dynamics.
+        bad = sorted({"depth", "full_repacking"} & set(eng))
+        raise ValueError(
+            f"engine.{bad} needs a sampler with a trial cloud, and "
+            f"sampler.type='metropolis' proposes a single uniform insertion "
+            f"with no cloud -- there is no group to size and nothing to repack. "
+            f"This is the sampler axis: the keys are legal under "
+            f"engine.type='metropolis_dynamics' with any other sampler. Drop "
+            f"them, or choose a sampler that builds a cloud (rosenbluth, "
+            f"branch, channel, channel_cyclic, reweight)."
         )
 
     # ---- ensemble ----
@@ -1641,7 +1840,17 @@ def from_params(p: dict[str, Any]) -> Config:
     if aux_block is not None:
         _check(
             aux_block,
-            {"type", "g3_csv", "eta", "gamma_max", "delta_eta", "cutoff"},
+            {
+                "type",
+                "g3_csv",
+                "min_g3",
+                "g3_r_cut",
+                "gamma",
+                "eta",
+                "gamma_max",
+                "delta_eta",
+                "cutoff",
+            },
             {"type"},
         )
         if not (pmf or short_range):
@@ -1654,7 +1863,15 @@ def from_params(p: dict[str, Any]) -> Config:
             # keys that belong to the pmf bias and mean nothing here. Silently
             # ignoring them would let someone believe a gamma schedule is being
             # applied to a scheme that has no exponent.
-            stray = {"g3_csv", "eta", "gamma_max", "delta_eta"} & set(aux_block)
+            stray = {
+                "g3_csv",
+                "min_g3",
+                "g3_r_cut",
+                "gamma",
+                "eta",
+                "gamma_max",
+                "delta_eta",
+            } & set(aux_block)
             if stray:
                 raise ValueError(
                     f"auxiliary.type='short_range' takes only 'cutoff'; "
@@ -1709,8 +1926,23 @@ def from_params(p: dict[str, Any]) -> Config:
             "log_flush_interval",
             "log_columns",
             "log_drop",
+            "esjd",
         },
     )
+
+    # THE START AXIS ARRIVES UNEXPANDED OR NOT AT ALL. A list here is a sweep
+    # over starting configurations, and one run holding the whole list would
+    # otherwise reach `_resolve_start_file` and die on `Path(list)` with an
+    # error naming neither the key nor the launcher.
+    if isinstance(run.get("initial_config"), (list, tuple)):
+        raise ValueError(
+            "run.initial_config is a list (a sweep over starting "
+            "configurations), but a single run got it unexpanded. Launch "
+            "sweeps with `python -m gcmc.run.launcher` (not `gcmc run`); if "
+            "you already did, the launcher on this machine is an older version "
+            "that does not expand 'initial_config' -- update "
+            "gcmc/run/launcher.py."
+        )
 
     # In typed mode sigma comes from the species file, the exclusion floor is
     # c*sigma_ij and the truncation is interaction.rc, all per pair. Letting the
@@ -1888,6 +2120,235 @@ def from_params(p: dict[str, Any]) -> Config:
         )
     if pmf and not two_dim and "g3_csv" not in aux:
         raise ValueError("3D pmf auxiliary requires auxiliary.g3_csv")
+    if pmf and two_dim and "min_g3" in aux:
+        # The 2D auxiliary is the analytic hard-disk g(r) (`HardCoreAux2D`), which has
+        # no floor at all: it returns exactly 0 inside the core and that zero is
+        # the physics, not a numerical guard. Only the tabulated 3D g3 is
+        # floored. Accepting the key here and dropping it would let someone
+        # believe a floor is in force when nothing reads it, which is the same
+        # failure the short_range stray-key check above exists to prevent.
+        raise ValueError(
+            "auxiliary.min_g3 is a 3D-only key: it floors the tabulated "
+            "g3(r, cos theta). The 2D pmf auxiliary is the analytic hard-disk "
+            "g(r), which has no floor -- it is 0 inside the core by "
+            "construction. Drop the key, or drop ensemble.dimension = 2."
+        )
+    # THE EXPONENT ITSELF, in place of the fitted schedule. Scalar or short
+    # array; see `_gamma_override`. Absent leaves the fitted table exactly as it
+    # was, which is what keeps every pre-existing run id and digest where it is.
+    # Both dimensions read it: the 2D analytic hard-disk g(r) and the 3D
+    # tabulated g3 take their exponent from the same level table.
+    gamma_override: dict[int, float] | None = None
+    if "gamma" in aux:
+        if not pmf:
+            raise ValueError(
+                f"auxiliary.gamma is the pmf selection-bias exponent and "
+                f"auxiliary.type is {aux_type!r}. The short-range auxiliary is "
+                f"the same potential at a shorter radius and has no exponent to "
+                f"set. Drop the key, or use auxiliary.type='pmf'."
+            )
+        gamma_override = _gamma_override(aux["gamma"])
+    # THE BIAS CUTOFF. A neighbour further than this contributes nothing to the
+    # selection bias. 3D only: the 2D auxiliary is the analytic hard-disk g(r),
+    # which is a pair function of r alone and already decays, while the 3D bias
+    # is a product over neighbours in which every pair multiplies in whether or
+    # not it carries information.
+    g3_r_cut_val = None
+    if "g3_r_cut" in aux:
+        if not pmf or two_dim:
+            raise ValueError(
+                "auxiliary.g3_r_cut is a 3D pmf key: it drops neighbours "
+                "beyond a radius from the tabulated three-body bias. The 2D "
+                "auxiliary is the analytic hard-disk g(r) with no neighbour "
+                "product to truncate, and the short-range auxiliary has no "
+                "bias at all. Drop the key."
+            )
+        g3_r_cut_val = float(aux["g3_r_cut"])
+        if not (g3_r_cut_val > 0.0):
+            raise ValueError(
+                f"auxiliary.g3_r_cut must be positive, got {g3_r_cut_val!r}. "
+                f"It is a radius in diameters, not a count; 1.8 keeps the "
+                f"pairs that carry the table's angular structure and drops the "
+                f"rest."
+            )
+        if g3_r_cut_val <= 1.0:
+            raise ValueError(
+                f"auxiliary.g3_r_cut = {g3_r_cut_val!r} is at or inside "
+                f"contact, so EVERY pair would be dropped and the bias would "
+                f"be identically 1 at every trial -- an auxiliary that does "
+                f"nothing while still paying for the table lookup. Use a "
+                f"radius above 1, or drop the auxiliary block."
+            )
+    # ---- adaptive gamma support matrix ------------------------------------
+    #
+    # `gamma_mode = "adaptive"` replaces the nine fitted pmf exponents with one
+    # target participation fraction, solved per Rosenbluth level from the trial
+    # weights (`sampling.participation`). It applies to EXACTLY ONE
+    # configuration: rosenbluth + the 3D pmf auxiliary under
+    # metropolis_dynamics, in the serial engine.
+    #
+    # Every rejection below names the AXIS and not just the value, following the
+    # short-range matrix above. The reason is that "adaptive gamma is not
+    # supported here" is useless to someone holding a params file: what they
+    # need to know is which of the five things they wrote is the one that rules
+    # it out, and whether it is a missing feature or a category error.
+    #
+    # Refusing rather than ignoring, and refusing HERE rather than in the
+    # engine, is M15: a combination the validator accepts and the first window
+    # raises on has already made a run directory and opened a log.
+    # ABSENT IS NOT THE SAME IDENTITY AS "fixed", and that is deliberate.
+    #
+    # `identity_dict` drops any physics field whose value is None, so a params
+    # file that never mentions `gamma_mode` hashes exactly as it did before this
+    # key existed and keeps its run directory. Writing "fixed" explicitly means
+    # the same chain under a different run id, which is the convention `min_g3`
+    # already set at stage 1: inheriting a default and pinning it deliberately
+    # are different experiments even when they are the same arithmetic.
+    #
+    # The alternative -- defaulting to the string "fixed" -- would move EVERY
+    # existing run id, the way adding `engine` did. That was accepted then
+    # because there was no honest absent value: a run really does have a
+    # dynamics. A run that never asked for adaptive gamma has no gamma mode at
+    # all, so None is not a dodge, it is the truth.
+    gamma_mode = None if "gamma_mode" not in smp else str(smp["gamma_mode"])
+    if gamma_mode is not None and gamma_mode not in _GAMMA_MODES:
+        raise ValueError(
+            f"unknown sampler.gamma_mode {gamma_mode!r}; allowed "
+            f"{sorted(_GAMMA_MODES)}. 'fixed' reads the fitted per-level "
+            f"exponents; 'adaptive' solves one per level for a target "
+            f"participation fraction (sampler.pr_target)."
+        )
+    adaptive_gamma = gamma_mode == "adaptive"
+    stray_gamma = sorted({"pr_target", "gamma_criterion", "gamma_solver"} & set(smp))
+    if stray_gamma and not adaptive_gamma:
+        raise ValueError(
+            f"sampler.{stray_gamma} are adaptive-gamma keys and gamma_mode is "
+            f"{gamma_mode!r}, which reads the fitted exponents instead. Add "
+            '"gamma_mode": "adaptive", or drop them.'
+        )
+    if gamma_override is not None and adaptive_gamma:
+        # Two sources of truth for one number. The adaptive mode exists to
+        # REPLACE the stated exponents by solving them per level, so a params
+        # file that states both has not decided which experiment it is running,
+        # and whichever one won would be invisible in the log.
+        raise ValueError(
+            "auxiliary.gamma states the exponents and "
+            "sampler.gamma_mode='adaptive' solves them per level from the trial "
+            "weights; a run cannot do both. Drop auxiliary.gamma to solve, or "
+            'drop "gamma_mode": "adaptive" to use the stated values.'
+        )
+    if "pr_target" in smp and not adaptive_gamma:
+        # the same failure the short_range stray-key check prevents: a key that
+        # is read by nothing, in a file whose author believes it is in force
+        raise ValueError(
+            "sampler.pr_target is an adaptive-gamma key and gamma_mode is "
+            f"{gamma_mode!r}, which reads the fitted exponents instead. Add "
+            '"gamma_mode": "adaptive", or drop pr_target.'
+        )
+    if adaptive_gamma:
+        if "pr_target" not in smp:
+            raise ValueError(
+                "sampler.gamma_mode='adaptive' requires sampler.pr_target: the "
+                "target participation fraction PR / k, in (0, 1], e.g. 0.4. "
+                "There is no default, because the whole point of the mode is "
+                "that the exponent follows from a stated target rather than "
+                "from a number nobody chose."
+            )
+        if isinstance(smp["pr_target"], list):
+            raise ValueError(
+                "sampler.pr_target is a list (a sweep), but a single run got it "
+                "unexpanded. Launch sweeps with `python -m gcmc.run.launcher` "
+                "(not `gcmc run`); if you already did, the launcher on this "
+                "machine is an older version that does not expand 'pr_target' "
+                "-- update gcmc/run/launcher.py."
+            )
+        gamma_criterion_val = str(smp.get("gamma_criterion", "participation"))
+        if gamma_criterion_val not in _GAMMA_CRITERIA:
+            raise ValueError(
+                f"unknown sampler.gamma_criterion {gamma_criterion_val!r}; "
+                f"allowed {sorted(_GAMMA_CRITERIA)}. 'participation' measures "
+                f"the spread of the trial weights by PR = (sum w)^2 / sum w^2, "
+                f"'perplexity' by exp(-sum p log p). Both run 1 to k and both "
+                f"read 1 on flat weights, so pr_target means the same kind of "
+                f"thing under either; they differ in how hard one dominant "
+                f"trial pulls them down."
+            )
+        gamma_solver_val = str(smp.get("gamma_solver", "moments"))
+        if gamma_solver_val not in _GAMMA_SOLVERS:
+            raise ValueError(
+                f"unknown sampler.gamma_solver {gamma_solver_val!r}; allowed "
+                f"{sorted(_GAMMA_SOLVERS)}. 'moments' solves the exponent in "
+                f"closed form from two weighted moments of log b; 'grid' "
+                f"evaluates the spread at 17 candidate exponents and takes the "
+                f"closest, which is where the method's cost was. Both answer "
+                f"the same question to within about a percent of pr_target, so "
+                f"'grid' is for the pilot run that shows that, not for "
+                f"production."
+            )
+        pr_target_val = float(smp["pr_target"])
+        if not (0.0 < pr_target_val <= 1.0):
+            raise ValueError(
+                f"sampler.pr_target must satisfy 0 < pr_target <= 1, got "
+                f"{pr_target_val!r}: it is a FRACTION of the trial pool "
+                f"(PR / k), not a gamma. The fitted exponents were 0.0037 to "
+                f"0.2903; a participation fraction of 0.29 is a legal but very "
+                f"aggressive target, and 2.0 is not a fraction at all."
+            )
+        # THE SAMPLER AXIS IS NOT CHECKED HERE. `_check_sampler` already ran
+        # (it is called on every params file, before any of this), and
+        # `_GAMMA_KEYS` is listed against `rosenbluth` alone, so any other
+        # sampler has already been refused by name with its own reason. A second
+        # check would be unreachable, and an unreachable refusal is worse than
+        # none: it reads as the live one and rots without failing.
+        assert sampler == "rosenbluth"
+        if engine != "metropolis_dynamics":
+            raise ValueError(
+                f"sampler.gamma_mode='adaptive' is a property of the "
+                f"Rosenbluth level loop and engine.type is {engine!r}. The "
+                f"ladder dynamics ({', '.join(_LADDER_ENGINES)}) draw the "
+                f"occupancy k from an exact conditional distribution over the "
+                f"whole window and never walk levels, so there is no per-level "
+                f"exponent to solve. This is the dynamics axis."
+            )
+        if not pmf:
+            raise ValueError(
+                "sampler.gamma_mode='adaptive' solves the exponent of the pmf "
+                "selection bias, and no pmf auxiliary is configured"
+                + (
+                    " (auxiliary.type='short_range' is the same potential at a "
+                    "shorter radius: no table, no exponent)."
+                    if short_range
+                    else " (add an `auxiliary` block with type='pmf')."
+                )
+                + " With no bias there is nothing for a participation target "
+                "to tune: the weights are the Boltzmann factors and their "
+                "participation is whatever it is."
+            )
+        if two_dim:
+            raise ValueError(
+                "sampler.gamma_mode='adaptive' is 3D-only. The 2D pmf "
+                "auxiliary is the analytic hard-disk g(r), which is 0 inside "
+                "the core by construction and has neither a table to floor nor "
+                "an interpolated bias to raise to a solved exponent. This is "
+                "the dimension axis: drop ensemble.dimension = 2, or drop "
+                "gamma_mode."
+            )
+        if parallel:
+            # NOT a category error, unlike the refusals above: the parallel
+            # engine runs the same Rosenbluth passes and the solve would mean
+            # exactly what it means serially. Its two `select_forward` /
+            # `select_reverse` call sites in `engine.cell_parallel` are simply
+            # not threaded yet, and an untested path that silently reads the
+            # fitted exponents while the config says otherwise is worse than a
+            # refusal.
+            raise ValueError(
+                "sampler.gamma_mode='adaptive' is not wired for run.kind="
+                "'parallel' yet: `engine.cell_parallel` has its own "
+                "select_forward / select_reverse call sites and they still "
+                "read the fitted exponents. Run it with run.kind='single', or "
+                "wire those two call sites. This is a missing feature on the "
+                "execution axis, not a physics restriction."
+            )
 
     # ---- short-range auxiliary support matrix -----------------------------
     # Deliberately narrow. Every rejection is a combination that is either
@@ -2920,7 +3381,24 @@ def from_params(p: dict[str, Any]) -> Config:
             if pmf and not two_dim and aux_block is not None
             else None
         ),
+        min_g3=(
+            float(aux_block["min_g3"])
+            if pmf and not two_dim and aux_block is not None and "min_g3" in aux_block
+            else None
+        ),
+        # DERIVED, not a key. The g3 reader is a constant of the code, but it
+        # is a constant that CHANGED: runs before it interpolated the table and
+        # runs after it read the nearest tabulated point, which selects
+        # different trials. Carrying the marker into the identity is what stops
+        # an old pmf run directory from being resumed by a run whose numbers
+        # moved. Absent (None) whenever there is no table to read.
+        g3_r_cut=g3_r_cut_val,
+        g3_reader=(auxiliary.G3_READER if pmf and not two_dim else None),
         aux_cutoff=aux_cutoff,
+        gamma_mode=gamma_mode,
+        pr_target=(pr_target_val if adaptive_gamma else None),
+        gamma_criterion=(gamma_criterion_val if adaptive_gamma else None),
+        gamma_solver=(gamma_solver_val if adaptive_gamma else None),
         two_dim=two_dim,
         parallel=parallel,
         beta=beta,
@@ -2935,7 +3413,11 @@ def from_params(p: dict[str, Any]) -> Config:
         volume_of_molecule=vol_mol,
         total_volume=total_vol,
         lj_tail_pref=lj_tail_pref,
-        gamma_dict=_gamma_dict(pmf, reweight, two_dim),
+        gamma_dict=(
+            gamma_override
+            if gamma_override is not None
+            else _gamma_dict(pmf, reweight, two_dim)
+        ),
         mode=kind,
         n_workers=(_plan.n_cells if parallel else 1),
         n_cell=n_cell_submitted,
@@ -2957,6 +3439,7 @@ def from_params(p: dict[str, Any]) -> Config:
         initial_config=run.get("initial_config"),
         matrix_config=run.get("matrix_config"),
         sweep_label=run.get("sweep_label"),
+        esjd=_as_bool(run.get("esjd", False), "run.esjd"),
         pore_geometry=_pore_geometry,
         pore_H=_pore_H,
         pore_R=_pore_R,

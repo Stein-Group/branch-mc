@@ -51,7 +51,8 @@ def _run(mus: dict, *, box: float, n_windows: int, suppress_swap: bool, seed: in
     cfg = sim_setup.from_params(
         {
             "potential": {"main": "lennard_jones", "T": 2.0, "species_file": _FILE},
-            "sampler": {"type": "rosenbluth", "depth": 0, "trials": 20},
+            "sampler": {"type": "rosenbluth", "trials": 20},
+            "engine": {"depth": 0},
             "ensemble": {"mu": mus, "dimension": 3, "box": box},
             "run": {"sampling_window": 300},
         }
@@ -149,7 +150,8 @@ def _z_of() -> np.ndarray:
     cfg = sim_setup.from_params(
         {
             "potential": {"main": "lennard_jones", "T": 2.0, "species_file": _FILE},
-            "sampler": {"type": "rosenbluth", "depth": 0, "trials": 20},
+            "sampler": {"type": "rosenbluth", "trials": 20},
+            "engine": {"depth": 0},
             "ensemble": {"mu": _SKEWED, "dimension": 3, "box": 8.0},
             "run": {"sampling_window": 300},
         }

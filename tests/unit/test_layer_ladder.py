@@ -104,6 +104,11 @@ LAYERS: dict[str, int] = {
     # -- L5 sampling --------------------------------------------------------
     "sampling.base": 5,
     "sampling.rosenbluth": 5,
+    # Adaptive gamma's solver. L5 by content and by edge: it answers "how should
+    # this trial cloud be weighted", which is the layer's question, and it
+    # imports nothing in-package but `_types` (L0), so it sits at the bottom of
+    # L5 with `rosenbluth` and both engine passes above it.
+    "sampling.participation": 5,
     "sampling.branch": 5,
     "sampling.channel": 5,
     "sampling.channel_cyclic": 5,  # R16: shared DP, own mask policy
@@ -199,6 +204,11 @@ _SHIMS = {
 # The fourth is the P4 extraction still importing from the sampler it was
 # extracted from. The shared pieces move down into `channel_move`; `channel`
 # then imports them, which is the direction P4 intended.
+#
+# The table below holds three of them now: the two `max_core_floor`/overlap
+# entries went away at S2 when those functions moved down to L1, which is what
+# an allowance is supposed to do, and the cube-cavity sweep joined the factory
+# pair it belongs with.
 KNOWN_INVERSIONS: dict[tuple[str, str], str] = {
     # What remains after S2 moved the body GEOMETRY down to `body` (L2): the
     # sweep CLASSES. `ChannelBody.sweep()` is a factory picking one of four
@@ -217,6 +227,21 @@ KNOWN_INVERSIONS: dict[tuple[str, str], str] = {
         "proposals.channel_move",
         "sampling.channel_cyclic",
     ): "S5: R7 collapses the sweeps; the factory goes with them",
+    # THE THIRD MEMBER OF THE SAME FINDING, not a new one. `ChannelBody.sweep()`
+    # picks `CavitySweep` for the cube geometry, where the transfer matrix it
+    # would otherwise build has an eviction window the size of the pool and a
+    # 2^M state count. Same factory, same layer-5 decision in a layer-4 module,
+    # and the same resolution: R7 collapses every sweep into one dynamic program
+    # selected by a mask policy, after which `sweep()` hands a policy object
+    # down and imports no sampler class at all.
+    #
+    # The import is DEFERRED (inside the method) rather than at module scope,
+    # which keeps the cycle out of import time but is still a runtime edge, and
+    # this test is right to count it as one.
+    (
+        "proposals.channel_move",
+        "sampling.branch",
+    ): "S5: R7 collapses the sweeps; the cube-cavity factory goes with them",
 }
 
 

@@ -101,7 +101,8 @@ def _branch_params(box):
     # reaches the orthorhombic guard rather than failing earlier
     return {
         "potential": {"main": "hard_core"},
-        "sampler": {"type": "branch", "depth": 1, "trials": 30, "trial_box_side": 3.0},
+        "sampler": {"type": "branch", "trials": 30, "trial_box_side": 3.0},
+        "engine": {"depth": 1},
         "ensemble": {"mu": 3.0, "dimension": 3, "box": box, "type": "muVT"},
         "run": {"kind": "single", "radius": 0.5, "sampling_window": 60},
     }

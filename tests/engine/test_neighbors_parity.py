@@ -202,7 +202,7 @@ _WEIGHT_MODES = {
     ),
     "ljbranch": (
         {"main": "lennard_jones", "T": 0.85},
-        {"type": "branch", "depth": 1, "trials": 20, "trial_box_side": 3.0},
+        {"type": "branch", "trials": 20, "trial_box_side": 3.0},
         3,
     ),
     "reweight": (

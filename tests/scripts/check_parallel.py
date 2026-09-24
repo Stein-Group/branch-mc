@@ -54,8 +54,8 @@ def run_parallel(n_win):
             "type": "rosenbluth",
             "trials": K,
             "trial_box_side": 2 * CAVR,
-            "depth": 0,
         },
+        "engine": {"depth": 0},
         "run": {
             "kind": "parallel",
             # manual geometry ON PURPOSE: this section's eta parity is pinned to
@@ -87,8 +87,8 @@ def run_serial(n_win):
             "type": "rosenbluth",
             "trials": K,
             "trial_box_side": 2 * CAVR,
-            "depth": 0,
         },
+        "engine": {"depth": 0},
         "run": {
             "kind": "single",
             "sampling_window": WIN,
@@ -198,10 +198,10 @@ _rejected(
         "sampler": {
             "type": "channel",
             "trial_density": 2.0,
-            "depth": 1,
             "channel_length": 6.0,
             "channel_width": 1.5,
         },
+        "engine": {"depth": 1},
         "run": {
             "kind": "parallel",
             "sampling_window": 50,

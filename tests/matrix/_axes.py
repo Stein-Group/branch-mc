@@ -128,7 +128,7 @@ AXES: tuple[Axis, ...] = (
     # is legal only with `sampler = channel` at depth >= 1, so the product puts
     # every illegal pair in front of the validator and the matrix records which
     # message each one produced.
-    Axis("engine", _enum_at("sampler.engine")),
+    Axis("engine", _enum_at("engine.type")),
     Axis("depth", DEPTH_VALUES),
     Axis("dimension", _enum_at("ensemble.dimension")),
     Axis("ensemble", _enum_at("ensemble.type")),
@@ -250,21 +250,26 @@ def build_params(point: Point, matrix_dir: Path | None = None) -> dict[str, Any]
         potential["species_file"] = str(_FF / point.species_file)
 
     sampler: dict[str, Any] = {"type": point.sampler}
+    # THE DYNAMICS AND ITS KNOBS NOW LIVE IN THEIR OWN BLOCK. `sampler` says
+    # where the trial cloud comes from; `engine` says what is done with it, and
+    # the group size and the repacking switch are the second question.
+    #
     # The DEFAULT is written only when it is not the default, so a
     # `metropolis_dynamics` point produces exactly the params file it produced before
     # this axis existed -- which is what keeps every tier-2 digest of an
     # existing point where it was.
+    engine: dict[str, Any] = {}
     if point.engine != "metropolis_dynamics":
-        sampler["engine"] = point.engine
+        engine["type"] = point.engine
     # metropolis is standard GCMC: it is depth-0 by definition and the validator
     # forbids depth, trials, trial_density and trial_box_side outright. Depth is
     # a BRANCH-MC concept and does not apply, so the axis is simply not written
     # (and `_redundant` collapses the duplicate points that would result).
     if point.sampler != "metropolis":
         if point.depth == "full_repacking":
-            sampler["full_repacking"] = True
+            engine["full_repacking"] = True
         else:
-            sampler["depth"] = point.depth
+            engine["depth"] = point.depth
     if point.sampler in ("channel", "channel_cyclic"):
         # A channel draws its cloud by DENSITY, not by count: the rod's length
         # (and hence its trial count) changes per move for a full-span rod, so a
@@ -317,6 +322,11 @@ def build_params(point: Point, matrix_dir: Path | None = None) -> dict[str, Any]
             "seed": SEED,
         },
     }
+    # ABSENT WHEN EMPTY, not `{}`: a metropolis point with no group size wrote
+    # no such block before this move and must keep writing none, or every
+    # metropolis digest shifts for a spelling change.
+    if engine:
+        params["engine"] = engine
 
     if point.auxiliary is not None:
         aux: dict[str, Any] = {"type": point.auxiliary}

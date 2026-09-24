@@ -6,6 +6,7 @@ Config-level only: nothing here advances a chain or spawns a process. All fast.
 from __future__ import annotations
 
 import pytest
+from _harness import split_engine
 
 from gcmc.run.hash_fingerprint import run_id
 from gcmc.run.sim_setup import from_params
@@ -14,13 +15,22 @@ MFM = [31.322, 31.322, 24.994]
 
 
 def _p(run, *, box=30.0, sampler=None, dim=3):
-    return {
+    """A parallel params file. `sampler` is written in the flat pre-migration
+    spelling and split, so a caller can pass `depth` without knowing which
+    block it lives in now."""
+    smp, eng = split_engine(
+        sampler
+        or {"type": "rosenbluth", "depth": 0, "trials": 30, "trial_box_side": 3.0}
+    )
+    out = {
         "potential": {"main": "hard_core"},
-        "sampler": sampler
-        or {"type": "rosenbluth", "depth": 0, "trials": 30, "trial_box_side": 3.0},
+        "sampler": smp,
         "ensemble": {"mu": 2.0, "dimension": dim, "box": box},
         "run": {"kind": "parallel", **run},
     }
+    if eng:
+        out["engine"] = eng
+    return out
 
 
 # ------------------------------------------------------------- one cell, one core
@@ -140,10 +150,10 @@ def test_manual_buffer_below_the_interaction_reach_is_refused():
         "potential": {"main": "lennard_jones", "T": 1.5},
         "sampler": {
             "type": "rosenbluth",
-            "depth": 0,
             "trials": 30,
             "trial_box_side": 3.0,
         },
+        "engine": {"depth": 0},
         "ensemble": {"mu": -3.0, "dimension": 3, "box": 30.0},
         "run": {
             "kind": "parallel",
@@ -173,10 +183,10 @@ def test_auto_mode_derives_the_buffer_from_the_reach():
             "potential": {"main": "lennard_jones", "T": 1.5},
             "sampler": {
                 "type": "rosenbluth",
-                "depth": 0,
                 "trials": 30,
                 "trial_box_side": 3.0,
             },
+            "engine": {"depth": 0},
             "ensemble": {"mu": -3.0, "dimension": 3, "box": 30.0},
             "run": {"kind": "parallel", "n_cell": 8, "upper_cutoff": 2.5},
         }
@@ -193,10 +203,10 @@ def test_the_lj_reach_follows_upper_cutoff():
             "potential": {"main": "lennard_jones", "T": 1.5},
             "sampler": {
                 "type": "rosenbluth",
-                "depth": 0,
                 "trials": 30,
                 "trial_box_side": 3.0,
             },
+            "engine": {"depth": 0},
             "ensemble": {"mu": -3.0, "dimension": 3, "box": 30.0},
             "run": {"kind": "parallel", "n_cell": 8, "upper_cutoff": 3.2},
         }
@@ -244,10 +254,10 @@ def test_a_parallel_run_and_its_serial_twin_share_an_identity():
             "potential": {"main": "hard_core"},
             "sampler": {
                 "type": "rosenbluth",
-                "depth": 0,
                 "trials": 30,
                 "trial_box_side": 3.0,
             },
+            "engine": {"depth": 0},
             "ensemble": {"mu": 2.0, "dimension": 3, "box": 30.0},
             "run": {"kind": "single"},
         }

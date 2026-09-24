@@ -75,6 +75,14 @@ class PotentialSpec:
     y_spacing: float | None
     volume_of_molecule: float
     g3_csv: str | None
+    min_g3: float | None
+    #: radius beyond which a neighbour contributes nothing to the 3D bias;
+    #: None means every neighbour inside the potential cutoff contributes
+    g3_r_cut: float | None
+    #: which reader the g3 table is read with (`auxiliary.G3_READER`), or None
+    #: where there is no table. Derived, not configurable; see
+    #: `config_fields.POTENTIAL` for why it is still part of the identity.
+    g3_reader: str | None
     aux_cutoff: float | None
     species_identity: Any
 
@@ -108,6 +116,19 @@ class SamplerSpec:
     channel_width: float
     channel_cyclic: bool
     radius: float
+    #: fixed = the nine fitted pmf exponents; adaptive = solve one per
+    #: Rosenbluth level for a target participation fraction. None means the key
+    #: was absent, which is fixed as well -- see `config_fields.SAMPLER` for why
+    #: this is identity-bearing and why absent and explicit "fixed" are not the
+    #: same run.
+    gamma_mode: str | None
+    #: target participation fraction PR / k; None unless gamma_mode is adaptive
+    pr_target: float | None
+    #: participation | perplexity; None unless gamma_mode is adaptive
+    gamma_criterion: str | None
+    #: moments | grid; None unless gamma_mode is adaptive. Which solver returns
+    #: the exponent: the closed-form expansion or the 17-point grid search.
+    gamma_solver: str | None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -180,6 +201,8 @@ class IOSpec:
     log_drop: tuple[str, ...] | None
     initial_config: str | None
     sweep_label: str | None
+    #: record the ESJD counters in each window summary (and in the log)
+    esjd: bool
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

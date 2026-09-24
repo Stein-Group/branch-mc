@@ -15,6 +15,8 @@ Field semantics, unchanged from the original:
   species             (N,)      per-trial type id (default 0, single species)
   pool_row            (N,)      this atom's row in the pool it was drawn from
                                 (default -1, "not from a pool")
+  log_bias            (N,)      log of the level-1 selection bias, UNEXPONENTIATED
+                                (default 0, i.e. bias 1 / no bias)
 
 Method behaviour is kept identical, including the two that callers depend on:
   delete(i)  mutates in place and returns self
@@ -52,6 +54,7 @@ class TrialSet:
         "cossum",
         "counts",
         "energy_weight",
+        "log_bias",
         "pool_row",
         "ref_neighbor_coord",
         "sinsum",
@@ -68,15 +71,18 @@ class TrialSet:
         ref_neighbor_coord: FloatArray | None = None,
         species: IntArray | None = None,
         pool_row: IntArray | None = None,
+        log_bias: FloatArray | None = None,
     ) -> None:
         """Wrap the given arrays; omitted optional fields default to neutral
         values (unit phasors/counts, zero reference coordinates, species 0) so
         modes that do not use them can ignore them safely.
 
-        `species` is LAST in the signature because every existing caller builds a
-        TrialSet positionally, and the neutral default of all-zeros is the
-        single-species case: type 0 is the one guest, which is what every method
-        below produced before the field existed.
+        New fields go LAST in the signature, because existing callers build a
+        TrialSet positionally and a field inserted in the middle would silently
+        shift their arguments. Each new field's default is its neutral value, so
+        those callers keep producing exactly what they produced before the field
+        existed: species 0 is the one guest of a single-species run, pool_row -1
+        is "not from a pool", and log_bias 0 is a bias of 1.
         """
         n = len(coords)
         self.coords = coords
@@ -124,6 +130,33 @@ class TrialSet:
             raise ValueError(
                 f"pool_row column has {len(self.pool_row)} entries for {n} trials"
             )
+        # THE LEVEL-1 BIAS, NOT YET RAISED TO ANYTHING. Zero everywhere means
+        # bias 1, which is the no-bias case and what every mode but adaptive
+        # gamma leaves it as.
+        #
+        # This is a column rather than a local array because of WHERE it is
+        # produced and WHO reads it. `_weighted_trials` computes it at pool-build
+        # time, before the forward and reverse passes diverge; the engine then
+        # merges the surviving trials with the tombstoned members and PERMUTES
+        # the result (`pool = pool[perm]`), and the Rosenbluth selection deletes
+        # and masks rows between levels. An array held outside the struct would
+        # be scrambled by the permutation and stale after the first mask, which
+        # is the same argument the `pool_row` comment above makes for
+        # provenance. Held here it rides along, because every method below
+        # preserves row alignment across every field.
+        #
+        # Deeper levels do NOT need this: their increment is produced and
+        # consumed inside one iteration of the selection loop, so it stays a
+        # local. Level 1 is the only value that has to cross the permutation.
+        #
+        # Named for the bias in general and not for g3: the slot is "the part of
+        # the weight the exponent applies to", and the tabulated three-body g3
+        # is merely the only bias that currently fills it.
+        self.log_bias = np.zeros(n, dtype=float) if log_bias is None else log_bias
+        if len(self.log_bias) != n:
+            raise ValueError(
+                f"log_bias column has {len(self.log_bias)} entries for {n} trials"
+            )
 
     def __len__(self) -> int:
         """Number of trials in the set."""
@@ -154,6 +187,7 @@ class TrialSet:
                 self.ref_neighbor_coord[index],
                 self.species[index],
                 self.pool_row[index],
+                self.log_bias[index],
             )
         return (
             self.coords[index],
@@ -189,6 +223,7 @@ class TrialSet:
             self.ref_neighbor_coord[boolean_mask],
             self.species[boolean_mask],
             self.pool_row[boolean_mask],
+            self.log_bias[boolean_mask],
         )
 
     def delete(self, index: int | IntArray) -> TrialSet:
@@ -202,6 +237,7 @@ class TrialSet:
         self.ref_neighbor_coord = np.delete(self.ref_neighbor_coord, index, axis=0)
         self.species = np.delete(self.species, index, axis=0)
         self.pool_row = np.delete(self.pool_row, index, axis=0)
+        self.log_bias = np.delete(self.log_bias, index, axis=0)
         return self
 
     def copy(self) -> TrialSet:
@@ -216,6 +252,7 @@ class TrialSet:
             self.ref_neighbor_coord.copy(),
             self.species.copy(),
             self.pool_row.copy(),
+            self.log_bias.copy(),
         )
 
     def merge(self, other: TrialSet) -> TrialSet:
@@ -231,4 +268,5 @@ class TrialSet:
             np.vstack([self.ref_neighbor_coord, other.ref_neighbor_coord]),
             np.hstack([self.species, other.species]),
             np.hstack([self.pool_row, other.pool_row]),
+            np.hstack([self.log_bias, other.log_bias]),
         )

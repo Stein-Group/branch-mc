@@ -65,6 +65,31 @@ POTENTIAL: tuple[str, ...] = (
     "y_spacing",  # pmf grid
     "volume_of_molecule",  # sets the packing fraction the pmf is read at
     "g3_csv",  # 3D pmf table -- hashed by CONTENT digest, not path
+    # 3D pmf g3 floor. PHYSICS by the rule at the top of this file: it does
+    # not move the sampled ensemble (the bias is divided back out), but it
+    # changes which trial gets selected, so two runs differing here are two
+    # different proposal distributions and must not share a run directory.
+    # None (the default 1/n_trials) and an explicit 1/n_trials are the same
+    # floor but NOT the same identity, and that is correct: the second says
+    # the floor was pinned deliberately.
+    "min_g3",
+    # WHICH READER the 3D pmf table is read with. DERIVED from the auxiliary
+    # (there is one reader, `auxiliary.G3_READER`) and not a config key, but
+    # identity-bearing all the same, which is the point of it: the reader
+    # changed from interpolating four tabulated corners to taking the nearest
+    # tabulated point, and the two select different trials. Neither can move an
+    # equilibrium average, because the bias is divided back out of the
+    # acceptance -- but they are two proposal distributions, and without this
+    # marker the run before the change and the run after it would share a run id
+    # and resume each other. None where there is no table to read (2D, or no
+    # pmf auxiliary), so nothing but a 3D pmf run sees it at all.
+    # THE BIAS CUTOFF, 3D pmf only. Physics by the same rule as `min_g3` and
+    # `gamma`: it cannot move an equilibrium average, because the bias is
+    # divided back out, and it changes which trial is selected. None means every
+    # neighbour inside the potential cutoff contributes, which is what every run
+    # before this key did, so no pre-existing run id moves.
+    "g3_r_cut",  # None | radius in diameters
+    "g3_reader",  # None | the value of auxiliary.G3_READER
     "aux_cutoff",  # short-range auxiliary radius
     # PROPERTY, and PHYSICS: the canonical hashable form of the force field --
     # a digest over sigma, epsilon, k_ij, the core floor, rc, the auxiliary
@@ -114,6 +139,44 @@ SAMPLER: tuple[str, ...] = (
     "channel_width",
     "channel_cyclic",  # R16: derived from `sampler`, kept for the reduction check
     "radius",  # hard-core radius; `diameter` is its derived twin
+    # ADAPTIVE GAMMA. `fixed` reads the nine fitted exponents in
+    # `gamma_dict`; `adaptive` solves one per Rosenbluth level from the trial
+    # weights to hit `pr_target`, a target participation fraction PR / k.
+    #
+    # PHYSICS by the rule at the top of this file, and for the same reason
+    # `min_g3` is: neither moves the sampled ensemble, because the bias is
+    # divided back out of the acceptance, and both change which trial is
+    # selected. Two runs differing here are two proposal distributions and must
+    # not share a run directory. That is also why `pr_target` cannot be tuned
+    # from a run's own acceptance statistics: a constant of the run is a
+    # constant, and a mid-run update makes the kernel a function of chain
+    # history.
+    #
+    # SAMPLER and not POTENTIAL, although the bias it tunes is a potential key.
+    # The exponent is a property of the SELECTION, which is what `sampler`
+    # names: the same g3 table under two targets is one potential proposing two
+    # different ways.
+    # None (absent) and "fixed" are the same arithmetic and different run ids,
+    # the convention `min_g3` set: absent keeps every pre-existing run id,
+    # because `identity_dict` drops a None physics field, while pinning the
+    # default says it was pinned on purpose.
+    "gamma_mode",  # None (absent) | fixed | adaptive
+    "pr_target",  # adaptive only: target PR / k, in (0, 1]
+    # WHICH SPREAD the target is measured with: the participation ratio (a
+    # second moment) or perplexity (an entropy). Physics for the same reason
+    # `pr_target` is -- the same target under two criteria selects differently,
+    # so the two are different proposal distributions. None on a fixed-gamma
+    # run, where nothing reads it.
+    "gamma_criterion",  # None | participation | perplexity
+    # WHICH SOLVER returns the exponent: `moments`, the second-order closed
+    # form, or `grid`, the 17-point search. Physics for the third time by the
+    # same argument: the two land within about a percent of each other on the
+    # target and neither can move an equilibrium average, but a percent in gamma
+    # is a different trial selected, so two runs differing here are two proposal
+    # distributions. Keeping it identity-bearing is also what makes the pilot
+    # comparison legible: the two arms cannot land in one run directory and be
+    # averaged together by accident. None on a fixed-gamma run.
+    "gamma_solver",  # None | moments | grid
 )
 
 ENSEMBLE: tuple[str, ...] = (
@@ -172,6 +235,11 @@ IO: tuple[str, ...] = (
     "log_drop",
     "initial_config",
     "sweep_label",
+    # MEASUREMENT, not physics: it adds counters to the window summary and
+    # changes nothing the chain does, so it belongs here and never reaches the
+    # run fingerprint. Two runs differing only in whether ESJD was recorded are
+    # the same experiment and must share a run directory.
+    "esjd",
 )
 
 # --------------------------------------------------------------- derived

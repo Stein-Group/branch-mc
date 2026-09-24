@@ -57,7 +57,6 @@ def test_channel_constraints():
     base_smp = {
         "type": "channel",
         "trial_density": 2.0,
-        "depth": 1,
         "channel_length": 6.0,
         "channel_width": 1.5,
     }
@@ -72,6 +71,7 @@ def test_channel_constraints():
             "potential": {"main": "hard_core"},
             "ensemble": {"mu": 2.0, "dimension": 2, "box": 12.0},
             "sampler": base_smp,
+            "engine": {"depth": 1},
             "run": {},
         }
     )
@@ -81,6 +81,7 @@ def test_channel_constraints():
             "potential": {"main": "hard_core"},
             "ensemble": {"mu": 2.0, "dimension": 3, "box": 12.0},
             "sampler": base_smp,
+            "engine": {"depth": 1},
             "run": {"kind": "parallel"},
         }
     )
@@ -89,7 +90,8 @@ def test_channel_constraints():
         {
             "potential": {"main": "hard_core"},
             "ensemble": {"mu": 2.0, "dimension": 3, "box": 12.0},
-            "sampler": {**base_smp, "depth": 0},
+            "sampler": base_smp,
+            "engine": {"depth": 0},
             "run": {},
         }
     )
@@ -114,8 +116,8 @@ def test_qa_constraints():
                 "type": "rosenbluth",
                 "trials": 20,
                 "trial_box_side": 3.0,
-                "depth": 0,
             },
+            "engine": {"depth": 0},
             "run": {"matrix_config": "/tmp/m.xyz"},
         }
     )
@@ -156,22 +158,25 @@ def test_parallel_support_matrix():
     # parallel in both 2D and 3D; from_params must accept every one of those
     # six. This is the case the old test_item29 never probed directly, so the
     # relaxation slipped past the unit tier and only check_parallel caught it.
+    # (sampler block, engine block) per sampler
     samplers = {
-        "metropolis": {"type": "metropolis"},
-        "rosenbluth": {
-            "type": "rosenbluth",
-            "trials": 20,
-            "trial_box_side": 3.0,
-            "depth": 0,
-        },
-        "branch": {"type": "branch", "trials": 20, "trial_box_side": 3.0, "depth": 1},
+        "metropolis": ({"type": "metropolis"}, {}),
+        "rosenbluth": (
+            {"type": "rosenbluth", "trials": 20, "trial_box_side": 3.0},
+            {"depth": 0},
+        ),
+        "branch": (
+            {"type": "branch", "trials": 20, "trial_box_side": 3.0},
+            {"depth": 1},
+        ),
     }
     for dim in (2, 3):
-        for smp in samplers.values():
+        for smp, eng in samplers.values():
             p = {
                 "potential": {"main": "hard_core"},
                 "ensemble": {"mu": 1.0, "dimension": dim, "box": 30.0},
                 "sampler": smp,
+                "engine": eng,
                 "run": _parallel_run(dim),
             }
             from_params(p)  # must not raise
@@ -194,10 +199,10 @@ def test_parallel_support_matrix():
             "sampler": {
                 "type": "channel",
                 "trial_density": 2.0,
-                "depth": 1,
                 "channel_length": 6.0,
                 "channel_width": 1.5,
             },
+            "engine": {"depth": 1},
             "run": _parallel_run(3),
         }
     )
@@ -232,8 +237,8 @@ def test_supported_combinations_build():
                 "type": "branch",
                 "trials": 20,
                 "trial_box_side": 3.0,
-                "depth": 1,
             },
+            "engine": {"depth": 1},
             "run": {},
         },
         {
@@ -242,10 +247,10 @@ def test_supported_combinations_build():
             "sampler": {
                 "type": "channel",
                 "trial_density": 2.0,
-                "depth": 1,
                 "channel_length": 6.0,
                 "channel_width": 1.5,
             },
+            "engine": {"depth": 1},
             "run": {},
         },
         {

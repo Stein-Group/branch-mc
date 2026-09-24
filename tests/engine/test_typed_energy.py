@@ -51,7 +51,8 @@ def _params(species_file: str | None, sampler: str = "rosenbluth") -> dict:
         ens = {"mu": {"A": _MU}, "dimension": 3, "box": _BOX}
     return {
         "potential": pot,
-        "sampler": {"type": sampler, "depth": 1, "trials": 20},
+        "sampler": {"type": sampler, "trials": 20},
+        "engine": {"depth": 1},
         "ensemble": ens,
         "run": {"sampling_window": 60},
     }

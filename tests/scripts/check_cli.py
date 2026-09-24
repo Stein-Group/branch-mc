@@ -20,7 +20,8 @@ ENV["PYTHONPATH"] = PKG_PARENT + os.pathsep + ENV.get("PYTHONPATH", "")
 BASE = {
     "potential": {"main": "hard_core"},
     "ensemble": {"mu": 3.0, "dimension": 3},
-    "sampler": {"type": "rosenbluth", "trials": 20, "trial_box_side": 3.0, "depth": 0},
+    "sampler": {"type": "rosenbluth", "trials": 20, "trial_box_side": 3.0},
+    "engine": {"depth": 0},
     "run": {
         "sampling_window": 200,
         "target_cycles": 400,

@@ -85,11 +85,11 @@ def _params(start, n, **ens_over):
         "potential": {"main": "lennard_jones", "T": 1.5, "species_file": MODEL},
         "sampler": {
             "type": "channel",
-            "depth": 1,
             "trial_density": 1.0,
             "channel_width": 1.5,
             "channel_length": 3.0,
         },
+        "engine": {"depth": 1},
         "ensemble": {k: v for k, v in ens.items() if v is not None},
         "run": {
             "kind": "single",
@@ -157,10 +157,10 @@ def test_a_single_species_nvt_run_still_refuses_mu(tmp_path):
                 "potential": {"main": "hard_core"},
                 "sampler": {
                     "type": "branch",
-                    "depth": 1,
                     "trials": 10,
                     "trial_box_side": 3.0,
                 },
+                "engine": {"depth": 1},
                 "ensemble": {
                     "type": "NVT",
                     "dimension": 3,

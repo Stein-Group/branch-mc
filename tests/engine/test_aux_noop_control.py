@@ -96,13 +96,17 @@ def _params(dim: int, rod: str, deep: str) -> dict:
     sampler: dict = {"type": rod, "trial_density": 0.6, "channel_width": 1.2}
     if rod == "channel":
         sampler["channel_length"] = 5.0
-    if deep == "repack":
-        sampler["full_repacking"] = True
-    else:
-        sampler["depth"] = 1 if deep == "depth1" else 2
+    # the exchange group size and the repacking switch are `engine` keys: they
+    # say what is DONE with the trial cloud, not where it comes from
+    engine: dict = (
+        {"full_repacking": True}
+        if deep == "repack"
+        else {"depth": 1 if deep == "depth1" else 2}
+    )
     return {
         "potential": {"main": "lennard_jones", "T": 0.85},
         "sampler": sampler,
+        "engine": engine,
         "ensemble": {"mu": -3.2, "dimension": dim, "box": 12.0},
         "run": {"sampling_window": 20},
     }
@@ -238,7 +242,6 @@ def _typed_ff(tmp_path: Path, aux: object) -> str:
 def _typed_params(ff_path: str, rod: str, depth: int) -> dict:
     sampler: dict = {
         "type": rod,
-        "depth": depth,
         "trial_density": 1.0,
         "channel_width": 1.5,
     }
@@ -251,6 +254,7 @@ def _typed_params(ff_path: str, rod: str, depth: int) -> dict:
             "species_file": ff_path,
         },
         "sampler": sampler,
+        "engine": {"depth": depth},
         "ensemble": {
             "mu": {"A": 1.0, "B": 1.0, "C": 1.0},
             "dimension": 3,

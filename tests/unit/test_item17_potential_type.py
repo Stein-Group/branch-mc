@@ -41,8 +41,8 @@ def test_config_property_matches_and_fields_are_orthogonal():
                 "type": "branch",
                 "trials": 20,
                 "trial_box_side": 3.0,
-                "depth": 1,
             },
+            "engine": {"depth": 1},
             "run": {},
         }
     )

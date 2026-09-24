@@ -82,7 +82,11 @@ logger = logging.getLogger(__name__)
 # working on old and new alike.
 
 _FORCED_GROUPS = ("core", "species")
-_OPTIONAL_GROUPS = ("state", "moves", "clique", "clique_acc", "glauber")
+# `esjd` is here rather than forced because `run.esjd` already gates whether
+# the columns exist at all; being a group as well means a run that asked for
+# them can still drop them from the log while keeping them in the summary, the
+# same way `clique` works.
+_OPTIONAL_GROUPS = ("state", "moves", "clique", "clique_acc", "glauber", "esjd")
 LOG_GROUPS = _FORCED_GROUPS + _OPTIONAL_GROUPS
 
 
@@ -194,6 +198,7 @@ def _column_table(
     canonical: bool = False,
     glauber: bool = False,
     suwa_todo: bool = False,
+    esjd: bool = False,
 ) -> list[tuple[str, int, str, str]]:
     """(name, width, group, value key) for every column this run can fill.
 
@@ -294,6 +299,28 @@ def _column_table(
     # and the three columns appear exactly where they can vary.
     if glauber:
         cols += _glauber_cols(suwa_todo=suwa_todo)
+    # PRESENT ONLY UNDER `run.esjd`, by the same rule as the Glauber block: a
+    # log that did not ask for them stays byte-identical to every log this
+    # project has written.
+    #
+    #   esjd_dNsq  sum (n_add - n_remove)^2 over ATTEMPTED moves. Divided by
+    #              wall_s it is E[dN^2] per second, the quantity this engine and
+    #              a rejection-free one can be raced on directly -- glb_dN_sq is
+    #              the same column on the other side. On THIS engine an exchange
+    #              moves N by exactly +/-1 at every depth, so it equals the
+    #              accepted exchange count.
+    #   esjd_drsq  sum of squared translation displacement, minimum imaged: the
+    #              classic ESJD, the one move_factor tunes, and the control arm
+    #              for a selection-bias change, which cannot touch it.
+    #   esjd_mov / esjd_trn  the two denominators, so per-MOVE forms are exact
+    #              over any span of rows rather than a mean of means.
+    if esjd:
+        cols += [
+            ("esjd_dNsq", 11, "esjd", "esjd.dN_sq"),
+            ("esjd_drsq", 11, "esjd", "esjd.dr_sq"),
+            ("esjd_mov", 10, "esjd", "esjd.moves"),
+            ("esjd_trn", 10, "esjd", "esjd.translations"),
+        ]
     return cols
 
 
@@ -1172,6 +1199,7 @@ def run(
                 canonical=(ens.ensemble_type == "NVT" and _species_names is not None),
                 glauber=samp.engine in LADDER_ENGINES,
                 suwa_todo=samp.engine == "suwa_todo_dynamics",
+                esjd=io_.esjd,
             )
             + _species_cols(_species_names),
             include=io_.log_columns,
@@ -1272,6 +1300,14 @@ def run(
                     values[f"glauber.{_k}"] = (
                         f"{_v:.6g}" if isinstance(_v, float) else _v
                     )
+                # ESJD, absent unless `run.esjd` asked for it -- in which case
+                # the columns are declared too, so the two either both appear or
+                # neither does. Formatted like the Glauber block: `dN_sq`,
+                # `moves` and `translations` are counts that happen to be
+                # carried as floats, and `%.6g` prints them as the integers they
+                # are while leaving `dr_sq` readable.
+                for _k, _v in (stats.get("esjd") or {}).items():
+                    values[f"esjd.{_k}"] = f"{_v:.6g}" if isinstance(_v, float) else _v
                 if _species_names is not None:
                     # Indexed BY NAME rather than `.get`-ed: on a typed run the
                     # engine always emits the composition, so a missing key is a

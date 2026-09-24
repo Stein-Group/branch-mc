@@ -20,8 +20,8 @@ BASE = {
         "type": "rosenbluth",
         "trial_density": 400,
         "trial_box_side": 3.0,
-        "depth": 0,
     },
+    "engine": {"depth": 0},
     "run": {"target_cycles": 1e6, "move_factor": 0.25},
 }
 

@@ -58,6 +58,12 @@
           "type": "string",
           "description": "Path to the g3 table; required in 3D."
         },
+        "min_g3": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "description": "3D pmf only; OPTIONAL. The floor applied to the tabulated g3(r, cos theta), both to the grid before interpolation and to the interpolated value. Omit for the historical default 1/sampler.trials, which moves whenever the trial count moves; pin it (e.g. 0.03) to make the selection bias independent of k. Forbidden in 2D, where the analytic hard-disk g(r) has no floor, and with auxiliary.type='short_range', which has no table."
+        },
         "eta": {
           "type": "number",
           "description": "2D analytic g(r) packing fraction (2D pmf only)."
@@ -72,6 +78,38 @@
           "type": "number",
           "exclusiveMinimum": 0,
           "description": "short_range only, and required for it: the radius the proposal and the clique sum are evaluated at, e.g. 1.5. Must satisfy run.lower_cutoff < cutoff <= run.upper_cutoff. The PHYSICS cutoff is always run.upper_cutoff and is not changed by this key; cutoff == run.upper_cutoff is legal and is the exact no-op control. Supported for sampler.type='channel' with potential.main='lennard_jones' in 3D bulk."
+        },
+        "gamma": {
+          "oneOf": [
+            {"type": "number", "minimum": 0},
+            {
+              "type": "array",
+              "items": {"type": "number", "minimum": 0},
+              "minItems": 1,
+              "maxItems": 9
+            },
+            {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {"type": "number", "minimum": 0},
+                  {
+                    "type": "array",
+                    "items": {"type": "number", "minimum": 0},
+                    "minItems": 1,
+                    "maxItems": 9
+                  }
+                ]
+              },
+              "minItems": 1
+            }
+          ],
+          "description": "pmf only; OPTIONAL. The selection-bias exponent per Rosenbluth level, in place of the fitted schedule in _GAMMA_AUX_2D / _GAMMA_AUX_3D. A SCALAR applies at every level (0.1 is the nine-vector of 0.1); an ARRAY of 1 to 9 values gives the first levels and leaves the rest at 0, so [0.29, 0.10, 0.03] biases the first three placements of a move and leaves deeper ones unbiased. Padding with zero rather than repeating the last value follows the fitted table, whose levels 7 to 9 are already 0, and is the safe direction: a missing entry costs efficiency while an extrapolated one applies a bias nobody chose at a depth nobody measured. Both dimensions read it, the 2D analytic hard-disk g(r) and the 3D tabulated g3 alike. Identity-bearing, since two exponents select differently; absent means the fitted schedule and keeps every pre-existing run id. Refused together with sampler.gamma_mode='adaptive', which solves the same number per level instead, and on auxiliary.type='short_range', which has no exponent. SWEEPABLE: to the launcher the outer list is always the sweep and each element is one arm, a scalar or an array, so [0.0, 0.05, 0.1] is three arms and [[0.29,0.10,0.03]] is one arm holding that array. A bare flat list is therefore a sweep of scalars; wrap an array to pin it. A nested list reaching a single run is refused by name, because it means the sweep was never expanded."
+        },
+        "g3_r_cut": {
+          "type": "number",
+          "exclusiveMinimum": 1,
+          "description": "3D pmf only; OPTIONAL. A neighbour further than this radius contributes NOTHING to the selection bias, i.e. its g3 factor is 1. Absent means every neighbour inside run.upper_cutoff contributes, which is what every run before this key did. WHY: the bias is a product over neighbours, so every pair multiplies in whether or not it carries information, and on data/g3_analysis_data.csv the angular structure dies out by r = 1.9 -- the spread of log g3 over cos theta falls from 2.8 at contact to 0.26 by r = 1.975, and pairs beyond r = 1.8 hold about 4% of the total variance while being roughly two thirds of the pairs. Those pairs cost time and make the bias depend on how MANY neighbours a trial has rather than on where it sits. Ranked offline with scripts/aux_variants.py, cutting at 1.8 to 1.9 raised the rank correlation between the bias and the room a choice leaves for the molecules still to be placed, at unchanged variance; cutting at 1.6 or below lowered it, so there is a real optimum and it should be measured on the configuration rather than assumed. Identity-bearing, like min_g3 and gamma: it cannot move an equilibrium average, because the bias is divided back out of the acceptance, and it changes which trial is selected. Refused in 2D, where the auxiliary is the analytic hard-disk g(r) with no neighbour product to truncate, and at or below contact, where every pair would be dropped and the bias would be identically 1 while still paying for the lookup."
         }
       }
     },
@@ -92,16 +130,6 @@
             "channel_cyclic"
           ],
           "description": "metropolis: single-particle. rosenbluth/branch: cavity-biased insertion (depth 0-3). channel: oriented-cuboid transfer-matrix sweep (3D, serial, depth >= 1 unless full_repacking). reweight: 2D hexatic. \"channel_cyclic\" is the wall-to-wall rod: it shares the dynamic program with \"channel\" but lifts the locality guard, computes true minimum-image distances over the whole pool, and sizes its trial count per move from the orientation -- substantially more expensive. Until 2026-08 it was selected by sampler.channel_length = \"cyclic\" (or the aliases \"full\", \"box\", \"full_box\", \"span\"), which made a different move look like a length; those spellings are now refused with a pointer to this sampler."
-        },
-        "depth": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "Cavity recursion depth; forbidden for metropolis. Any depth >= 0 is supported, serially and in parallel -- the cap of 3 that stood here until 2026-08 was a stale claim, not a constraint, and it REJECTED runs the engine handles. Mutually exclusive with full_repacking. Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side; channel takes those minus trial_box_side plus channel_length and channel_width; channel_cyclic takes depth, full_repacking, trial_density and channel_width (it spans the box, so it has no fixed length or trial count)."
-        },
-        "full_repacking": {
-          "type": "boolean",
-          "default": false,
-          "description": "XOR alternative to depth: repack the whole cavity each exchange, removing every sphere found and inserting one more (add), one fewer (remove), or the same count (repack). Ignores depth; do not give both. Cavity samplers only (not metropolis). Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side; channel takes those minus trial_box_side plus channel_length and channel_width; channel_cyclic takes depth, full_repacking, trial_density and channel_width (it spans the box, so it has no fixed length or trial count)."
         },
         "channel_length": {
           "oneOf": [
@@ -168,14 +196,57 @@
             }
           ]
         },
-        "engine": {
+        "gamma_mode": {
+          "enum": [
+            "fixed",
+            "adaptive"
+          ],
+          "description": "How the pmf selection-bias exponent is chosen. \"fixed\" (the default) reads the nine hand-fitted per-level numbers. \"adaptive\" replaces all nine with one target: it solves an exponent per Rosenbluth level, from the trial weights already in memory, so that the participation fraction PR / k of the level pool lands near sampler.pr_target. The level cap of 9 that the fitted schedule imposes disappears with it -- there is no ninth number to run out of, so a move inserting ten or more molecules gets a solved exponent instead of silently reusing level 9's. Requires sampler.type=\"rosenbluth\", a 3D auxiliary.type=\"pmf\", engine.type=\"metropolis_dynamics\" and run.kind=\"single\"; every other combination is refused by name on the axis that rules it out."
+        },
+        "pr_target": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "description": "Required by gamma_mode=\"adaptive\" and forbidden without it. The target participation fraction PR / k of a level's trial pool, where PR = (sum w)^2 / sum w^2 is the participation ratio (Kong's effective sample size, renamed because this project already reports a chain ESS from autocorrelation). 1.0 means flat weights and no effective bias; small values mean one trial takes nearly every pick. A VARIANCE KNOB ONLY: the bias is divided back out of the acceptance, so no value can move an equilibrium average, only the variance and the acceptance rate. An unreachable target leaves the level at gamma = 0, counted in the window summary's gamma_adaptive.clamped."
+        },
+        "gamma_criterion": {
+          "enum": [
+            "participation",
+            "perplexity"
+          ],
+          "description": "Adaptive gamma only; OPTIONAL, default \"participation\". Which spread of the level's trial weights sampler.pr_target is measured against: \"participation\" uses the participation ratio PR = (sum w)^2 / sum w^2, a second moment, which one dominant trial pulls almost to 1 whatever the rest look like; \"perplexity\" uses exp(-sum p log p), an entropy, which keeps reading the shape of the tail and carries less small-k bias. Both run from 1 to k and both read k on flat weights, so pr_target means the same kind of thing under either. The criterion applies at EVERY Rosenbluth level, depth included: it is a property of the run, not of the level."
+        },
+        "gamma_solver": {
+          "enum": [
+            "moments",
+            "grid"
+          ],
+          "description": "Adaptive gamma only; OPTIONAL, default \"moments\". How the exponent is obtained from the level's trial weights. \"moments\" solves a closed form: log(spread(gamma)/spread(0)) expanded to second order is a quadratic in gamma whose coefficients are two weighted moments of log b, so the answer costs two reductions and one square root and no exponentials. \"grid\" evaluates the spread at 17 candidate exponents and returns the closest, which is where the method's cost was: at k=200 with full_repacking that is about 1450 exponentials per move and 13% of move time, and ESJD per second has that in its denominator. The two land within about a percent of pr_target of each other and the expansion is often closer, because the grid can only return a grid point. Neither can move an equilibrium average. Identity-bearing all the same: a percent in gamma is a different trial selected, so the two arms are two proposal distributions and cannot share a run directory."
+        }
+      },
+      "description": "Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side; channel takes those minus trial_box_side plus channel_length and channel_width; channel_cyclic takes depth, full_repacking, trial_density and channel_width (it spans the box, so it has no fixed length or trial count). A CANONICAL run (ensemble.type='NVT' with a species file) proposes translations and pair identity exchanges and runs no trial cloud, so its whole sampler block is {\"type\": \"metropolis\"}."
+    },
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
           "enum": [
             "metropolis_dynamics",
             "glauber_dynamics",
             "suwa_todo_dynamics"
           ],
-          "default": "metropolis_dynamics",
           "description": "The DYNAMICS axis, which is not the same axis as sampler.type. `sampler.type` says how a trial cloud is PROPOSED; `engine` says what is then done with it. metropolis_dynamics (the default, and what an absent key means -- that is the backward-compatibility contract) is accept/reject dynamics: everything shipped before this key existed. glauber_dynamics computes the exact conditional distribution of a window's whole guest content and draws from it, so its exchange path has no acceptance test: dN = k_new - k_in may take any sign and any magnitude, and add/remove/repack cease to be separate move types. Same muVT ensemble, same z, same U -- a different transition kernel. Both ladder dynamics REQUIRE sampler.type='channel' with depth >= 1; refused with metropolis, rosenbluth, branch, reweight and channel_cyclic (the cyclic rod spans the box, so its exterior is not separable from its interior and the frozen-exterior argument the conditional is derived from has no meaning). Refuses the pmf and short-range auxiliaries: both are selection biases divided back out in an acceptance ratio, and this engine has none. Caps the trial density at 4 trials per sigma of channel length on the LJ path. Adding this key moves every run id, by decision: resuming a pre-engine run directory is not supported. Serial only. Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type and engine; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side and engine; channel takes those minus trial_box_side plus channel_length, channel_width and kmax_margin; channel_cyclic takes depth, full_repacking, trial_density, channel_width and engine (it spans the box, so it has no fixed length or trial count). suwa_todo_dynamics is the THIRD dynamics and the sibling of glauber_dynamics, not a variant of it: it builds the same window, the same pool and the same exact occupancy ladder, and then draws k from that ladder by the Suwa-Todo geometric allocation (PRL 105, 120603 (2010)) conditioned on the incoming occupancy, rather than categorically. glauber_dynamics is a heat bath and returns the incoming occupancy with probability P(k_in); the allocation is the pi-invariant kernel that MINIMISES that rate, and it achieves it by giving up detailed balance and keeping only global balance. Same muVT ensemble, same z, same U, same stationary distribution, so every physics gate written for glauber_dynamics applies verbatim. It takes exactly the keys glauber_dynamics takes, has the same refusals (sampler.type='channel', depth >= 1, no pmf or short-range auxiliary, serial only, lambda <= 4 on the LJ path), and adds none of its own. The gain is bounded: the rate at which k changes improves by at most a factor 2 over the heat bath and by much less for a ladder concentrated on one rung, so a run logs glb_st_hb and glb_st_rej and the ratio is measured rather than assumed."
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Cavity recursion depth; forbidden for metropolis. Any depth >= 0 is supported, serially and in parallel -- the cap of 3 that stood here until 2026-08 was a stale claim, not a constraint, and it REJECTED runs the engine handles. Mutually exclusive with full_repacking. Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side; channel takes those minus trial_box_side plus channel_length and channel_width; channel_cyclic takes depth, full_repacking, trial_density and channel_width (it spans the box, so it has no fixed length or trial count)."
+        },
+        "full_repacking": {
+          "type": "boolean",
+          "default": false,
+          "description": "XOR alternative to depth: repack the whole cavity each exchange, removing every sphere found and inserting one more (add), one fewer (remove), or the same count (repack). Ignores depth; do not give both. Cavity samplers only (not metropolis). Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side; channel takes those minus trial_box_side plus channel_length and channel_width; channel_cyclic takes depth, full_repacking, trial_density and channel_width (it spans the box, so it has no fixed length or trial count)."
         },
         "kmax_margin": {
           "type": "integer",
@@ -183,8 +254,7 @@
           "default": 0,
           "description": "The ladder dynamics (glauber_dynamics, suwa_todo_dynamics) only, and its ONLY new tunable: how far above the body's geometric packing bound the occupancy ladder is truncated. kmax = min(M, ceil(packing_bound(body)) + kmax_margin) and M = round(trial_density * channel_length * channel_width^(dim-1)); both are derived, so neither appears here. The bound is a rigorous over-estimate, so 0 is the honest default and a positive margin only widens the transfer matrix. Refused under engine=metropolis_dynamics, which has no ladder. Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type and engine; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side and engine; channel takes those minus trial_box_side plus channel_length, channel_width and kmax_margin; channel_cyclic takes depth, full_repacking, trial_density, channel_width and engine (it spans the box, so it has no fixed length or trial count)."
         }
-      },
-      "description": "Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side; channel takes those minus trial_box_side plus channel_length and channel_width; channel_cyclic takes depth, full_repacking, trial_density and channel_width (it spans the box, so it has no fixed length or trial count). A CANONICAL run (ensemble.type='NVT' with a species file) proposes translations and pair identity exchanges and runs no trial cloud, so its whole sampler block is {\"type\": \"metropolis\"}."
+      }
     },
     "ensemble": {
       "type": "object",
@@ -505,8 +575,11 @@
           "type": "integer"
         },
         "initial_config": {
-          "type": "string",
-          "description": "Starting configuration; omit to start fresh (bulk muVT starts empty, NVT/QA/confined seed a valid start). Three forms. (0) The literal token \"grid\" (not a path): bootstrap from a periodic-commensurate lattice at a reasonable fluid packing fraction -- 0.35 in 3D, 0.45 in 2D -- instead of from an empty box, for when growing from N=0 is too slow. \"grid:0.28\" (or \"grid=0.28\") sets the packing fraction explicitly; a muVT target density (target_N / target_eta / target_density) is otherwise adopted as the target, and NVT ignores the density and places exactly N. Spacing always exceeds the contact distance, and sites that overlap a QA matrix or fall outside a confining pore are dropped, so the achieved density can be lower than asked (it is logged, and a gap above 15% is warned about). The remaining two forms are paths. (1) A path to a single file: extended-XYZ (atom-count line, a Lattice/Properties comment, then `species x y z` rows) or a bare `x y z` float table; the first line decides which. (2) A path to the equilibrated library directory, nested by system, temperature (LJ only) and box, e.g. lj/T_0.85/box_20/mu_0.0_lj_3d_box20.xyz or hard_disk_2d/box_200/mu_1.00_hard_2d_box_200.xyz. The per-run file is found by matching chemical potential, box, dimension and (for LJ) temperature, tolerant of the differing decimal and box_<L> vs box<L> filename styles. A run raises if nothing matches (it lists what is present) or if several match (it lists the candidates)."
+          "oneOf": [
+            {"type": "string"},
+            {"type": "array", "items": {"type": "string"}, "minItems": 1}
+          ],
+          "description": "Starting configuration; omit to start fresh (bulk muVT starts empty, NVT/QA/confined seed a valid start). Three forms. (0) The literal token \"grid\" (not a path): bootstrap from a periodic-commensurate lattice at a reasonable fluid packing fraction -- 0.35 in 3D, 0.45 in 2D -- instead of from an empty box, for when growing from N=0 is too slow. \"grid:0.28\" (or \"grid=0.28\") sets the packing fraction explicitly; a muVT target density (target_N / target_eta / target_density) is otherwise adopted as the target, and NVT ignores the density and places exactly N. Spacing always exceeds the contact distance, and sites that overlap a QA matrix or fall outside a confining pore are dropped, so the achieved density can be lower than asked (it is logged, and a gap above 15% is warned about). The remaining two forms are paths. (1) A path to a single file: extended-XYZ (atom-count line, a Lattice/Properties comment, then `species x y z` rows) or a bare `x y z` float table; the first line decides which. (2) A path to the equilibrated library directory, nested by system, temperature (LJ only) and box, e.g. lj/T_0.85/box_20/mu_0.0_lj_3d_box20.xyz or hard_disk_2d/box_200/mu_1.00_hard_2d_box_200.xyz. The per-run file is found by matching chemical potential, box, dimension and (for LJ) temperature, tolerant of the differing decimal and box_<L> vs box<L> filename styles. A run raises if nothing matches (it lists what is present) or if several match (it lists the candidates). SWEEPABLE: a list builds one run per start, which is how a state point is shown to have converged (arms begun from different configurations must meet). The start is NOT identity-bearing -- a warm start changes how fast a chain reaches equilibrium, not which equilibrium -- so the arms share a run id and are kept in separate directories by the sweep label alone, which is built from as much of each path as it takes to tell them apart."
         },
         "radius": {
           "type": "number",
@@ -555,6 +628,10 @@
         "sweep_label": {
           "type": "string",
           "description": "Written BY gcmc.launcher into each expanded run, naming the swept axes and their values (e.g. 'mu2.0_seed3'); it names the run directory and is not normally set by hand. It is declared here because run.additionalProperties is false, so without it every launcher-expanded config would fail validation against this schema."
+        },
+        "esjd": {
+          "type": "boolean",
+          "description": "Default false. Record the expected squared jump distance in every window summary and in the run log: esjd_dNsq is the sum of (n_add - n_remove)^2 over ATTEMPTED moves, and esjd_drsq the sum of squared translation displacement, minimum imaged. Raw sums, never rates, so a statistic over any span of log rows is exact; divide by wall_s for ESJD per second, which is the form an accept/reject engine and a rejection-free one can be raced on directly (same convention as glb_dN_sq). Note that an exchange moves N by exactly +/-1 at every depth, so esjd_dNsq equals the accepted exchange count and is blind to the configuration turnover depth buys -- for that, clq*_new_a / wall_s in the log is throughput in positions. MEASUREMENT only: it changes nothing the chain does and never reaches the run fingerprint."
         }
       }
     },

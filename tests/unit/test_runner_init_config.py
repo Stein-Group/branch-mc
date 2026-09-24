@@ -13,7 +13,8 @@ from gcmc.run.sim_setup import from_params
 
 _BASE = {
     "potential": {"main": "hard_core"},
-    "sampler": {"type": "branch", "depth": 1, "trials": 10, "trial_box_side": 3.0},
+    "sampler": {"type": "branch", "trials": 10, "trial_box_side": 3.0},
+    "engine": {"depth": 1},
     "ensemble": {"mu": 2.0, "dimension": 3, "box": 12.0},
 }
 

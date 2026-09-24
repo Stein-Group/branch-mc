@@ -43,10 +43,10 @@ _TYPED = {
     },
     "sampler": {
         "type": "channel_cyclic",
-        "depth": 1,
         "trial_density": 1.0,
         "channel_width": 1.5,
     },
+    "engine": {"depth": 1},
     "ensemble": {
         "mu": {"A": 0.0, "B": 0.0, "C": 0.0},
         "dimension": 3,
@@ -65,7 +65,8 @@ _TYPED = {
 
 _UNTYPED = {
     "potential": {"main": "hard_core"},
-    "sampler": {"type": "branch", "depth": 1, "trials": 30, "trial_box_side": 3.0},
+    "sampler": {"type": "branch", "trials": 30, "trial_box_side": 3.0},
+    "engine": {"depth": 1},
     "ensemble": {"mu": 3.0, "dimension": 3, "box": 12.0, "type": "muVT"},
     "run": {
         "kind": "single",

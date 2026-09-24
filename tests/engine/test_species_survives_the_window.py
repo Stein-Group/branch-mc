@@ -57,7 +57,8 @@ def _typed_cfg(tmp_path: Path, sampler: str, depth: int):
     with ff.open("w") as fh:
         yaml.safe_dump(doc, fh)
 
-    smp: dict = {"type": sampler, "depth": depth}
+    smp: dict = {"type": sampler}
+    eng: dict = {"depth": depth}
     if sampler in ("channel", "channel_cyclic"):
         smp["trial_density"] = 1.0
         smp["channel_width"] = 1.5
@@ -69,6 +70,7 @@ def _typed_cfg(tmp_path: Path, sampler: str, depth: int):
     params = {
         "potential": {"main": "lennard_jones", "T": 0.85, "species_file": str(ff)},
         "sampler": smp,
+        "engine": eng,
         "ensemble": {
             "mu": {"A": 1.0, "B": 1.0, "C": 1.0},
             "dimension": 3,

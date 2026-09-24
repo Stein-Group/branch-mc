@@ -68,8 +68,8 @@ def _make(seed):
             "type": "rosenbluth",
             "trials": 20,
             "trial_box_side": 3.0,
-            "depth": 0,
         },
+        "engine": {"depth": 0},
         "run": {"sampling_window": 1},
     }
     cfg = sim_setup.from_params(p)

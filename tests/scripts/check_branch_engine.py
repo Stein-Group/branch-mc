@@ -31,8 +31,8 @@ def run(branch, nwin=NW):
             "type": ("branch" if branch else "rosenbluth"),
             "trials": 30,
             "trial_box_side": 3.0,
-            "depth": 0,
         },
+        "engine": {"depth": 0},
         "run": {"sampling_window": 1000, "seed": 1},
     }
     cfg = from_params(p)

@@ -42,8 +42,8 @@ def _cfg(dim, kind, box, window):
             "type": "rosenbluth",
             "trials": 20,
             "trial_box_side": 5.0,
-            "depth": 0,
         },
+        "engine": {"depth": 0},
         "run": {
             "kind": kind,
             "sampling_window": window,
@@ -134,15 +134,15 @@ def test_parallel_matches_serial_equilibrium(dim):
 
 @pytest.mark.parametrize("dim", [2, 3])
 @pytest.mark.parametrize(
-    "sampler",
+    "sampler,engine",
     [
-        {"type": "metropolis"},
-        {"type": "rosenbluth", "trials": 20, "trial_box_side": 3.0, "depth": 0},
-        {"type": "branch", "trials": 20, "trial_box_side": 3.0, "depth": 1},
+        ({"type": "metropolis"}, {}),
+        ({"type": "rosenbluth", "trials": 20, "trial_box_side": 3.0}, {"depth": 0}),
+        ({"type": "branch", "trials": 20, "trial_box_side": 3.0}, {"depth": 1}),
     ],
     ids=["metropolis", "rosenbluth", "branch"],
 )
-def test_cell_list_invariants_hold(dim, sampler, monkeypatch):
+def test_cell_list_invariants_hold(dim, sampler, engine, monkeypatch):
     """Every proposal leaves the cell list describing exactly the live
     configuration -- including the rejected ones, which is where a missed
     reactivate would hide. The hook asserts inside the `finally`, so every early
@@ -152,6 +152,7 @@ def test_cell_list_invariants_hold(dim, sampler, monkeypatch):
         "potential": {"main": "hard_core"},
         "ensemble": {"mu": 2.0, "dimension": dim, "box": 24.0},
         "sampler": sampler,
+        "engine": engine,
         "run": {
             "kind": "parallel",
             "sampling_window": 60,
@@ -181,8 +182,8 @@ def test_lj_cell_list_invariants_hold(monkeypatch):
             "type": "rosenbluth",
             "trials": 20,
             "trial_box_side": 3.0,
-            "depth": 0,
         },
+        "engine": {"depth": 0},
         "run": {
             "kind": "parallel",
             "sampling_window": 50,

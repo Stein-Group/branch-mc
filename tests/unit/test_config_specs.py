@@ -42,7 +42,8 @@ def _reference_cfg():
     return sim_setup.from_params(
         {
             "potential": {"main": "lennard_jones", "T": 1.0},
-            "sampler": {"type": "branch", "depth": 1, "trials": 20},
+            "sampler": {"type": "branch", "trials": 20},
+            "engine": {"depth": 1},
             "ensemble": {"mu": 1.0, "dimension": 3, "box": 8.0},
             "run": {"sampling_window": 20},
         }

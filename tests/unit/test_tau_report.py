@@ -197,7 +197,8 @@ def test_the_window_diagnostics_are_reported_when_the_group_was_written(tmp_path
     (d / "params.json").write_text(
         json.dumps(
             {
-                "sampler": {"type": "channel", "engine": "glauber_dynamics"},
+                "sampler": {"type": "channel"},
+                "engine": {"type": "glauber_dynamics"},
                 "ensemble": {"mu": -2.5, "box": 8.0},
                 "run": {"seed": 1},
             }

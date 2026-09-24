@@ -47,10 +47,12 @@ def _params(sampler: str, depth: int, trials: int) -> dict:
     p = {k: dict(v) for k, v in _BASE.items()}
     p["sampler"] = {
         "type": sampler,
-        "depth": depth,
         "trials": trials,
         "trial_box_side": 3.0,
     }
+    # the exchange group size is an `engine` key: it says what is done with the
+    # trial cloud, not where the cloud comes from
+    p["engine"] = {"depth": depth}
     if sampler in ("channel", "channel_cyclic"):
         p["sampler"]["channel_width"] = 1.5
         p["sampler"]["channel_length"] = 3.0

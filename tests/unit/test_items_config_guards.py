@@ -13,6 +13,7 @@ Item 2  an NVT window with no particles returns immediately instead of looping.
 """
 
 import numpy as np
+from _harness import split_engine
 
 from gcmc import config_specs
 from gcmc.engine import metropolis_dynamics
@@ -27,6 +28,11 @@ def _lj(sampler_block, **run):
         "sampler": sampler_block,
         "run": run,
     }
+    # callers write the flat pre-migration spelling; the group-size keys belong
+    # to the `engine` block now
+    p["sampler"], engine = split_engine(sampler_block)
+    if engine:
+        p["engine"] = engine
     return sim_setup.from_params(p)
 
 
@@ -103,7 +109,8 @@ def test_qa_matrix_disables_tail():
     p = {
         "potential": {"main": "lennard_jones", "T": 1.2},
         "ensemble": {"type": "QA", "mu": -3.0, "dimension": 3, "box": 10.0},
-        "sampler": {"type": "branch", "trials": 20, "trial_box_side": 3.0, "depth": 1},
+        "sampler": {"type": "branch", "trials": 20, "trial_box_side": 3.0},
+        "engine": {"depth": 1},
         "run": {"matrix_config": "/tmp/does_not_need_to_exist.xyz"},
     }
     cfg = sim_setup.from_params(p)
@@ -154,8 +161,8 @@ def test_nvt_empty_window_returns():
             "type": "rosenbluth",
             "trials": 20,
             "trial_box_side": 3.0,
-            "depth": 1,
         },
+        "engine": {"depth": 1},
         "run": {"sampling_window": 5},
     }
     cfg = sim_setup.from_params(p)

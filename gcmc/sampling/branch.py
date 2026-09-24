@@ -926,9 +926,7 @@ class CavitySweep:
             return 0.0
         if k not in self._cache:
             w = _wsum(self._g, self._h, k)
-            self._cache[k] = (
-                float(np.log(w) + k * self._log_c) if w > 0.0 else -np.inf
-            )
+            self._cache[k] = float(np.log(w) + k * self._log_c) if w > 0.0 else -np.inf
         return self._cache[k]
 
     def sample(self, k: int, rng: _RNG) -> tuple[int, ...] | None:

@@ -94,11 +94,11 @@ def _run_arm(tmp_path, tag: str, comp, mu: dict[str, float]) -> np.ndarray:
         "potential": {"main": "lennard_jones", "T": T, "species_file": MODEL},
         "sampler": {
             "type": "channel",
-            "depth": 1,
             "trial_density": 1.0,
             "channel_width": 1.5,
             "channel_length": 3.0,
         },
+        "engine": {"depth": 1},
         "ensemble": {
             "type": "semigrand",
             "dimension": 3,

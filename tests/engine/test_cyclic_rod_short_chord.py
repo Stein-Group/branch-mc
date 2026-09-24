@@ -112,10 +112,10 @@ def test_the_cyclic_rod_runs_at_depth_two_and_three(dim, depth) -> None:
         "potential": {"main": "lennard_jones", "T": 0.85},
         "sampler": {
             "type": "channel_cyclic",
-            "depth": depth,
             "trial_density": 0.6,
             "channel_width": 1.2,
         },
+        "engine": {"depth": depth},
         "ensemble": {"mu": -3.2, "dimension": dim, "box": _BOX},
         "run": {"sampling_window": 200},
     }

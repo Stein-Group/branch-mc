@@ -57,6 +57,7 @@ from ..sampling.channel import (
     ChannelSweepHardCore,
     ChannelSweepLJ,
 )
+from ..sampling.participation import ParticipationTarget
 from ..sampling.rosenbluth import select_forward, select_reverse
 from ..space import geometry, neighbors
 from ..system.state import zero_counters
@@ -198,9 +199,21 @@ def _weighted_trials(
     choice: str,
     n_full: int,
     n_fluid: int | None = None,
+    adaptive: bool = False,
 ) -> tuple[TrialSet, BoolArray | None]:
     """Turn the raw neighbour result into a weighted TrialSet, matching the
     original find_neighbors_fast weighting for the active mode.
+
+    `adaptive` splits the pmf cases in two. False applies `gamma_dict[1]` here,
+    at pool-build time, which is what the fitted schedule wants and what every
+    frozen digest was recorded against. True leaves the bias UNEXPONENTIATED in
+    `TrialSet.log_bias` and puts only the Boltzmann factor in `energy_weight`,
+    because this pool is shared: it is merged, permuted, and then read by both
+    the forward and the reverse pass, whose level-1 sets differ. Baking one
+    gamma_1 in here would force the two passes to use it, and a reverse gamma
+    solved over the forward pool is the failure gate G6 exists to catch. Only
+    the pmf auxiliary cases honour the flag; nothing else has a bias to split,
+    and `sim_setup` refuses adaptive gamma for all of them by name.
 
     The species column rides through untouched: `geometry` filtered it by the
     same survivor mask as the coordinates, and this function only weights. It is
@@ -254,6 +267,17 @@ def _weighted_trials(
             return TrialSet(coords, w, species=spc), km
         case "ljaux":
             assert potential is not None
+            if adaptive:
+                base, log_bias, ref = potential.weight_bulk_split(
+                    dists, coords=coords, idxs=idxs, kdtree=kdtree
+                )
+                return TrialSet(
+                    coords,
+                    base,
+                    ref_neighbor_coord=ref,
+                    species=spc,
+                    log_bias=log_bias,
+                ), km
             w, ref = potential.weight_bulk(
                 dists, coords=coords, idxs=idxs, kdtree=kdtree, gamma=g1
             )
@@ -293,8 +317,22 @@ def _weighted_trials(
         case "aux":
             assert potential is not None
             if kern.two_dim:
+                # 2D is the analytic hard-disk g(r) and has no table to split;
+                # `sim_setup` refuses adaptive gamma on the dimension axis, so
+                # `adaptive` cannot be True here.
                 w2d = cast(FloatArray, potential.weight_bulk(dists, gamma=g1))
                 return TrialSet(coords, w2d, species=spc), km
+            if adaptive:
+                base, log_bias, ref = potential.weight_bulk_split(
+                    dists, coords=coords, idxs=idxs, kdtree=kdtree
+                )
+                return TrialSet(
+                    coords,
+                    base,
+                    ref_neighbor_coord=ref,
+                    species=spc,
+                    log_bias=log_bias,
+                ), km
             w, ref = potential.weight_bulk(
                 dists, coords=coords, idxs=idxs, kdtree=kdtree, gamma=g1
             )
@@ -911,7 +949,7 @@ def _ljbranch_forward(
     Returns (chosen_coords, log W_new, chosen_pool_rows) or (None, None, None)
     if no clique exists. The rows are what the typed insert path reads the
     inserted species off, and what M21's provenance is decided by."""
-    #logW, count, chosen, rows = branch_mod.ljbranch_weight_sum(
+    # logW, count, chosen, rows = branch_mod.ljbranch_weight_sum(
     logW, count, chosen, rows = branch_mod.lj_clique_weight_sum(
         pool.coords,
         pool.energy_weight,
@@ -1337,6 +1375,94 @@ def advance(
     n_trials = samp.n_trial_molecules
     depth = samp.depth
     gdict = pot_spec.gamma_dict
+    # ADAPTIVE GAMMA. One object for the whole window, built here and threaded
+    # to both passes, because the forward and reverse solves must be against the
+    # same constants and the way that goes wrong is one call site being changed
+    # and the other not. None is the frozen path: `gdict` is read and not a line
+    # of the solver runs. `sim_setup` has already refused every sampler,
+    # dynamics, dimension and auxiliary this does not apply to, so reaching here
+    # with a target means rosenbluth + pmf under metropolis_dynamics.
+    target: ParticipationTarget | None = None
+    if samp.gamma_mode == "adaptive":
+        assert samp.pr_target is not None  # sim_setup requires it with the mode
+        target = ParticipationTarget(
+            f_pr=samp.pr_target,
+            gamma_max=(
+                3.0 if pot_spec.gamma_max is None else float(pot_spec.gamma_max)
+            ),
+            criterion=(samp.gamma_criterion or "participation"),
+            solver=(samp.gamma_solver or "moments"),
+        )
+    # Solved exponents, per pass, accumulated over the window. Level-indexed
+    # rather than pooled, because the whole claim of the method is that the decay
+    # across levels emerges; a single mean would hide it. `_gamma_clamped` counts
+    # levels that solved to exactly 0, which is the diagnostic for `pr_target`
+    # set out of reach.
+    # ESJD. Raw sums over ATTEMPTED moves, never means, for the reason the
+    # clique counters state: a statistic over any span of log rows is then exact
+    # rather than a mean of means. Divide by `wall_s` for the per-second form,
+    # which is what an accept/reject engine and a rejection-free one can be
+    # raced on directly (the same convention as `glb_dN_sq` in the Glauber
+    # engine, deliberately, so the two logs compare).
+    #
+    # OPT-IN (`run.esjd`), and absent from the summary otherwise. Not because it
+    # is expensive -- it is two multiplies per accepted move -- but because a new
+    # integer in every muVT summary moves every pinned counter digest in the
+    # project to record nothing.
+    #
+    # TWO OBSERVABLES, because they answer different questions and this engine
+    # makes them disagree:
+    #
+    #   dN_sq  sum (n_add - n_remove)^2 over attempts. An exchange moves N by
+    #          exactly +/-1 at EVERY depth (an add inserts d+1 and removes d),
+    #          so this equals the accepted exchange count and E[dN^2] per move
+    #          is the exchange acceptance rate. That is the cross-engine race
+    #          metric, and it is blind to the whole point of depth: a depth-3
+    #          move can replace four positions while N moves by one.
+    #   dr_sq  sum of squared displacement over attempted TRANSLATIONS,
+    #          minimum-imaged. The classic ESJD, and the one `move_factor`
+    #          tunes. Unaffected by the selection bias, so it is the control
+    #          arm: if it moves between two gamma settings, something other
+    #          than the exponent changed.
+    #
+    # For the configuration turnover that depth buys, the log already has it:
+    # `clq*_new_a / wall_s` is throughput in POSITIONS rather than in moves.
+    esjd_on = io_.esjd
+    _esjd: dict[str, float] = {
+        "dN_sq": 0.0,
+        "dr_sq": 0.0,
+        "moves": 0.0,
+        "translations": 0.0,
+    }
+
+    def _esjd_dN(dn: int) -> None:
+        """Fold one accepted exchange's number change into the ESJD sum."""
+        if esjd_on:
+            _esjd["dN_sq"] += float(dn) ** 2
+
+    def _esjd_dr(before: FloatArray, after: FloatArray) -> None:
+        """Fold one accepted translation's squared displacement in, minimum
+        imaged: a particle that wrapped the box moved a short way, not a long
+        one, and counting the wrap would make ESJD a function of where the
+        origin happens to sit."""
+        if not esjd_on:
+            return
+        d = np.asarray(after, float) - np.asarray(before, float)
+        d -= side * np.round(d / side)
+        _esjd["dr_sq"] += float(np.sum(d * d))
+
+    _gamma_sum: dict[str, dict[int, float]] = {"forward": {}, "reverse": {}}
+    _gamma_n: dict[str, dict[int, int]] = {"forward": {}, "reverse": {}}
+    _gamma_clamped = {"forward": 0, "reverse": 0}
+
+    def _tally(which: str, gammas: list[float]) -> None:
+        """Fold one pass's solved exponents into the window accumulators."""
+        for level, g in enumerate(gammas, start=1):
+            _gamma_sum[which][level] = _gamma_sum[which].get(level, 0.0) + g
+            _gamma_n[which][level] = _gamma_n[which].get(level, 0) + 1
+            if g == 0.0:
+                _gamma_clamped[which] += 1
+
     beta = kern.beta
     temp = pot_spec.temp
     mu = state.mu if state.mu is not None else ens.chem_pot
@@ -1627,6 +1753,12 @@ def advance(
         "P_new_acc": 0,
     }
     while step < io_.sampling_window:
+        if esjd_on:
+            # EVERY proposed move, not just the exchanges: a translation has
+            # dN = 0 and belongs in the denominator of E[dN^2] exactly as a
+            # rejected exchange does. (`_d("attempt")` further down counts
+            # exchange attempts only, which is a different question.)
+            _esjd["moves"] += 1.0
         if nvt:
             # NVT: only number-conserving moves; no insertions or deletions, so N
             # stays at the target exactly. An empty system has nothing to do, so
@@ -1676,6 +1808,8 @@ def advance(
         # ---------------------------------------------------------- translate
         if choice == "move":
             c["move_step"] += 1
+            if esjd_on:
+                _esjd["translations"] += 1.0
             if N == 0:
                 continue  # null proposal: nothing to move
             j = rng.choice(N)
@@ -1708,6 +1842,7 @@ def advance(
                 # matching the untouched engine on this path.
                 cl.move(slot, moved)
                 c["move_accept"] += 1
+                _esjd_dr(old, moved)
                 continue
             # The overlap test must also see the frozen matrix, so a fluid
             # particle cannot move onto an obstacle; the cell list holds both.
@@ -1754,6 +1889,7 @@ def advance(
             if accepted:
                 cl.move(slot, moved)  # in place; `alive` does not change
                 c["move_accept"] += 1
+                _esjd_dr(old, moved)
             else:
                 cl.reactivate(slot)
             continue
@@ -2237,7 +2373,16 @@ def advance(
                 km: BoolArray | None = np.empty(0, dtype=bool)
             else:
                 trial_set, km = _weighted_trials(
-                    raw, tree, kern, pot_spec, ens, potential, choice, N, n_rest
+                    raw,
+                    tree,
+                    kern,
+                    pot_spec,
+                    ens,
+                    potential,
+                    choice,
+                    N,
+                    n_rest,
+                    adaptive=target is not None,
                 )
 
             if n_remove != 0:
@@ -2245,7 +2390,16 @@ def advance(
                     _d("bail_rawin_none")
                     continue
                 mol_in_cav, _ = _weighted_trials(
-                    raw_in, tree, kern, pot_spec, ens, potential, choice, N, n_rest
+                    raw_in,
+                    tree,
+                    kern,
+                    pot_spec,
+                    ens,
+                    potential,
+                    choice,
+                    N,
+                    n_rest,
+                    adaptive=target is not None,
                 )
                 if len(mol_in_cav) != n_remove:
                     _d("bail_molincav_mismatch")
@@ -2433,6 +2587,7 @@ def advance(
                         sum_new = np.log(num_new)
                         e_u_r_new = 0.0
                 else:
+                    _g_fwd: list[float] | None = [] if target is not None else None
                     chosen, sum_new_arr = select_forward(
                         pool,
                         n_add,
@@ -2441,7 +2596,15 @@ def advance(
                         side=side,
                         r_squared=r_sq,
                         gamma_schedule=gdict,
+                        target=target,
+                        solved_gammas=_g_fwd,
                     )
+                    if _g_fwd is not None:
+                        # tallied even when the move is about to be rejected: a
+                        # solved gamma is a property of the pool, and dropping
+                        # the rejected ones would report the exponent
+                        # conditioned on acceptance
+                        _tally("forward", _g_fwd)
                     if chosen is None or sum_new_arr is None:
                         continue
                     sum_new = np.sum(np.log(sum_new_arr))
@@ -2507,6 +2670,7 @@ def advance(
                     assert km is not None  # raw was handled above; km rides with it
                     _trimmed = trial_set.mask(km)
                     trimmed: TrialSet | None = _trimmed if len(_trimmed) != 0 else None
+                    _g_rev: list[float] | None = [] if target is not None else None
                     sum_cur_arr, e_cur_arr = select_reverse(
                         trimmed,
                         mol_in_cav,
@@ -2515,7 +2679,11 @@ def advance(
                         side=side,
                         r_squared=r_sq,
                         gamma_schedule=gdict,
+                        target=target,
+                        solved_gammas=_g_rev,
                     )
+                    if _g_rev is not None:
+                        _tally("reverse", _g_rev)
                     sum_current = np.sum(np.log(sum_cur_arr))
                     e_u_r_current = np.sum(np.log(e_cur_arr))
             else:
@@ -2760,6 +2928,7 @@ def advance(
                     commit_exchange(chosen_coords, chosen_slots, chosen_species)
                     committed = True
                     c["repack_accept"] += 1
+                    _esjd_dN(n_add - n_remove)
                     _clq["P_pos_acc"] += _cpos
                     _clq["P_new_acc"] += _cnew
                     _d("accept_repack")
@@ -2814,6 +2983,7 @@ def advance(
                     commit_exchange(chosen_coords, chosen_slots, chosen_species)
                     committed = True
                     c["add_accept"] += 1
+                    _esjd_dN(n_add - n_remove)
                     _clq["A_pos_acc"] += _cpos
                     _clq["A_new_acc"] += _cnew
                     _d("accept_add")
@@ -2867,6 +3037,7 @@ def advance(
                     commit_exchange(chosen_coords, chosen_slots, chosen_species)
                     committed = True
                     c["remove_accept"] += 1
+                    _esjd_dN(n_add - n_remove)
                     _clq["R_pos_acc"] += _cpos
                     _clq["R_new_acc"] += _cnew
                     _d("accept_remove")
@@ -2917,6 +3088,36 @@ def advance(
     out = {"N": N, "packing_fraction": packing, "counters": c, "n_cav": n_cav_mean}
     # raw per-window sums; the runner logs them as integers (see _clq above)
     out["clique"] = dict(_clq)
+    # ADAPTIVE GAMMA DIAGNOSTICS, absent on a fixed-gamma run (the identity
+    # convention: an inactive key is absent, never null). Per level and per
+    # pass, because "gamma_rev != gamma_fwd at the same level" is the property
+    # gate G3 asserts and a pooled mean would make it unreadable. `clamped` is
+    # the count of levels that solved to exactly 0: a large number means
+    # `pr_target` is set higher than the pool can reach and the bias is off
+    # wherever that happened.
+    if esjd_on:
+        # Absent unless asked for (the identity convention: an inactive key is
+        # absent, never null). `wall` is already in the summary, so ESJD per
+        # second is a division the reader does -- and can do over any span of
+        # rows, exactly, which a per-window rate could not.
+        out["esjd"] = dict(_esjd)
+    if target is not None:
+        out["gamma_adaptive"] = {
+            "pr_target": target.f_pr,
+            "criterion": target.criterion,
+            "solver": target.solver,
+            "mean_by_level": {
+                which: {
+                    lvl: _gamma_sum[which][lvl] / _gamma_n[which][lvl]
+                    for lvl in sorted(_gamma_sum[which])
+                }
+                for which in ("forward", "reverse")
+            },
+            "levels_solved": {
+                which: sum(_gamma_n[which].values()) for which in ("forward", "reverse")
+            },
+            "clamped": dict(_gamma_clamped),
+        }
     # PER-SPECIES OCCUPANCY, the entire output of a multi-species run and the one
     # quantity that never reached a run's files. `state.species` has carried it
     # correctly since the window-boundary fix above, but the summary reported `N`

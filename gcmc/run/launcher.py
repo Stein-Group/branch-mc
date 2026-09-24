@@ -15,10 +15,25 @@ Sweepable axes and where they live in the base params:
                                  supply the dynamics a pool)
     engine.depth                (metropolis_dynamics only)
     engine.kmax_margin          (ladder dynamics only)
+    sampler.pr_target           (adaptive gamma only; the target spread PR / k)
+    sampler.gamma_criterion     (adaptive gamma only; participation/perplexity)
+    sampler.gamma_solver        (adaptive gamma only; moments/grid)
+    auxiliary.gamma             (fixed gamma; each arm a scalar or an array of
+                                 up to 9 per-level exponents)
+    run.seed
+    potential.species_file      (the model axis: a list of species files)
+    run.initial_config          (the start axis: a list of starting
+                                 configurations, each a path to a file or to an
+                                 equilibrated library directory, or the literal
+                                 token "grid". The start is not part of the run
+                                 id, so the arms are kept apart by the label
+                                 alone and the label is built from as much of
+                                 each path as it takes to separate them.)
 
 Any axis given as a JSON list is swept; scalars are fixed. The launcher takes
 the Cartesian product of all swept axes, so two list axes build a heatmap
-(e.g. 4 trial_density x 4 trial_box_side = 16 runs). Each combination becomes a
+(e.g. 4 trial_density x 4 trial_box_side = 16 runs, or 10 gamma x 8
+trial_box_side = 80). Each combination becomes a
 concrete params.json with scalars in place, a distinct id, and its own run
 directory, so combinations never collide and restart is just re-running.
 
@@ -42,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import itertools
 import json
 import logging
@@ -95,6 +111,24 @@ _AXES = (
     # cutoff == run.upper_cutoff is the exact no-op, so one launch produces both
     # the tuning curve and the reference it must agree with.
     ("aux_cutoff", "auxiliary", "cutoff"),
+    # ADAPTIVE GAMMA, and the argument the `engine` axis makes applies here with
+    # more force. `pr_target` is CLAIMED to be a variance knob that cannot move
+    # an equilibrium average, and the only way to check that claim is to run the
+    # same state point, box, trial cloud and seed at several targets and require
+    # the excess chemical potential to agree. Three launches whose roots are
+    # kept apart by hand is how that comparison becomes three different
+    # experiments, which is the failure the invariance gate exists to detect.
+    #
+    # `gamma_criterion` is an axis for the same reason: whether the
+    # participation ratio or perplexity is the right spread to target is
+    # empirical -- the two disagree about how hard one dominant trial should be
+    # punished -- so the answers are raced rather than argued. Crossed with
+    # `pr_target` it is a 2 x 3 heatmap from one launch.
+    #
+    # Both inert for a fixed-gamma params file, which sets neither.
+    ("pr_target", "sampler", "pr_target"),
+    ("gamma_criterion", "sampler", "gamma_criterion"),
+    ("gamma_solver", "sampler", "gamma_solver"),
     # THE MODEL AXIS. Every other entry above is a knob of the experiment; this
     # one sweeps the force field itself, which is what the k_ij demixing series
     # is: `eps_ij = (1 - k_ij) sqrt(eps_i eps_j)`, and a run at a different k is
@@ -140,12 +174,56 @@ def _map_label(val: dict[str, Any]) -> str:
     return "_".join(f"{k}{_fmt_num(v)}" for k, v in val.items())
 
 
+def _file_fragment(val: Any, depth: int) -> str:
+    """The last `depth` path components of a path-valued axis, the file itself
+    rendered as its stem. A leading `species_` is dropped because every file on
+    the model axis carries it and a prefix shared by every value distinguishes
+    nothing. The filesystem root is not a component anyone can read, so it is
+    left out."""
+    parts = [q for q in Path(str(val)).parts if q not in ("/", "\\", "")]
+    if not parts:
+        return ""
+    stem = Path(parts[-1]).stem
+    parts[-1] = stem[len("species_") :] if stem.startswith("species_") else stem
+    return "_".join(parts[-depth:])
+
+
 def _file_label(val: Any) -> str:
-    """Id fragment for a path-valued axis: the stem, with a leading `species_`
-    dropped because every file on that axis carries it and a prefix shared by
-    every value distinguishes nothing."""
-    stem = Path(str(val)).stem
-    return stem[len("species_") :] if stem.startswith("species_") else stem
+    """Id fragment for a single path-valued axis value: its stem."""
+    return _file_fragment(val, 1)
+
+
+def _file_label_grid(vals: list[Any]) -> list[str]:
+    """Fragments for one file axis, decided with the whole axis in view so that
+    two distinct paths never render the same.
+
+    The stem alone is the fragment in the ordinary case and every sweep that
+    already ran keeps the directory name it had. It is not enough in general,
+    and the start axis is where that bites: a sweep over per-run output folders
+    is a list of paths whose stems are all `final`, or all `trajectory`, and the
+    directory they differ in is the part the stem throws away. Two arms sharing
+    a fragment share their `sweep_label`, and for `run.initial_config` that is
+    fatal rather than cosmetic -- the start is deliberately NOT part of the run
+    id (a warm start reaches the same equilibrium), so the label is the only
+    thing keeping the arms in separate directories, and without it they would
+    write one checkpoint and one log between them.
+
+    So the fragment grows leftwards one path component at a time until the axis
+    separates, at one common depth so the names stay comparable, and a digest of
+    the full path is the last resort for paths that differ only in characters a
+    fragment drops.
+    """
+    uniq = list(dict.fromkeys(str(v) for v in vals))
+    deepest = max((len(Path(u).parts) for u in uniq), default=1)
+    for depth in range(1, deepest + 1):
+        frag = {u: _file_fragment(u, depth) for u in uniq}
+        if len(set(frag.values())) == len(uniq):
+            return [frag[str(v)] for v in vals]
+    frag = {
+        u: f"{_file_fragment(u, 1)}x{hashlib.sha1(u.encode()).hexdigest()[:6]}"
+        for u in uniq
+    }
+    return [frag[str(v)] for v in vals]
 
 
 def _as_list(v: Any) -> list[Any]:
@@ -166,6 +244,58 @@ _SHAPED_AXES = (
     ("box", "ensemble", "box"),
     ("cell_length", "run", "cell_length"),
 )
+
+
+# `auxiliary.gamma` is shaped like box and cell_length -- one value may be an
+# ARRAY, the per-level exponents -- but it takes the OPPOSITE convention, and
+# the difference is deliberate rather than an inconsistency.
+#
+# For a box, the natural thing to write is one anisotropic box, and sweeping
+# boxes is the rare case, so a flat list reads as one value. For gamma the
+# natural thing to write is a SWEEP: ten exponents crossed with eight trial box
+# sides is the heatmap this axis exists for, and `[0.0, 0.05, 0.1]` means three
+# arms to everyone who writes it. So here the outer list is ALWAYS the sweep and
+# each element is one arm, a scalar (applies at every level) or an array (the
+# first levels, the rest unbiased):
+#   gamma: 0.1                       -> one arm, 0.1 at every level
+#   gamma: [0.0, 0.05, 0.1]          -> three arms, each a scalar
+#   gamma: [[0.29,0.10,0.03], 0.1]   -> two arms, one array and one scalar
+#   gamma: [[0.29,0.10,0.03]]        -> ONE arm, that array
+# The last line is the price of the convention: to pin a single array without
+# sweeping it, wrap it. A bare flat list is a sweep of scalars.
+_GAMMA_AXES = (("gamma", "auxiliary", "gamma"),)
+
+
+def _gamma_grid(v: Any) -> list[Any]:
+    """Sweep grid for the gamma axis: the outer list is the sweep, a scalar is
+    one arm."""
+    return list(v) if isinstance(v, (list, tuple)) else [v]
+
+
+#: Longest gamma fragment rendered value by value. A nine-level arm spelled out
+#: is about ninety characters, and the run directory is how a human finds a run,
+#: so past this the tail becomes a digest of the full array: the fragment stays
+#: readable, stays unique, and stays the same across relaunches because the
+#: digest is of the values and nothing else.
+_GAMMA_LABEL_MAX = 28
+
+
+def _gamma_label(val: Any) -> str:
+    """Id fragment for one gamma arm: 0.1 -> '0.1', [0.29, 0.103, 0.0332] ->
+    '0.29x0.103x0.0332', and a long array -> '0.193548x9Lx4f1c2a'.
+
+    'x', the shaped axis's separator, and NOT a hyphen: `run_paths` renders a
+    directory name by replacing '-' with 'm' and '.' with 'p', so a hyphenated
+    arm would land on disk as `gamma0p29m0p1`, which reads as a subtraction. The
+    separator has to survive that substitution to stay readable, and 'x' does.
+    """
+    if not isinstance(val, (list, tuple)):
+        return _fmt_num(val)
+    full = "x".join(_fmt_num(x) for x in val)
+    if len(full) <= _GAMMA_LABEL_MAX:
+        return full
+    dig = hashlib.sha1(full.encode()).hexdigest()[:6]
+    return f"{_fmt_num(val[0])}x{len(val)}Lx{dig}"
 
 
 def _shaped_grid(v: Any) -> list[Any]:
@@ -232,6 +362,11 @@ def expand_sweep(
         if key in sec:
             present.append((label, section, key))
             grids.append(_shaped_grid(sec[key]))
+    for label, section, key in _GAMMA_AXES:
+        sec = base.get(section, {})
+        if key in sec:
+            present.append((label, section, key))
+            grids.append(_gamma_grid(sec[key]))
     pore = base.get("ensemble", {}).get("pore", {})
     for label, key in _PORE_AXES:
         if key in pore:
@@ -239,6 +374,15 @@ def expand_sweep(
             grids.append(_as_list(pore[key]))
     if not present:  # nothing sweepable present: one run
         return [copy.deepcopy(base)], ["single"]
+
+    # A file axis renders as a fragment of the path, and that fragment has to
+    # separate the axis by itself (see _file_label_grid), which cannot be
+    # decided one value at a time inside the product below.
+    file_frags = {
+        i: dict(zip((str(v) for v in g), _file_label_grid(list(g))))
+        for i, (a, g) in enumerate(zip(present, grids))
+        if a in _FILE_AXES
+    }
 
     # only axes with more than one distinct value are "swept"; those name the
     # run dirs. single-valued axes are still applied but kept out of the label.
@@ -256,8 +400,10 @@ def expand_sweep(
                 axis = (label, section, key)
                 if axis in _SHAPED_AXES:
                     shown = _shaped_label(val)
+                elif axis in _GAMMA_AXES:
+                    shown = _gamma_label(val)
                 elif axis in _FILE_AXES:
-                    shown = _file_label(val)
+                    shown = file_frags[i][str(val)]
                 elif isinstance(val, dict):
                     shown = _map_label(val)
                 else:
@@ -294,6 +440,20 @@ def expand_sweep(
             labels[i] = (
                 f"{labels[i]}_m{i:02d}" if labels[i] != "single" else f"m{i:02d}"
             )
+
+    seen: dict[str, int] = {}
+    for lbl in labels:
+        seen[lbl] = seen.get(lbl, 0) + 1
+    clash = sorted(l for l, n in seen.items() if n > 1)
+    if clash:
+        raise ValueError(
+            f"{len(clash)} sweep label(s) are shared by more than one "
+            f"combination: {clash[:5]}. The label names the run directory and "
+            f"nothing else separates two runs that agree on every identity-"
+            f"bearing field, so these arms would overwrite each other's "
+            f"checkpoint and log. Almost always a value listed twice on one "
+            f"axis; drop the repeat."
+        )
 
     return combos, labels
 

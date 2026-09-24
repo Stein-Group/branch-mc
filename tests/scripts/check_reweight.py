@@ -133,8 +133,8 @@ cfg = config.from_params(
             "type": "reweight",
             "trials": 40,
             "trial_box_side": 5.0,
-            "depth": 0,
         },
+        "engine": {"depth": 0},
         "run": {"sampling_window": 1000},
     }
 )

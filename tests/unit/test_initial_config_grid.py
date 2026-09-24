@@ -38,7 +38,8 @@ def _cfg(spec="grid", *, box=12.0, dim=3, pot="hard_core", ens=None, run=None):
     r.update(run or {})
     p = {
         "potential": {"main": pot},
-        "sampler": {"type": "rosenbluth", "depth": 0},
+        "sampler": {"type": "rosenbluth"},
+        "engine": {"depth": 0},
         "ensemble": ensemble,
         "run": r,
     }
@@ -187,10 +188,10 @@ def _par_cfg(box=12.0, dim=3, n_cell=8, spec="grid"):
             "potential": {"main": "hard_core"},
             "sampler": {
                 "type": "rosenbluth",
-                "depth": 0,
                 "trials": 10,
                 "trial_box_side": 3.0,
             },
+            "engine": {"depth": 0},
             "ensemble": {"mu": 4.3, "dimension": dim, "box": box},
             "run": {
                 "kind": "parallel",

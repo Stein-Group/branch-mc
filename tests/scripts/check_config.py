@@ -85,8 +85,8 @@ PARAMS = {
             "type": "rosenbluth",
             "trial_density": 400,
             "trial_box_side": 3.0,
-            "depth": 0,
         },
+        "engine": {"depth": 0},
         "run": {"lower_cutoff": 1.0},
     },  # original floors LJ at the diameter
     "hs2d": {
@@ -96,8 +96,8 @@ PARAMS = {
             "type": "rosenbluth",
             "trial_density": 400,
             "trial_box_side": 3.0,
-            "depth": 0,
         },
+        "engine": {"depth": 0},
     },
     "hs3d": {
         "potential": {"main": "hard_core"},
@@ -106,8 +106,8 @@ PARAMS = {
             "type": "rosenbluth",
             "trial_density": 400,
             "trial_box_side": 3.0,
-            "depth": 0,
         },
+        "engine": {"depth": 0},
     },
     "aux2d": {
         "potential": {"main": "hard_core"},
@@ -117,8 +117,8 @@ PARAMS = {
             "type": "rosenbluth",
             "trial_density": 400,
             "trial_box_side": 3.0,
-            "depth": 0,
         },
+        "engine": {"depth": 0},
     },
     "aux3d": {
         "potential": {"main": "hard_core"},
@@ -131,8 +131,8 @@ PARAMS = {
             "type": "rosenbluth",
             "trial_density": 400,
             "trial_box_side": 3.0,
-            "depth": 0,
         },
+        "engine": {"depth": 0},
     },
 }
 

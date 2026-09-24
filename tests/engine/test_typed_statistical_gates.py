@@ -333,10 +333,10 @@ def _engine_mean_N(species_file: str, mu_per_species: dict, seed: int, windows: 
         "potential": {"main": "lennard_jones", "T": temp, "species_file": species_file},
         "sampler": {
             "type": "channel_cyclic",
-            "depth": 1,
             "trial_density": 1.0,
             "channel_width": 1.5,
         },
+        "engine": {"depth": 1},
         "ensemble": {"mu": mu_per_species, "dimension": 3, "box": box},
         "run": {"sampling_window": 300},
     }

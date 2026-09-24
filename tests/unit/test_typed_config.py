@@ -558,16 +558,23 @@ def test_a_sampler_refuses_the_keys_it_cannot_read(sampler, foreign):
     The union-of-all-keys check that allowed this is gone; each sampler names
     what it reads in `_SAMPLER_KEYS`, once.
     """
-    base = {
-        "metropolis": {},
-        "rosenbluth": {"trials": 20, "trial_box_side": 3.0},
-        "branch": {"depth": 1, "trials": 20, "trial_box_side": 3.0},
-        "channel_cyclic": {"depth": 1, "trial_density": 1.5, "channel_width": 1.5},
+    # the group size travels in the `engine` block: left in the sampler it
+    # would trip the moved-key refusal and this test would assert that guard
+    # instead of the per-sampler one it is about
+    base, engine = {
+        "metropolis": ({}, {}),
+        "rosenbluth": ({"trials": 20, "trial_box_side": 3.0}, {}),
+        "branch": ({"trials": 20, "trial_box_side": 3.0}, {"depth": 1}),
+        "channel_cyclic": (
+            {"trial_density": 1.5, "channel_width": 1.5},
+            {"depth": 1},
+        ),
     }[sampler]
     smp = {"type": sampler, **base, foreign: 5.0}
     p = {
         "potential": {"main": "hard_core"},
         "sampler": smp,
+        "engine": engine,
         "ensemble": {"type": "muVT", "dimension": 3, "box": 20.0, "mu": 1.0},
         "run": {"kind": "single", "radius": 0.5, "seed": 1},
     }

@@ -73,7 +73,8 @@ def _config_fields() -> set[str]:
     cfg = sim_setup.from_params(
         {
             "potential": {"main": "lennard_jones", "T": 1.0},
-            "sampler": {"type": "branch", "depth": 1, "trials": 20},
+            "sampler": {"type": "branch", "trials": 20},
+            "engine": {"depth": 1},
             "ensemble": {"mu": 1.0, "dimension": 3, "box": 8.0},
             "run": {"sampling_window": 20},
         }
@@ -162,7 +163,8 @@ def test_the_tail_correction_is_identity_bearing() -> None:
     """
     base = {
         "potential": {"main": "lennard_jones", "T": 1.0, "tail": True},
-        "sampler": {"type": "branch", "depth": 1, "trials": 20},
+        "sampler": {"type": "branch", "trials": 20},
+        "engine": {"depth": 1},
         "ensemble": {"mu": 3.0, "dimension": 3, "box": 10.0},
         "run": {"sampling_window": 50},
     }

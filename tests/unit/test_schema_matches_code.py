@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_JSON = ROOT / "examples" / "schema.json"
 
 # blocks whose keys _check() enforces, in the order from_params validates them
-_BLOCKS = ("potential", "sampler", "ensemble", "run", "auxiliary")
+_BLOCKS = ("potential", "sampler", "engine", "ensemble", "run", "auxiliary")
 
 
 def _allowlists_from_source():
@@ -75,6 +75,13 @@ def _block_allowlists():
         for blk, m in marker.items():
             if m in keys:
                 out[blk] = keys
+    # THE ENGINE BLOCK IS NOT A `_check(...)` SET, so it cannot be scraped like
+    # the others: its legal keys depend on which dynamics is chosen, so
+    # `_check_engine` reads them per engine out of `_ENGINE_KEYS` instead. The
+    # block's allowlist is therefore `type` plus the union of what the three
+    # dynamics read -- derived from the same table the code refuses against, so
+    # adding a fourth dynamics with a new knob cannot leave the schema behind.
+    out["engine"] = {"type"}.union(*(ks for ks, _ in S._ENGINE_KEYS.values()))
     missing = set(_BLOCKS) - set(out)
     assert not missing, f"could not identify allowlists for {sorted(missing)}"
     return out
@@ -146,6 +153,18 @@ def test_docstring_schema_documents_every_key():
         "metropolis_dynamics",
         "glauber_dynamics",
         "suwa_todo_dynamics",
+        # sampler.gamma_mode
+        "fixed",
+        "adaptive",
+        # sampler.gamma_criterion
+        "participation",
+        "perplexity",
+        # sampler.gamma_solver ("grid" is listed below, under
+        # run.initial_config, and is the same string)
+        "moments",
+        # auxiliary.g3_lookup
+        "linear",
+        "nearest",
         # sampler.channel_length: "cyclic" is current, the rest legacy synonyms
         "cyclic",
         "full",
