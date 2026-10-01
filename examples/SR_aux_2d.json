@@ -17,7 +17,7 @@
   "auxiliary": {
     "type": "pmf",
     "eta": 0.647,
-    "gamma": 0.6
+    "gamma": 0.5
   },
 
   "ensemble": {

@@ -1694,6 +1694,7 @@ def advance(
     # local density n_cav/v_cav against the global N/V.
     _ncav_sum = 0.0
     _ncav_count = 0
+    _ncav_last: int | None = None  # occupancy at the window's last exchange
     # dual-cutoff correction statistics for this window. The MEAN should sit near
     # zero (the shell energy cancels between the inserted and removed groups) and
     # the SD is what costs acceptance, so both are reported: a drifting mean means
@@ -1721,9 +1722,8 @@ def advance(
     #     new per clique= sum(clq*_new) / sum(clq*_n)
     #
     # summing numerator and denominator separately, which is exact. `avg_n_cav`
-    # below is the counter-example: it is a per-window mean and the runner then
-    # takes a running mean OF those, so it is already a mean of means and must
-    # not be used as a template.
+    # is a per-window mean, so it is exact for one row only; averaging it over
+    # rows is a mean of means and it must not be used as a template.
     #
     # Counted where the acceptance is computed, so clq{A,R}_n match add_attempt
     # / the remove equivalent exactly -- a free cross-check on the log.
@@ -2088,6 +2088,7 @@ def advance(
                 n_cav = 0
             _ncav_sum += n_cav
             _ncav_count += 1
+            _ncav_last = n_cav
         else:
             # depth >= 1 uses the SAME mirror geometry as depth 0, for the same
             # reason. An `add` centres the cavity uniformly; a `remove` must
@@ -2164,6 +2165,7 @@ def advance(
             n_cav = len(idx_cav)
             _ncav_sum += n_cav
             _ncav_count += 1
+            _ncav_last = n_cav
             if full_repacking:
                 # whole-cavity repack: throw away depth and act on everything the
                 # cavity holds. add removes all n_cav and inserts one more, remove
@@ -3086,6 +3088,8 @@ def advance(
     packing = (N * pot_spec.volume_of_molecule) / total_vol
     n_cav_mean = (_ncav_sum / _ncav_count) if _ncav_count else 0.0
     out = {"N": N, "packing_fraction": packing, "counters": c, "n_cav": n_cav_mean}
+    # None when the window ran no exchange: there was no cavity to count
+    out["n_cav_last"] = _ncav_last
     # raw per-window sums; the runner logs them as integers (see _clq above)
     out["clique"] = dict(_clq)
     # ADAPTIVE GAMMA DIAGNOSTICS, absent on a fixed-gamma run (the identity

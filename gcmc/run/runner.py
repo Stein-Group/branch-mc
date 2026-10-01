@@ -33,8 +33,10 @@ if TYPE_CHECKING:
     from .sim_setup import Config
 
 from .. import config_specs
+from ..analysis.energy import configuration_energy
 from ..engine import metropolis_dynamics
 from ..engine.glauber_dynamics import LADDER_ENGINES
+from ..forcefield.lj_table import LennardJonesTable
 from ..space import geometry
 from ..system.state import ChainState
 from . import hash_fingerprint, io, sim_setup
@@ -66,10 +68,10 @@ logger = logging.getLogger(__name__)
 #   species     N_<name>, one per species, on a typed run. Cannot be dropped --
 #               composition IS the output of a mixture run, and a typed log
 #               without it is the defect this whole stage was about.
-#   state       packing fraction, mu, running means, density
+#   state       packing fraction, n_cav, mu, running means, energy (LJ only)
 #   moves       the move counters, whichever moves the ensemble proposes:
 #               add/remove/translate (+ swap when typed) in muVT, repack in NVT
-#   clique      per-move clique tallies, A/R in muVT and P in NVT
+#   clique      per-move clique tallies; P (repack) in the fixed-N ensembles
 #   clique_acc  the accepted-only repeats of the clique positions
 #
 # Selection is `run.log_columns` (an explicit list) XOR `run.log_drop` (subtract
@@ -199,6 +201,7 @@ def _column_table(
     glauber: bool = False,
     suwa_todo: bool = False,
     esjd: bool = False,
+    energy: bool = False,
 ) -> list[tuple[str, int, str, str]]:
     """(name, width, group, value key) for every column this run can fill.
 
@@ -215,6 +218,8 @@ def _column_table(
         ("MC_cycle(M)", 13, "core", "cycle"),
         ("pckng_frctn", 13, "state", "packing"),
         ("N", 7, "core", "N"),
+        # cavity occupancy at the window's last exchange, sampled like N
+        ("n_cav", 7, "state", "n_cav"),
     ]
     if nvt and canonical:
         # A fixed-composition window proposes translations and pair identity
@@ -257,9 +262,13 @@ def _column_table(
         ("wall_s", 11, "core", "wall"),
         ("mu", 12, "state", "mu"),
         ("avgN", 11, "state", "avg_n"),
+        # mean cavity occupancy over every exchange in this window only
         ("avg_n_cav", 12, "state", "avg_ncav"),
-        ("density", 14, "state", "density"),
     ]
+    # Total U of the end-of-window configuration (analysis.energy). A hard-core
+    # run's is identically zero, so it gets no column.
+    if energy:
+        cols += [("energy", 16, "state", "energy")]
     # CLIQUE COMPOSITION (metropolis_dynamics._clq): raw per-window integer
     # SUMS. A = add, R = remove, P = repack. clq*_n counts scored moves,
     # clq*_pos sums the clique sizes, clq*_new sums the positions in those
@@ -267,13 +276,12 @@ def _column_table(
     # removed member put back. Never log a ratio here: summing these columns over
     # any span of rows and dividing at the end is exact, whereas a per-window
     # fraction would become a mean of means as soon as the reporting interval
-    # changed. (Contrast avg_n_cav above, which IS a running mean of per-window
-    # means -- do not copy it.)
+    # changed. (Contrast avg_n_cav above, which IS a per-window mean -- do not
+    # copy it.)
     # A canonical window scores no cliques -- the clique tallies are counted
-    # where an exchange is scored, and it proposes none.
-    _clique_tags: tuple[str, ...] = (
-        () if (nvt and canonical) else ("P",) if nvt else ("A", "R")
-    )
+    # where an exchange is scored, and it proposes none. The muVT A/R tallies
+    # are still accumulated by the engine but are no longer written to the log.
+    _clique_tags: tuple[str, ...] = ("P",) if (nvt and not canonical) else ()
     for tag in _clique_tags:
         cols += [
             (f"clq{tag}_n", 9, "clique", f"clique.{tag}_n"),
@@ -1192,6 +1200,13 @@ def run(
         _species_names = (
             None if kern.species is None or kern.n_species <= 1 else kern.species.names
         )
+        # The energy column's inputs, resolved once. Typed runs use the table
+        # potential the engine itself reads (see metropolis_dynamics.advance);
+        # untyped runs use the frozen LJ shape directly, which is also what an
+        # ljaux run's energy is, whatever its auxiliary weigher is.
+        _pot_spec = config_specs.potential_spec(cfg)
+        _lj_run = _pot_spec.potential == "lennard_jones"
+        _e_table = potential if isinstance(potential, LennardJonesTable) else None
         _cols = select_columns(
             _column_table(
                 nvt=ens.ensemble_type in ("NVT", "semigrand"),
@@ -1200,6 +1215,7 @@ def run(
                 glauber=samp.engine in LADDER_ENGINES,
                 suwa_todo=samp.engine == "suwa_todo_dynamics",
                 esjd=io_.esjd,
+                energy=_lj_run,
             )
             + _species_cols(_species_names),
             include=io_.log_columns,
@@ -1234,7 +1250,6 @@ def run(
         targeting = ens.target_count is not None
         if targeting and state.mu is None:
             state.mu = ens.chem_pot
-        V = kern.total_volume
 
         win = 0
         while state.step < io_.target_cycles:
@@ -1250,11 +1265,13 @@ def run(
                 state.n_history = state.n_history[-ens.control_window :]
             avg_n = sum(state.n_history) / len(state.n_history)
 
-            # running mean of cavity occupancy over the same window (diagnostic)
-            state.ncav_history.append(stats.get("n_cav", 0.0))
-            if len(state.ncav_history) > ens.control_window:
-                state.ncav_history = state.ncav_history[-ens.control_window :]
-            avg_ncav = sum(state.ncav_history) / len(state.ncav_history)
+            # cavity occupancy: the last exchange's count and this window's mean.
+            # No exchange (or an engine with no cavity) leaves nothing to report.
+            _ncav_last = stats.get("n_cav_last")
+            if _ncav_last is None:
+                ncav_now, avg_ncav = "nan", "nan"
+            else:
+                ncav_now, avg_ncav = str(_ncav_last), f"{stats['n_cav']:.4f}"
 
             if targeting:
                 # Robbins-Monro update on log-N: mu += gamma * (lnN_target - lnN).
@@ -1283,9 +1300,21 @@ def run(
                     "packing": f"{stats['packing_fraction']:.8f}",
                     "mu": f"{cur_mu:.6f}",
                     "avg_n": f"{avg_n:.4f}",
-                    "avg_ncav": f"{avg_ncav:.4f}",
-                    "density": f"{avg_n / V:.8f}",
+                    "avg_ncav": avg_ncav,
+                    "n_cav": ncav_now,
                 }
+                if _lj_run:
+                    _u = configuration_energy(
+                        state.positions,
+                        kern.box_dims,
+                        ens.dimension,
+                        kern.upper_cutoff,
+                        species=state.species if _e_table is not None else None,
+                        matrix=ens.matrix_positions,
+                        table=_e_table,
+                        tail_pref=_pot_spec.lj_tail_pref,
+                    )
+                    values["energy"] = f"{_u:.6f}"
                 for _k, _v in cc.items():
                     values[_k] = _v
                 for _tag in ("A", "R", "P"):

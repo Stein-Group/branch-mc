@@ -1,0 +1,37 @@
+{
+  "potential": {
+    "main": "hard_core"
+  },
+
+  "engine": {
+    "type": "metropolis_dynamics",
+    "full_repacking": "True"
+  },
+
+  "sampler": {
+    "type": "branch",                    
+    "trials": 200,                          
+    "trial_box_side": 1.8 
+  },
+
+  "ensemble": {
+    "mu": 10,
+    "dimension": 2,                      	
+    "box": 75                             		 
+  },
+
+  "run": {
+    "kind": "single",
+    "n_cores": 8,
+    "sampling_window": 1000,
+    "target_cycles": 5e6,
+    "seed": [897564, 273162],
+    "initial_config": [
+            "/dss/dsshome1/01/ge74fer3/dss/BRANCH_MC/equilibrated/hard_disk_2d/box_75/mu_12.00_hard_2d_box_75.xyz",
+            "/dss/dsshome1/01/ge74fer3/dss/BRANCH_MC/equilibrated/hard_disk_2d/box_75/mu_11.00_hard_2d_box_75.xyz",
+            "/dss/dsshome1/01/ge74fer3/dss/BRANCH_MC/equilibrated/hard_disk_2d/box_75/mu_9.00_hard_2d_box_75.xyz",
+            "/dss/dsshome1/01/ge74fer3/dss/BRANCH_MC/equilibrated/hard_disk_2d/box_75/mu_8.00_hard_2d_box_75.xyz"
+                        ]
+  }
+}
+

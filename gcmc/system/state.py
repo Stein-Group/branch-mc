@@ -76,9 +76,6 @@ class ChainState:
     # the search rather than restarting it.
     mu: float | None = None
     n_history: list[float] = field(default_factory=list)
-    # rolling window of per-window mean cavity occupancy, used only for the
-    # avg_n_cav diagnostic column (local density check n_cav/v_cav vs N/V).
-    ncav_history: list[float] = field(default_factory=list)
     # FLAT-HISTOGRAM BIASING IN N, or None. A `sampling.flat_histogram
     # .FlatHistogram`: the bias eta[N] the exchange path adds to its weights,
     # plus the collection matrix filled with UNBIASED transition probabilities.

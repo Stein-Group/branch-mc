@@ -1,0 +1,32 @@
+{
+  "potential": {
+    "main": "hard_core"
+  },
+
+  "engine": {
+    "type": "metropolis_dynamics",
+    "full_repacking": "True"
+  },
+
+  "sampler": {
+    "type": "branch",
+    "trials": [500,550,600,650,700,750,800,850,900,950],
+    "trial_box_side": [1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.4]
+  },
+
+  "ensemble": {
+    "mu": 12,
+    "dimension": 3,                      	
+    "box": 20                             		 
+  },
+
+  "run": {
+    "kind": "single", 
+    "n_cores": 80,    
+    "sampling_window": 100,                    
+    "target_cycles": 5e6,                      
+    "seed": 576347,
+    "initial_config": "/dss/dsshome1/01/ge74fer3/dss/BRANCH_MC/equilibrated/hard_disk_3d/box_20"
+  }
+}
+

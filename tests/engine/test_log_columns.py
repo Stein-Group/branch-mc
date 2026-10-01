@@ -156,8 +156,8 @@ def test_a_typed_muvt_run_logs_the_swap(tmp_path):
     ("key", "value", "gone", "kept"),
     [
         ("log_drop", ["clique", "clique_acc"], "clqP_n", "rpk_stp"),
-        ("log_drop", ["state"], "density", "N"),
-        ("log_columns", ["moves"], "density", "rpk_stp"),
+        ("log_drop", ["state"], "energy", "N"),
+        ("log_columns", ["moves"], "n_cav", "rpk_stp"),
         ("log_columns", [], "rpk_stp", "N"),
     ],
 )
@@ -194,3 +194,39 @@ def test_a_typo_and_a_double_spelling_are_refused(tmp_path):
         from_params(_nvt(log_columns=["state"], log_drop=["moves"]))
     with pytest.raises(ValueError, match="a LIST of column-group names"):
         from_params(_nvt(log_drop="clique"))
+
+
+def test_a_muvt_lj_log_has_energy_and_n_cav_and_no_exchange_cliques(tmp_path):
+    names, rows = _header(_MUVT, tmp_path, "muvt_cols")
+    assert {"energy", "n_cav", "avg_n_cav"} <= set(names), names
+    for gone in ("density", "clqA_n", "clqR_n", "clqA_pos_a", "clqR_new_a"):
+        assert gone not in names, f"{gone!r} is still in the muVT log: {names}"
+    u = [float(r[names.index("energy")]) for r in rows]
+    assert any(x != 0.0 for x in u), f"energy never moved off zero: {u}"
+    assert names.index("n_cav") == names.index("N") + 1, names
+    for r in rows:
+        now, avg = r[names.index("n_cav")], r[names.index("avg_n_cav")]
+        if now == "nan":
+            assert avg == "nan", r
+        else:
+            assert int(now) >= 0 and float(avg) >= 0.0, r
+
+
+def test_a_hard_core_log_has_no_energy_column(tmp_path):
+    p = {
+        "potential": {"main": "hard_core"},
+        "sampler": {"type": "branch", "trials": 30, "trial_box_side": 3.0},
+        "engine": {"depth": 1},
+        "ensemble": {"mu": 3.0, "dimension": 3, "box": 12.0, "type": "muVT"},
+        "run": {
+            "kind": "single",
+            "radius": 0.5,
+            "seed": 1,
+            "traj_every": 0,
+            "target_cycles": 2000,
+            "sampling_window": 1000,
+            "checkpoint_every": 5,
+        },
+    }
+    names, _rows = _header(p, tmp_path, "hs_energy")
+    assert "energy" not in names and "n_cav" in names

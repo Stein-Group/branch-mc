@@ -171,6 +171,9 @@ LAYERS: dict[str, int] = {
     # the same kind of thing -- a correlation measured on a frame -- and the two
     # are marked in `demixing`'s docstring as an S5 merge candidate.
     "analysis.demixing": 3,
+    # U of a logged frame, rebuilt from positions: reads L1 pair energies and
+    # the L2 cell list, and the runner is its only caller.
+    "analysis.energy": 3,
 }
 
 # Packages whose __init__ is a re-export shim. They are excluded rather than

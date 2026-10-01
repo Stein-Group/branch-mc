@@ -529,9 +529,22 @@ def launch_sweep(
     next_core = [0]
 
     def start(params: dict[str, Any], label: str) -> subprocess.Popen[bytes]:
-        pf = Path(launch_dir) / f"params_{label}.json"
-        with open(pf, "w") as f:
-            json.dump(params, f, indent=2, sort_keys=True)
+        # The snapshot name must be unique to its CONTENT, not just its label.
+        # `label` only encodes the swept axes ("mu15"), so two jobs launched
+        # from different base files into the same launch_dir used to write the
+        # same `params_mu15.json`. The child reads it a second or so later
+        # (after importing numpy/scipy/ase), and by then the second job had
+        # overwritten it: the first job's runs silently took the other job's
+        # physics and landed under the first job's --root. A digest of the
+        # content makes the names disjoint, and identical content writing the
+        # same file is harmless. Written to a temp name and renamed, so a
+        # reader never sees a half-written file.
+        text = json.dumps(params, indent=2, sort_keys=True)
+        digest = hashlib.sha256(text.encode()).hexdigest()[:12]
+        pf = Path(launch_dir) / f"params_{label}__{digest}.json"
+        tmp = pf.with_name(f"{pf.name}.{os.getpid()}.tmp")
+        tmp.write_text(text)
+        os.replace(tmp, pf)
         env = dict(os.environ)
         for v in _THREAD_VARS:
             env[v] = str(threads)

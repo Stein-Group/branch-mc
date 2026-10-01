@@ -1,0 +1,30 @@
+{
+  "potential": {
+    "main": "hard_core"
+  },
+
+  "sampler": {
+    "type": "branch",                    
+    "depth": 8,                              
+    "trial_density": 100,                          
+    "trial_box_side": 1.75                     
+  },
+
+  "ensemble": {
+    "type": "muVT",
+    "mu": 15.0,    
+    "dimension": 3,                      	
+    "box": 50                             		 
+  },
+
+  "run": {
+    "n_cores": 4,
+    "n_cell": 4,
+    "kind": "parallel",
+    "sampling_window": 1000,                    
+    "target_cycles": 1e8,
+    "traj_every": 100,    
+    "seed": 67893                          
+  }
+}
+

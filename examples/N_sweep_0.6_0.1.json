@@ -1,0 +1,31 @@
+{
+  "potential": {
+    "main": "hard_core"
+  },
+
+  "sampler": {
+    "type": "branch",
+    "depth": 3,
+    "trial_density": 700,
+    "trial_box_side": 2
+  },
+
+  "ensemble": {
+    "type": "QA",
+    "target_N": [83, 83, 83, 83, 83, 83, 83, 83,
+                 83, 83, 83, 83, 83, 83, 83, 83],
+    "dimension": 3,
+    "box": 9.41
+  },
+
+  "run": {
+    "kind": "single",
+    "n_cores": 16,
+    "sampling_window": 1000,
+    "target_cycles": 3e7,
+    "traj_every": 10,
+    "seed": 563738,
+
+    "matrix_config": "/dss/dsshome1/01/ge74fer3/dss/BRANCH_MC_tests_v2/NVT/runs/NVT_matrix_6"
+  }
+}

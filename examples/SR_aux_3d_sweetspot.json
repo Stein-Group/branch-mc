@@ -1,0 +1,40 @@
+{
+  "potential": {
+    "main": "hard_core"
+  },
+
+  "engine": {
+    "type": "metropolis_dynamics",
+    "full_repacking": "True"
+  },
+
+  "sampler": {
+    "type": "rosenbluth",
+    "trials": [25,50,100,150,200,250,300,350,400,450],
+    "trial_box_side": [1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.4]
+  },
+
+  "auxiliary": {
+    "type": "pmf",
+    "g3_csv": "/dss/dsshome1/01/ge74fer3/dss/BRANCH_MC/data/g3_analysis_data.csv",
+    "min_g3": 0.005,
+    "g3_r_cut": 1.8,
+    "gamma": 0.7 
+  },
+
+  "ensemble": {
+    "mu": 12,
+    "dimension": 3,
+    "box": 20
+  },
+
+  "run": {
+    "kind": "single",
+    "n_cores": 80,
+    "sampling_window": 100,
+    "target_cycles": 5e6,
+    "seed": 576347,
+    "esjd": true,
+    "initial_config": "/dss/dsshome1/01/ge74fer3/dss/BRANCH_MC/equilibrated/hard_disk_3d/box_20"
+  }
+}
