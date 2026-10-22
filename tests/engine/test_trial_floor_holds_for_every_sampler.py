@@ -4,15 +4,15 @@ sampler that happens to be named.
 `advance` places a depth-d move by claiming `d + 1` trial slots --
 `rng.choice(n_trials, size=n_remove, replace=False)` -- so a pool smaller than
 that cannot be drawn from and numpy raises. The validator has always refused it
-for `branch`, `channel` and `channel_cyclic`, and `rosenbluth` was exempt while
-taking exactly the same path, so an accepted rosenbluth config could not survive
-its first exchange proposal.
+for `branch` and `channel`, and `rosenbluth` was exempt while taking exactly
+the same path, so an accepted rosenbluth config could not survive its first
+exchange proposal.
 
-This is the second instance of one shape in this stage. The cyclic rod's floor
-(S4 phase 2) was a count recomputed per move and floored at a literal 2; this one
-is a validator check whose condition names three of the four samplers it covers.
-Both crash in the same numpy call, and neither was reachable from the feature
-matrix because every generated point carries a comfortable trial pool.
+This is the second instance of one shape in this stage. The chord-derived rod's
+floor (S4 phase 2) was a count recomputed per move and floored at a literal 2;
+this one is a validator check whose condition names some of the samplers it
+covers. Both crash in the same numpy call, and neither was reachable from the
+feature matrix because every generated point carries a comfortable trial pool.
 
 The pairing below is the test: for each sampler and depth, the validator's
 verdict and the engine's survival must AGREE. A test that only asserted "the
@@ -53,7 +53,7 @@ def _params(sampler: str, depth: int, trials: int) -> dict:
     # the exchange group size is an `engine` key: it says what is done with the
     # trial cloud, not where the cloud comes from
     p["engine"] = {"depth": depth}
-    if sampler in ("channel", "channel_cyclic"):
+    if sampler == "channel":
         p["sampler"]["channel_width"] = 1.5
         p["sampler"]["channel_length"] = 3.0
         p["sampler"].pop("trial_box_side")

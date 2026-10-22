@@ -89,8 +89,8 @@ def _redundant(point: Point) -> bool:
     """
     axis = {a.name: a for a in AXES}
 
-    # `channel_length` is read only by the fixed-length channel. The cyclic rod
-    # sizes itself per move, so it must NOT multiply points across this axis.
+    # `channel_length` is read only by the channel, so no other sampler may
+    # multiply points across this axis.
     if (
         point.sampler != "channel"
         and point.channel_length != axis["channel_length"].values[0]

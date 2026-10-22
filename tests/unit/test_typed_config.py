@@ -53,7 +53,7 @@ from gcmc.run.hash_fingerprint import identity_dict, run_id
 # docs/decisions/DIGEST_PROVENANCE.md, and
 # docs/decisions/GLAUBER_DYNAMICS_REPORT.md says why the default is not
 # excluded from the digest in the first place.
-_UNTYPED_RUN_ID = "45254c9bfde0"
+_UNTYPED_RUN_ID = "9c9ffdf52c84"
 from gcmc.run.sim_setup import from_params
 
 FF = Path(__file__).resolve().parents[2] / "ff"
@@ -161,8 +161,16 @@ def test_the_untyped_fingerprint_does_not_gain_a_null_key():
     assert set(ident) <= set(config_fields.PHYSICS)
     assert set(ident) == {k for k in config_fields.PHYSICS if k in ident}
 
-    # 4. Regression pin on the VALUE. Regenerated 2026-09-10, when `engine` and
-    #    `kmax_margin` joined `config_fields.SAMPLER` for the Glauber engine.
+    # 4. Regression pin on the VALUE. Regenerated 2026-10-17, twice in one
+    #    change: `channel_cyclic` LEFT `config_fields.SAMPLER` with the cyclic
+    #    rod, and `channel_full` joined it for the full-span rod
+    #    (`sampler.channel_length = "full"`). It is False on every run that does
+    #    not ask for that body, so no chain changed; the digest moved because a
+    #    new field in a physics group reaches it by virtue of the group, which
+    #    is the whole design of `config_fields` and the same reason the previous
+    #    two regenerations below happened. Before that, regenerated 2026-09-10,
+    #    when `engine` and `kmax_margin` joined `config_fields.SAMPLER` for the
+    #    Glauber engine.
     #    Previous values, in order: fbdc3125c74a (pre-S1), 0c683de8d49b (S1,
     #    after lj_tail_pref and pore_axis_len were added), e864f492d3ba (S2,
     #    when the identity set became `config_fields.PHYSICS`). Run ids moving
@@ -543,13 +551,12 @@ def test_semigrand_is_accepted_and_still_needs_its_activity_ratio():
         ("rosenbluth", "channel_length"),
         ("rosenbluth", "channel_width"),
         ("branch", "channel_length"),
-        ("channel_cyclic", "channel_length"),
     ],
 )
 def test_a_sampler_refuses_the_keys_it_cannot_read(sampler, foreign):
     """Only the chosen sampler's keys are legal in the sampler block.
 
-    These six cells were ACCEPTED AND IGNORED. That is worse than it sounds:
+    These cells were ACCEPTED AND IGNORED. That is worse than it sounds:
     `channel_length` and `channel_width` are in `_IDENTITY_FIELDS`, so a
     rosenbluth run stating one got a different run directory for the identical
     chain -- measured, four ids for one trajectory. A sweep over a key the
@@ -565,10 +572,6 @@ def test_a_sampler_refuses_the_keys_it_cannot_read(sampler, foreign):
         "metropolis": ({}, {}),
         "rosenbluth": ({"trials": 20, "trial_box_side": 3.0}, {}),
         "branch": ({"trials": 20, "trial_box_side": 3.0}, {"depth": 1}),
-        "channel_cyclic": (
-            {"trial_density": 1.5, "channel_width": 1.5},
-            {"depth": 1},
-        ),
     }[sampler]
     smp = {"type": sampler, **base, foreign: 5.0}
     p = {

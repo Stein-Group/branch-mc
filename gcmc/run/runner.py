@@ -183,6 +183,16 @@ def _glauber_cols(*, suwa_todo: bool = False) -> list[tuple[str, int, str, str]]
         ("glb_nhat_sq", 16, "glauber", "glauber.n_hat_sumsq"),
         ("glb_nhat_wthn", 15, "glauber", "glauber.n_hat_within"),
         ("glb_nhat_n", 11, "glauber", "glauber.n_hat_count"),
+        # THE BODY, SUMMED OVER WINDOW MOVES. Constants on a fixed body, and
+        # the config already states them; on `channel_length = "full"` the
+        # length and the pool are drawn per move and nothing else records them.
+        # Without these a reader cannot turn that run's cost or flux into a
+        # per-trial or per-sigma number, and `pool_M` cannot be recovered from
+        # params.json at all -- `channel_length` is the string "full" there.
+        # Raw sums, like every column above, so a ratio over any span of rows is
+        # exact rather than a mean of means.
+        ("glb_bodylen", 13, "glauber", "glauber.body_len_sum"),
+        ("glb_poolM", 11, "glauber", "glauber.pool_M_sum"),
     ]
     if suwa_todo:
         cols += [
@@ -201,6 +211,7 @@ def _column_table(
     glauber: bool = False,
     suwa_todo: bool = False,
     esjd: bool = False,
+    single_particle: bool = False,
     energy: bool = False,
 ) -> list[tuple[str, int, str, str]]:
     """(name, width, group, value key) for every column this run can fill.
@@ -322,7 +333,29 @@ def _column_table(
     #              for a selection-bias change, which cannot touch it.
     #   esjd_mov / esjd_trn  the two denominators, so per-MOVE forms are exact
     #              over any span of rows rather than a mean of means.
-    if esjd:
+    #
+    # DECLARED ONLY WHERE A WINDOW FILLS THEM, and the condition is the exact
+    # set of paths that build `stats["esjd"]`: the cavity/channel branch of
+    # `metropolis_dynamics.advance`, and nothing else. The ladder engines do
+    # not build it, and neither does `_advance_single_particle` -- the plain
+    # `metropolis` sampler returns `{N, packing_fraction, counters, n_cav}` and
+    # stops. Declaring the columns there declared four a window could never
+    # fill, and `_log_row` raised a KeyError on the FIRST row of the run. That
+    # is the right failure for a declared column with no value, so the fix is
+    # not to soften the guard but to stop declaring them.
+    #
+    # Nothing is lost on either path. The ladder's `glb_dN_sq` is the same
+    # quantity under another name and is always on. On the single-particle path
+    # an accepted exchange moves N by exactly one, so the sum of dN^2 IS
+    # `add_acc + rm_acc`, which is already logged -- the column would be a
+    # third name for a number the log already carries twice.
+    #
+    # What a sweep gets from this: `run.esjd` can be written ONCE and run
+    # against every dynamics, which is how an engine comparison is actually set
+    # up. Refusing the key on the paths that ignore it would force a different
+    # `run` block per arm, and an asymmetric `run` block is the thing such a
+    # comparison is trying to avoid.
+    if esjd and not glauber and not single_particle:
         cols += [
             ("esjd_dNsq", 11, "esjd", "esjd.dN_sq"),
             ("esjd_drsq", 11, "esjd", "esjd.dr_sq"),
@@ -1215,6 +1248,9 @@ def run(
                 glauber=samp.engine in LADDER_ENGINES,
                 suwa_todo=samp.engine == "suwa_todo_dynamics",
                 esjd=io_.esjd,
+                # the plain `metropolis` sampler runs `_advance_single_particle`,
+                # which builds no esjd block: see the note in `_column_table`
+                single_particle=(samp.sampler == "metropolis"),
                 energy=_lj_run,
             )
             + _species_cols(_species_names),

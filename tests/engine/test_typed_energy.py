@@ -207,11 +207,11 @@ def test_the_overlap_floor_is_per_pair() -> None:
 
 
 def test_every_sampler_accepts_a_species_file() -> None:
-    """All four samplers read the pair table. This is the completion of P3.
+    """All three samplers read the pair table. This is the completion of P3.
 
-    `potential_type` collapses branch, channel and channel_cyclic into one tag,
-    but they do not share a clique kernel, so support had to be established per
-    SAMPLER and arrived in that order:
+    `potential_type` collapses branch and channel into one tag, but they do not
+    share a clique kernel, so support had to be established per SAMPLER and
+    arrived in that order:
 
         rosenbluth      per-pair weights and per-pair overlap floors
         channel         the mixture overlap policy -- this already
@@ -220,9 +220,6 @@ def test_every_sampler_accepts_a_species_file() -> None:
         branch          count_and_sample / ljbranch_weight_sum build adjacency at
                         the per-pair floor and take the intra-clique factor from
                         the table
-        channel_cyclic  the per-pair floor and table became OPTIONS on the cyclic
-                        sweeps, filling the two cells the class lattice could not
-                        express
 
     WHAT THIS TEST IS FOR NOW THAT NOTHING IS REFUSED. It asserts that every
     sampler receives the TABLE-AWARE potential, which is the thing that was
@@ -246,14 +243,9 @@ def test_every_sampler_accepts_a_species_file() -> None:
             params["ensemble"]["box"] = 12.0
             params["sampler"]["channel_length"] = 4.0
             params["sampler"]["channel_width"] = 1.5
-        elif sampler == "channel_cyclic":
-            params["ensemble"]["box"] = 12.0
-            params["sampler"]["channel_width"] = 1.5
-            params["sampler"].pop("trials")
-            params["sampler"]["trial_density"] = 0.4
         return sim_setup.from_params(params)
 
-    for sampler in ("rosenbluth", "channel", "branch", "channel_cyclic"):
+    for sampler in ("rosenbluth", "channel", "branch"):
         pot = cfg_for(sampler).build_potential()
         assert isinstance(pot, LennardJonesTable), (
             f"{sampler} got {type(pot).__name__}, not the table-aware potential. "

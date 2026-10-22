@@ -59,11 +59,10 @@ def _typed_cfg(tmp_path: Path, sampler: str, depth: int):
 
     smp: dict = {"type": sampler}
     eng: dict = {"depth": depth}
-    if sampler in ("channel", "channel_cyclic"):
+    if sampler == "channel":
         smp["trial_density"] = 1.0
         smp["channel_width"] = 1.5
-        if sampler == "channel":
-            smp["channel_length"] = 6.0
+        smp["channel_length"] = 6.0
     else:
         smp["trials"] = 24
         smp["trial_box_side"] = 3.0
@@ -82,7 +81,7 @@ def _typed_cfg(tmp_path: Path, sampler: str, depth: int):
     return cfg, potential, weigher
 
 
-_MODES = [("channel", 1), ("channel", 2), ("channel_cyclic", 1), ("branch", 1)]
+_MODES = [("channel", 1), ("channel", 2), ("branch", 1)]
 
 
 @pytest.mark.parametrize("sampler,depth", _MODES, ids=lambda v: str(v))

@@ -35,6 +35,7 @@ parameters -- is on the same reduced scale.
 
 from __future__ import annotations
 
+import itertools
 import math
 
 import numpy as np
@@ -53,6 +54,7 @@ _IMAGES = np.array(
 
 __all__ = [
     "axial_coord_full",
+    "cuboid_image_is_unambiguous",
     "cuboid_members",
     "cuboid_members_cl",
     "cuboid_packing_bound",
@@ -61,9 +63,211 @@ __all__ = [
     "oriented_cuboid_trials",
     "random_rotation_matrix",
     "ray_box_chord",
+    "rod_image_length",
+    "rod_local_coords",
     "rod_members_full",
     "rod_members_full_cl",
 ]
+
+
+def rod_local_coords(
+    coords: FloatArray,
+    center: FloatArray,
+    axis: FloatArray,
+    e1: FloatArray,
+    e2: FloatArray | None,
+    s_lo: float,
+    s_hi: float,
+    half_w: float,
+    box: FloatArray,
+) -> FloatArray:
+    """Rod-local coordinates (s, u, v) of points that lie in the rod body.
+
+    THE IMAGE IS CHOSEN ON THE WHOLE TEST, not on the axial range alone, and
+    that distinction is the whole function. A rod longer than the box can have
+    a lattice vector whose axial component is SHORTER than the body -- the body
+    diagonal of a cube is one -- so a point can have two images whose axial
+    coordinates both land inside the body's range while only one of them is
+    anywhere near the rod. Picking by axial range alone then returns an `s`
+    belonging to an image half a box off the line, the cross-section
+    coordinates are taken against a point that is not where the atom is, and
+    the sweep is handed a pair it believes to be seven sigma apart and that is
+    really overlapping. That failure is silent: the DP is consistent with the
+    coordinates it was given, and the overlap only surfaces later, as a legal
+    configuration that is not.
+
+    So the cross-section is part of the test. An image qualifies when its axial
+    coordinate is in `[s_lo, s_hi]` AND its cross-section coordinates are inside
+    the body, and at most one can: two would mean the rod passes within a
+    cross-section of its own image, which `rod_image_length` is what rules out.
+
+    THE POINT OF THIS IS THE SWEEP. In these coordinates the Euclidean distance
+    between two body points is their true minimum-image distance, so the
+    ordinary open-rod transfer matrix applies to a rod of any length.
+
+    Raises if a point has no image in the body, because every caller hands it
+    points it has already placed there -- a member found by `rod_members_full`
+    or a trial drawn in the body -- so a miss is a disagreement between two
+    descriptions of one region and not a condition to paper over.
+    """
+    P = np.asarray(coords, float)
+    if P.ndim != 2:
+        P = P.reshape(len(P), -1)
+    n, dim = P.shape
+    if n == 0:
+        return np.zeros((0, dim))
+    center = np.asarray(center, float)
+    axis = np.asarray(axis, float)
+    box = np.broadcast_to(np.asarray(box, float), (dim,))
+    cross = (
+        [np.asarray(e1, float)]
+        if e2 is None
+        else [np.asarray(e1, float), np.asarray(e2, float)]
+    )
+    frame = np.column_stack([axis, *cross])  # (dim, dim)
+    Q = (P - center) @ frame  # (n, dim): col 0 = s, cols 1.. = cross
+    shifts = (_unit_images(dim) * box) @ frame  # (3**dim, dim)
+    # ALL IMAGES AT ONCE rather than a loop with an early exit. The pool is a
+    # few dozen rows, so this is dispatch-bound: 3**dim passes over a short
+    # array cost more in numpy call overhead than one pass over a block
+    # 3**dim times as long, even though the loop would usually stop early.
+    cand = Q[None, :, :] - shifts[:, None, :]  # (3**dim, n, dim)
+    tol = 1e-7
+    ok = (cand[:, :, 0] >= s_lo - tol) & (cand[:, :, 0] <= s_hi + tol)
+    ok &= (np.abs(cand[:, :, 1:]) <= half_w + tol).all(axis=2)
+    found = ok.any(axis=0)
+    if not found.all():
+        raise ValueError(
+            f"{int((~found).sum())} of {n} points have no periodic image inside "
+            f"the rod body (axial [{s_lo:g}, {s_hi:g}], half-width {half_w:g}). "
+            "Every point handed here was either found in the body or drawn in "
+            "it, so membership and this frame disagree about the same region"
+        )
+    # At most one image can qualify -- two would mean the rod runs within a
+    # cross-section of its own image, which `rod_image_length` rules out -- so
+    # the first hit IS the hit.
+    pick = ok.argmax(axis=0)
+    return cand[pick, np.arange(n), :]
+
+
+_LATTICE_CACHE: dict[tuple[int, int], FloatArray] = {}
+
+
+def _lattice_offsets(nmax: int, dim: int) -> FloatArray:
+    """Nonzero integer offsets in [-nmax, nmax]**dim, built once per shape.
+
+    `rod_image_length` runs once per window move and the lattice does not
+    depend on the orientation, so building 5**3 tuples in Python each time was
+    most of what the guard cost.
+    """
+    key = (int(nmax), int(dim))
+    got = _LATTICE_CACHE.get(key)
+    if got is None:
+        got = np.array(
+            [c for c in itertools.product(range(-nmax, nmax + 1), repeat=dim) if any(c)],
+            dtype=float,
+        )
+        _LATTICE_CACHE[key] = got
+    return got
+
+
+def cuboid_image_is_unambiguous(
+    half_len: float, half_w: float, R: FloatArray, box: FloatArray
+) -> bool:
+    """Can `local_from_box` recover a member's offset from this body's centre?
+
+    THE QUESTION IS NOT THE PERIODIC GUARD, and conflating the two is what made
+    the full-span body cost more than a fixed rod of the same length. The guard
+    (`window_guard_ok`) answers "is every PAIR in this body at its local
+    distance", which a fixed rod needs because nothing else establishes it. A
+    full-span body has already had that answered, by `rod_image_length`, per
+    orientation and at the length it actually uses.
+
+    What is left is the weaker, per-particle question this function asks:
+    `local_from_box` subtracts `round(q / box) * box`, which returns the true
+    offset exactly when that offset is under half a box in EVERY lab axis. So
+    the test is the body's half-extent along each axis, which for an oriented
+    cuboid is
+
+        h_i = half_len * |axis_i| + half_w * sum_j |e_j,i|
+
+    against `box_i / 2`. A body diagonal still fails it, which is right -- that
+    one really can wrap. An axis-aligned body of almost a full box passes, which
+    the diagonal test refused.
+
+    Strict, with a margin: a member exactly at half a box is a coin toss between
+    two images and the body is drawn from a continuum, so the measure-zero case
+    is excluded rather than resolved.
+    """
+    R = np.asarray(R, float)
+    dim = R.shape[0]
+    box = np.broadcast_to(np.asarray(box, float), (dim,))
+    half = np.abs(R[:, 0]) * float(half_len)
+    for j in range(1, dim):
+        half = half + np.abs(R[:, j]) * float(half_w)
+    return bool(np.all(half < 0.5 * box - 1e-9))
+
+
+def rod_image_length(
+    axis: FloatArray,
+    box: FloatArray,
+    half_w: float,
+    reach: float,
+    max_len: float,
+    dim: int,
+) -> float:
+    """Longest body length along `axis` whose local distances ARE the periodic
+    ones; 0.0 if no positive length qualifies.
+
+    THE PROBLEM THIS SOLVES. A rod that spans the box re-enters it and, unless
+    it runs along a box axis, passes near its own periodic image. Two body atoms
+    far apart along the rod are then CLOSE in space through that image, while
+    the rod-local coordinates say they are far. Nothing in the sweep can see
+    that, because the sweep is given local coordinates and believes them.
+
+    THE TEST, one inequality per nonzero lattice vector `n`. Write `rad` for the
+    cross-section's corner radius, so every body atom is within `rad` of the
+    line. Two atoms separated by the image `n` are at least
+    `|n_perp| - 2*rad` apart across the line and at least `|n.axis| - L` apart
+    along it, where `L` is the body length, and the distance is at least either
+    of those. So the image is harmless if
+
+        |n_perp| - 2*rad >= reach     (it never comes near, at any length)
+        |n.axis| - L     >= reach     (it comes near, but not within L)
+
+    and the second is a BOUND ON L. Taking the smallest such bound over the
+    images that fail the first gives the longest usable body.
+
+    THE AXIS-ALIGNED CASE FALLS OUT RATHER THAN BEING SPECIAL-CASED. There
+    `n_perp` is zero for `n` along the rod, so the first test fails and the
+    second gives `L <= box - reach`: the frozen gap, derived rather than
+    assumed. An oblique direction is refused only when some image runs close to
+    the line AND close along it, which is the genuinely bad geometry.
+
+    Returning a LENGTH rather than a yes/no is what keeps the move cheap. A
+    refused direction is a wasted proposal; a shortened body is a smaller gap
+    around the same ring, and the construction does not change.
+    """
+    axis = np.asarray(axis, float)
+    box = np.broadcast_to(np.asarray(box, float), (dim,))
+    rad = float(half_w) * math.sqrt(dim - 1)
+    reach = float(reach)
+    limit = float(max_len)
+    if limit <= 0.0:
+        return 0.0
+    # Images that cannot hold a close pair at ANY length are not worth visiting:
+    # the two atoms are at most this far apart inside the body.
+    span = math.hypot(limit, 2.0 * rad) + reach
+    nmax = max(1, int(math.ceil(span / float(box.min()))))
+    N = _lattice_offsets(nmax, dim) * box
+    na = N @ axis
+    perp = np.linalg.norm(N - na[:, None] * axis, axis=1)
+    near = perp - 2.0 * rad < reach  # images the perpendicular test does not clear
+    if not near.any():
+        return limit
+    bound = float(np.abs(na[near]).min()) - reach
+    return max(0.0, min(limit, bound))
+
 
 
 def random_rotation_matrix(rng: RNG, dim: int = 3) -> FloatArray:
@@ -243,7 +447,31 @@ def rod_members_full(
 
     # per-axis reach of the cross-section past a face
     reach = half_w * sum(np.abs(e) for e in cross) + 1e-12
-    shell = ((reach >= P) | (box - reach <= P)).any(axis=1)
+    # WHICH ATOMS CAN REACH THE ROD THROUGH A NONZERO IMAGE: the ones the rod
+    # STICKS OUT PAST on some face, and that is a property of where this rod
+    # sits, not a constant.
+    #
+    # It used to be `reach` on every face, which was right only because every
+    # caller clipped the chord to the box (`ray_box_chord`): the axis line then
+    # lay inside, so the rod overhung a face by at most its cross-section. A
+    # body whose length comes from the orientation rather than from the walls
+    # overhangs by however much of it is outside, and atoms that far from the
+    # face wrap onto it. Missing them is silent -- they are simply not members,
+    # and the trial cloud then draws points the membership test disowns.
+    #
+    # Per lab axis `a` the rod spans `c_a +/- h_a` with
+    # `h_a = (L/2)|axis_a| + half_w * sum_j |e_j,a|`, so it overhangs the low
+    # face by `h_a - c_a` and the high face by `h_a - (box_a - c_a)`, each
+    # clamped at zero. Both reduce to `reach` for a clipped chord, so the fixed
+    # cuboid's single-pass membership is unchanged.
+    c_in = np.mod(center, box)
+    h_ext = 0.5 * (s_max - s_min) * np.abs(axis) + reach
+    over_lo = np.maximum(0.0, h_ext - c_in)
+    over_hi = np.maximum(0.0, h_ext - (box - c_in))
+    # CROSSED ON PURPOSE. An atom pulled DOWN by one box (image -1) lands in the
+    # rod only if the rod overhangs the LOW face, so the overhang there gates
+    # atoms near the HIGH one, and vice versa.
+    shell = ((over_hi >= P) | (box - over_lo <= P)).any(axis=1)
 
     # g = 0, over every atom: narrow on the tightest test first, no gathers
     inside = s0 >= s_min

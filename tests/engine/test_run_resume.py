@@ -97,7 +97,8 @@ _TYPED_PARAMS = {
         "species_file": "ff/species_three_reduced.yaml",
     },
     "sampler": {
-        "type": "channel_cyclic",
+        "type": "channel",
+        "channel_length": 4.0,
         "trial_density": 1.0,
         "channel_width": 1.5,
     },

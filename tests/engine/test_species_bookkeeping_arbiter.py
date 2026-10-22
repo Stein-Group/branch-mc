@@ -97,14 +97,12 @@ def _degenerate_params(
     Passing at `branch` says nothing about it.
     """
     smp: dict = {"type": sampler, "depth": depth}
-    if sampler in ("channel", "channel_cyclic"):
-        # The rod needs a cross-section in [sigma, 2 sigma] and, for the fixed
-        # rod, a length inside the periodic guard; half the box clears it at every
-        # orientation. The cyclic rod takes no length -- it spans the box.
+    if sampler == "channel":
+        # The rod needs a cross-section in [sigma, 2 sigma] and a length inside
+        # the periodic guard; half the box clears it at every orientation.
         smp["trial_density"] = 1.0
         smp["channel_width"] = 1.5
-        if sampler == "channel":
-            smp["channel_length"] = 0.5 * box
+        smp["channel_length"] = 0.5 * box
     else:
         smp["trials"] = 20
     return {
@@ -363,8 +361,8 @@ def test_a_skewed_p_trial_is_what_makes_the_arbiter_sharp():
 # for a row index to be carried against the wrong species.
 #
 # THE STATE POINT IS DIFFERENT FROM THE BRANCH TESTS', and deliberately.
-# `box = 5.0` cannot hold a rod: the cyclic rod spans the box and the fixed rod's
-# guard needs room, so the sweep needs `box = 8.0`, and at `mu = -0.5` there the
+# `box = 5.0` cannot hold a rod: the guard needs room, so the sweep needs
+# `box = 8.0`, and at `mu = -0.5` there the
 # occupancy is too low for the DP to see cliques. `mu = 0.0` gives <N> ~ 350,
 # which is dense, and density is the binding constraint here for a reason worth
 # recording:
@@ -389,38 +387,37 @@ _P_TRIAL = np.array([0.7, 0.2, 0.1])
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("sampler", ("channel_cyclic", "channel"))
-def test_the_sweep_samplers_hold_p_trial_independence(sampler) -> None:
+def test_the_sweep_samplers_hold_p_trial_independence() -> None:
     """Gate P5's second bullet, measured. Degenerate mixture, skewed `p_trial`.
 
     Measured at S4 over 80 windows, pooled across both starts:
 
-        channel_cyclic  ON  [0.393, 0.338, 0.269]  max|x - 1/3| = 0.065
-                        OFF [0.705, 0.201, 0.094]  max|x - 1/3| = 0.372
-        channel         ON  [0.447, 0.299, 0.254]  max|x - 1/3| = 0.114
-                        OFF [0.702, 0.186, 0.112]  max|x - 1/3| = 0.369
+        channel  ON  [0.447, 0.299, 0.254]  max|x - 1/3| = 0.114
+                 OFF [0.702, 0.186, 0.112]  max|x - 1/3| = 0.369
 
-    The uncorrected arms reproduce `p_trial` to 0.6% (cyclic) and 1.4% (fixed),
-    which is the sharpest form this measurement takes anywhere in the suite: the
-    broken answer is not merely non-uniform, it lands on the proposal
-    distribution. The fixed rod's corrected arm carries the larger residual and
-    its two starts had not fully met (0.426 against 0.468 for species A), so its
-    band is looser -- that is run length, and the negative control below is what
-    says the residual is relaxation and not bias.
+    The uncorrected arm reproduces `p_trial` to 1.4%, which is the sharpest form
+    this measurement takes anywhere in the suite: the broken answer is not
+    merely non-uniform, it lands on the proposal distribution. The corrected
+    arm's two starts had not fully met (0.426 against 0.468 for species A), so
+    the band is looser -- that is run length, and the negative control below is
+    what says the residual is relaxation and not bias.
+
+    The cyclic rod was the second arm here until that rod was retired; its
+    numbers are kept above only as far as the one that remains.
     """
     x = _pooled(
         _P5_WINDOWS,
         correction=True,
         depth=1,
-        sampler=sampler,
+        sampler="channel",
         box=_P5_BOX,
         mu=_P5_MU,
     )
     dev = float(np.abs(x - _UNIFORM).max())
     to_p_trial = float(np.abs(x - _P_TRIAL).max())
-    limit = 0.12 if sampler == "channel_cyclic" else 0.18
+    limit = 0.18
     assert dev < limit, (
-        f"{sampler}: composition {np.round(x, 4)}, max deviation from uniform "
+        f"channel: composition {np.round(x, 4)}, max deviation from uniform "
         f"{dev:.4f} (limit {limit}). Distance to p_trial is {to_p_trial:.4f}: if "
         "that number is the SMALL one, the species half of the trial-density "
         "measure is not cancelling the proposal knob on the sweep path. If both "
@@ -431,10 +428,9 @@ def test_the_sweep_samplers_hold_p_trial_independence(sampler) -> None:
 
 @pytest.mark.slow
 def test_the_sweep_arbiter_can_actually_fail() -> None:
-    """The negative control for the sweep path, on the cyclic rod.
+    """The negative control for the sweep path.
 
-    Runs the cheaper of the two samplers only: the point is that the instrument
-    discriminates on the sweep path at all, and one sampler establishes that. The
+    The point is that the instrument discriminates on the sweep path at all. The
     threshold is stated against `p_trial` rather than against uniform, because
     landing ON the proposal distribution is a much more specific claim than being
     far from uniform, and it is what the uncorrected arm actually does.
@@ -443,7 +439,7 @@ def test_the_sweep_arbiter_can_actually_fail() -> None:
         _P5_WINDOWS,
         correction=False,
         depth=1,
-        sampler="channel_cyclic",
+        sampler="channel",
         box=_P5_BOX,
         mu=_P5_MU,
     )
@@ -451,7 +447,7 @@ def test_the_sweep_arbiter_can_actually_fail() -> None:
         _P5_WINDOWS,
         correction=True,
         depth=1,
-        sampler="channel_cyclic",
+        sampler="channel",
         box=_P5_BOX,
         mu=_P5_MU,
     )

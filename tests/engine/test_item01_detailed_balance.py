@@ -35,7 +35,6 @@ BOX = 2.0
 DIM = 3
 MU = -2.7726  # z = exp(mu) = 0.0625, so zV = 0.5 and P0/P1 = 2.0
 N_STEPS = 200_000
-N_STEPS_CHANNEL = 100_000  # channel moves cost more per step
 BURN = 5_000
 
 
@@ -89,43 +88,16 @@ def test_branch_n0_ratio():
     )
 
 
-# The full-span channel is the only channel variant that can run in this box: the
-# fixed-length rod must satisfy sqrt(L^2 + 2 w^2) <= box - sigma = 1.0, which no
-# admissible width allows at box 2. The full-span rod lifts that guard and instead
-# scores minimum-image distances, so it spans the box and its two ends meet
-# through the periodic boundary. P0/P1 is a property of the equilibrium
-# distribution alone, so it holds for any move obeying detailed balance: it is the
-# sharpest cheap test that the seam is neither double counted nor dropped.
-# R16: the rod kind comes from the SAMPLER, not from a length. This block said
-# `type: "channel"` with `channel_length: "full"`, which `from_params` has
-# refused since R16 landed -- so both tests below have been erroring, not
-# failing on physics, ever since. Nothing noticed because the slow suite had
-# never been run against this tree.
-_FULL_SPAN = {
-    "type": "channel_cyclic",
-    "trial_density": 2.5,
-    "channel_width": 1.0,
-}
-
-
-def test_channel_cyclic_n0_ratio():
-    _check_ratio(
-        "channel_cyclic", {**_FULL_SPAN, "depth": 1}, tol=0.05, steps=N_STEPS_CHANNEL
-    )
-
-
-def test_channel_cyclic_tetris_n0_ratio():
-    _check_ratio(
-        "channel_cyclic_tetris",
-        {**_FULL_SPAN, "full_repacking": True},
-        tol=0.05,
-        steps=N_STEPS_CHANNEL,
-    )
-
-
+# NO CHANNEL ARM HERE ANY MORE. Box 2 admits no fixed-length rod -- the periodic
+# guard needs sqrt(L^2 + 2 w^2) <= box - sigma = 1.0, which no admissible width
+# allows -- and the two tests that used to cover it ran the CYCLIC rod, whose two
+# ends met through the boundary. That rod is gone (no separable exterior, so no
+# ladder engine could run it), and its replacement, channel_length = "full",
+# cannot help here either: a frozen gap of one sigma leaves a body of length one
+# in a box of two. The P0/P1 ratio is still the sharpest cheap test of detailed
+# balance, so a channel arm belongs in this file again at a box that can hold a
+# rod; it is not a free parametrisation of this one.
 if __name__ == "__main__":
     test_metropolis_n0_ratio()
     test_branch_n0_ratio()
-    test_channel_cyclic_n0_ratio()
-    test_channel_cyclic_tetris_n0_ratio()
     print("PASS test_item01_detailed_balance")

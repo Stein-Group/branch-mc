@@ -75,7 +75,6 @@ def _body(L=5.0, w=1.5, dim=3, box=12.0):
         side,
         side,
         dim,
-        cyclic=False,
         channel_length=L,
         channel_width=w,
         trial_density=1.0,
@@ -412,10 +411,10 @@ def test_V_W_equals_the_measure_the_cloud_is_drawn_from(dim):
     assert (np.abs(local[:, 1:]) <= w / 2 + 1e-9).all()
 
 
-def test_the_cyclic_body_refuses_to_report_a_volume():
-    """The rod spans the box, so its exterior is not separable from its interior
-    and the frozen-exterior argument has no meaning. A number here would be a
-    number for a question that does not apply."""
+def test_the_full_span_body_reports_the_volume_the_gap_leaves():
+    """The rod that closed on itself had no separable exterior and therefore no
+    V_W to report. The gap is what gives it one, so the number here is the
+    difference between the two bodies rather than a detail of this one."""
     side = np.full(3, 12.0)
     body = ChannelBody.build(
         side / 2.0,
@@ -423,12 +422,98 @@ def test_the_cyclic_body_refuses_to_report_a_volume():
         side,
         side,
         3,
-        cyclic=True,
         channel_length=0.0,
         channel_width=1.5,
         trial_density=1.0,
         n_trials_base=8,
-        n_trials_min=8,
+        n_trials_min=1,
+        full=True,
+        reach=2.5,
     )
-    with pytest.raises(ValueError, match="no fixed volume"):
-        body.volume()
+    # an axis line closes on itself, so the gap is exactly the reach
+    assert 2.0 * body.half_len == pytest.approx(12.0 - 2.5)
+    assert body.volume() == pytest.approx((12.0 - 2.5) * 1.5**2)
+
+
+# ---------------------------------------------------------------------------
+# PRUNING: the sweep carries the placeable rows, the ladder carries M.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("M", [8, 14, 22])
+@pytest.mark.parametrize("blocked_frac", [0.0, 0.3, 0.75])
+def test_dropping_unplaceable_rows_leaves_the_ladder_where_it_was(M, blocked_frac):
+    """The invariance the whole pruning change rests on, asserted directly.
+
+    A row whose weight is zero cannot be in any clique, so removing it from the
+    transfer matrix cannot move W_k. What it CAN move is `(M - k)!`, because
+    that factor used to be read off the sweep's row count -- which is why the
+    pruned sweep is handed `pool_size=M` and the two ladders have to agree to
+    float precision rather than merely be close.
+
+    Both kernels are exercised: the hard-core sweep expresses unplaceability as
+    `admissible=False`, the LJ sweep as a zero member weight, and the two take
+    different paths to the same `-inf` row.
+    """
+    rng = np.random.default_rng(4100 + M + int(100 * blocked_frac))
+    U = _pool(rng, M)
+    adm = rng.random(M) >= blocked_frac
+    adm[0] = True  # at least one placeable row, as the engine guarantees
+    keep = np.flatnonzero(adm)
+    kmax = min(M, 6)
+    extra = np.arange(kmax + 1) * 0.37  # a k-only term, as the engine passes
+
+    # hard core
+    full = ChannelSweepHardCore(U, LOWER, kmax, adm)
+    cut = ChannelSweepHardCore(U[keep], LOWER, kmax, adm[keep])
+    a = window_ladder_logw(full, kmax, log_extra=extra)
+    b = window_ladder_logw(cut, kmax, log_extra=extra, pool_size=M)
+    fin = np.isfinite(a)
+    assert np.array_equal(fin, np.isfinite(b)), f"support moved: {a} vs {b}"
+    assert np.abs(a[fin] - b[fin]).max() < 1e-12, f"hard core: {a} vs {b}"
+
+    # LJ: the same statement with weights, where W_k is a sum and not a count
+    mw = np.where(adm, np.exp(rng.normal(0.0, 1.2, M)), 0.0)
+    full_lj = ChannelSweepLJ(U, mw, LOWER, RC, BETA, kmax)
+    cut_lj = ChannelSweepLJ(U[keep], mw[keep], LOWER, RC, BETA, kmax)
+    a = window_ladder_logw(full_lj, kmax, log_extra=extra)
+    b = window_ladder_logw(cut_lj, kmax, log_extra=extra, pool_size=M)
+    fin = np.isfinite(a)
+    assert np.array_equal(fin, np.isfinite(b)), f"support moved: {a} vs {b}"
+    assert np.abs(a[fin] - b[fin]).max() < 1e-12, f"lj: {a} vs {b}"
+
+
+def test_forgetting_pool_size_is_what_moves_the_occupancy():
+    """The failure mode the `pool_size` argument exists to prevent.
+
+    Pruning without passing M is silent: nothing raises, the ladder is still a
+    distribution, and only <N> moves. This asserts that it DOES move, so that
+    the previous test is checking something rather than passing vacuously.
+    """
+    rng = np.random.default_rng(99)
+    M = 16
+    U = _pool(rng, M)
+    adm = rng.random(M) >= 0.5
+    adm[0] = True
+    keep = np.flatnonzero(adm)
+    kmax = 5
+    extra = np.arange(kmax + 1) * math.log(2.0)
+
+    full = ChannelSweepHardCore(U, LOWER, kmax, adm)
+    cut = ChannelSweepHardCore(U[keep], LOWER, kmax, adm[keep])
+    right = ladder_probs(window_ladder_logw(full, kmax, log_extra=extra))
+    wrong = ladder_probs(window_ladder_logw(cut, kmax, log_extra=extra))
+    ks = np.arange(kmax + 1)
+    assert float((ks * wrong).sum()) > float((ks * right).sum()) + 0.05, (
+        "reading M off the sweep's row count was supposed to inflate <k>; if "
+        "the two agree, this test is no longer guarding anything"
+    )
+
+
+def test_pool_size_below_the_row_count_is_refused():
+    """M is the pool and the rows are a subset of it, so M < n is incoherent."""
+    rng = np.random.default_rng(5)
+    U = _pool(rng, 9)
+    sw = ChannelSweepHardCore(U, LOWER, 4)
+    with pytest.raises(ValueError, match="smaller than the sweep"):
+        window_ladder_logw(sw, 4, pool_size=8)

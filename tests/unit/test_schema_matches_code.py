@@ -147,7 +147,6 @@ def test_docstring_schema_documents_every_key():
         "rosenbluth",
         "branch",
         "channel",
-        "channel_cyclic",
         "reweight",
         # sampler.engine -- the DYNAMICS axis, orthogonal to sampler.type
         "metropolis_dynamics",
@@ -165,11 +164,8 @@ def test_docstring_schema_documents_every_key():
         # auxiliary.g3_lookup
         "linear",
         "nearest",
-        # sampler.channel_length: "cyclic" is current, the rest legacy synonyms
-        "cyclic",
+        # sampler.channel_length: "full" is the full-span rod with a frozen gap
         "full",
-        "full_box",
-        "span",
         # ensemble.type
         "muVT",
         "NVT",

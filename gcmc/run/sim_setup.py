@@ -78,7 +78,7 @@ of this block is examples/schema.json, which validation uses.
                                                        #   so sampler=branch refuses it.
 
   "sampler":    {"type": "metropolis" | "rosenbluth" | "branch" | "channel"
-                         | "channel_cyclic" | "reweight",
+                         | "reweight",
                  "trials": int | "trial_density": float,   # trials default 30; XOR
                  "trial_box_side": float,                  # default 3.0; the cube trial region
                                                            #   (rosenbluth, branch, reweight)
@@ -312,6 +312,7 @@ from ..forcefield.species import (
     build_species_spec,
     one_route,
 )
+from ..sampling.channel import _MAX_FRAME as _MAX_DP_FRAME
 from ..space import cell_plan
 from ..space.body import cuboid_packing_bound
 from . import guard_audit
@@ -480,18 +481,29 @@ _ENGINE_DEFAULT = "metropolis_dynamics"
 #: lambda cap are all statements about the ladder, not about which kernel reads
 #: it.
 _LADDER_ENGINES = ("glauber_dynamics", "suwa_todo_dynamics")
-# R16: `channel_cyclic` is its own sampler, not a value of `channel_length`.
-# The two share a dynamic program and nothing else; the cyclic rod lifts the
-# locality guard, pays a full minimum-image pair pass, and sizes its trial count
-# per move from the orientation. Naming it here makes the cost visible at the
-# config surface instead of hiding it in a length string.
+
+#: `_MAX_DP_FRAME` is the transfer matrix's int64 state frame, imported rather
+#: than restated so the refusal below and the `_TooWide` fallback it protects
+#: against cannot drift apart.
+#:
+#: Trials per eviction window the LJ ladder path will accept. In the units the
+#: old rule used this is 8 per sigma at upper_cutoff 2.5, which is where ESJD
+#: per CPU second was still rising once the sweep stopped carrying blocked rows
+#: (89 -> 101 at mu = -1). It is a scoping cap, not a tunable: the quantity to
+#: re-measure before moving it is ESJD per CPU second, not the state count.
+_LAMBDA_RC_CAP = 20.0
+#: ONE CHANNEL. The rod that closed on itself through the boundary was a second
+#: sampler for as long as it needed a second sweep: it lifted the locality
+#: guard, paid a full minimum-image pair pass and scored the seam. Leaving a
+#: frozen gap in it removes all three, so what is left is the same open rod at a
+#: different length and it is a VALUE of `channel_length` ("full"), not a
+#: sampler. See `_FULL_SPELLINGS`.
 _SAMPLERS = {
     "metropolis",
     "rosenbluth",
     "branch",
     "reweight",
     "channel",
-    "channel_cyclic",
 }
 
 #: Which keys of the `sampler` block each sampler actually READS, and one line
@@ -513,8 +525,6 @@ _SAMPLERS = {
 #: One chain, four run directories. A sweep over a key the sampler cannot read
 #: produces N directories of the same chain, and nothing in the output says so --
 #: they would be averaged as independent measurements at different settings.
-#: `channel_cyclic` had the same hole for `channel_length`, which is worse for
-#: being the sampler whose whole point is that it has no fixed length.
 #:
 #: So the sampler names its keys once, here, and everything outside its own row
 #: is refused by the same mechanism for every sampler. What remains as a separate
@@ -567,12 +577,6 @@ _SAMPLER_KEYS: dict[str, tuple[frozenset[str], str]] = {
         frozenset({"trials", "trial_density", "channel_length", "channel_width"})
         | _ENGINE_KEY,
         "its trial region is an oriented cuboid of channel_length x channel_width",
-    ),
-    # R16: the cyclic rod spans the box, so its LENGTH is set per move by the
-    # orientation and there is no fixed trial count either.
-    "channel_cyclic": (
-        frozenset({"trial_density", "channel_width"}) | _ENGINE_KEY,
-        "it spans the box, so its length and trial count are set per move",
     ),
 }
 
@@ -716,11 +720,14 @@ def _check_sampler(smp: dict[str, Any], sampler: str) -> None:
         )
 
 
-#: Spellings of `channel_length` that used to select the cyclic rod. They are
-#: refused now rather than aliased: a params file saying "full" and meaning
-#: "topologically different, much costlier move" is exactly the surface R16
-#: removes. Kept as data so the error can name what was typed.
-_LEGACY_CYCLIC_SPELLINGS = ("cyclic", "full", "box", "full_box", "span")
+#: `channel_length` spellings that used to select the EXACT cyclic rod, whose
+#: two ends meet through the boundary and whose sweep scores that seam. They
+#: stay refused, and they are not aliases of "full": "full" is the same chord
+#: with a frozen gap in it, which is an open rod and a different move.
+_LEGACY_CYCLIC_SPELLINGS = ("cyclic", "box", "full_box", "span")
+
+#: `channel_length` spellings for the full-span rod with a frozen gap.
+_FULL_SPELLINGS = ("full",)
 
 
 def _derive_potential_type(potential: str, bias: str | None, sampler: str) -> str:
@@ -735,7 +742,7 @@ def _derive_potential_type(potential: str, bias: str | None, sampler: str) -> st
     if potential == "lennard_jones":
         if bias == "pmf":
             return "ljaux"
-        if sampler in ("branch", "channel", "channel_cyclic"):
+        if sampler in ("branch", "channel"):
             return "ljbranch"
         return "lj"
     if bias == "pmf":
@@ -767,7 +774,7 @@ def _short_range_unsupported(
             "shorten -- its exclusion floor IS the interaction, so there is "
             "nothing to propose with and nothing to correct."
         )
-    if sampler not in ("channel", "channel_cyclic"):
+    if sampler != "channel":
         return (
             f"auxiliary.type='short_range' is supported for "
             f"sampler.type='channel' only (got {sampler!r}). The saving is in "
@@ -784,7 +791,7 @@ def _short_range_unsupported(
     # instead of a cuboid, and the periodic guard already carries (dim-1) widths.
     # tests/unit/test_channel_2d.py pins the 2D sweeps against brute-force clique
     # enumeration and the 2D engine against the exact P(N=0)/P(N=1) ratio, for
-    # both the fixed and the cyclic rod.
+    # both the fixed and the full-span rod.
     #
     # WHAT 2D DOES NOT INHERIT, and it is worth knowing before trusting a number:
     # that engine-level 2D check is HARD-CORE only. 2D + LJ + channel runs and
@@ -972,7 +979,7 @@ class Config:
     channel: bool = False
     channel_length: float = 0.0  # cuboid length along the sweep axis
     channel_width: float = 0.0  # cuboid cross-section (square side)
-    channel_cyclic: bool = False  # channel_length == "cyclic": wall-to-wall rod
+    channel_full: bool = False  # channel_length == "full": chord less a frozen gap
     # Per-axis orthorhombic box. None means cubic: every axis is `box`,
     # and the scalar path runs exactly as before, so cubic fingerprints, RNG
     # streams and characterisation trajectories are unchanged. When set it is a
@@ -1083,8 +1090,8 @@ class Config:
         # THE TYPED ENERGY. Which samplers can integrate a species file, and why
         # the answer is per-SAMPLER rather than per potential_type.
         #
-        # `potential_type` collapses `branch`, `channel` and `channel_cyclic` into
-        # one tag, `ljbranch`, because they share a proposal shape. They do NOT
+        # `potential_type` collapses `branch` and `channel` into one tag,
+        # `ljbranch`, because they share a proposal shape. They do NOT
         # share a clique kernel, and that is what decides this:
         #
         #   rosenbluth      supported. Per-pair weights and per-pair overlap
@@ -1103,12 +1110,6 @@ class Config:
         #                   already type-blind, which is why this was a small
         #                   change to the graph and the pair energy rather than to
         #                   the DP.
-        #   channel_cyclic  supported. The per-pair floor and the pair table are
-        #                   OPTIONS on the cyclic sweeps rather than a seventh and
-        #                   eighth class -- cyclic and multi-species are
-        #                   independent properties of the conflict graph, and the
-        #                   class lattice could not compose them. That is the graph
-        #                   half of R7.
         #
         # An energetically DEGENERATE species file is allowed through every
         # sampler: one sigma, one epsilon and one core floor throughout means the
@@ -1335,13 +1336,6 @@ def from_params(p: dict[str, Any]) -> Config:
                 "sampler=reweight is the 2D hexatic psi6 method, an "
                 "estimator-layer scheme with no local conditional"
             ),
-            "channel_cyclic": (
-                "the cyclic rod spans the box wall to wall, so its exterior "
-                "is not separable from its interior and the frozen-exterior "
-                "argument the whole conditional is derived from has no "
-                "meaning. This is a permanent geometric objection, not a "
-                "performance one"
-            ),
         }[sampler]
         raise ValueError(
             f"engine={engine} requires sampler=channel or sampler=branch, got "
@@ -1399,8 +1393,8 @@ def from_params(p: dict[str, Any]) -> Config:
     metropolis = sampler == "metropolis"
     # Both rod kinds are channel samplers: they take the same cavity algebra and
     # the same DP. Only the mask policy and the guard differ.
-    branch = sampler in ("branch", "channel", "channel_cyclic")
-    channel = sampler in ("channel", "channel_cyclic")
+    branch = sampler in ("branch", "channel")
+    channel = sampler == "channel"
     reweight = sampler == "reweight"
     # full_repacking (default False) is the XOR opposite of the old use_depth:
     # instead of a fixed depth, an exchange repacks the whole cavity, removing
@@ -1440,7 +1434,7 @@ def from_params(p: dict[str, Any]) -> Config:
             f"This is the sampler axis: the keys are legal under "
             f"engine.type='metropolis_dynamics' with any other sampler. Drop "
             f"them, or choose a sampler that builds a cloud (rosenbluth, "
-            f"branch, channel, channel_cyclic, reweight)."
+            f"branch, channel, reweight)."
         )
 
     # ---- ensemble ----
@@ -1680,9 +1674,9 @@ def from_params(p: dict[str, Any]) -> Config:
                 # one. A canonical run proposes translations and pair identity
                 # exchanges and runs no trial cloud at all -- measured, not
                 # assumed: channel at two geometries, rosenbluth, branch at
-                # depth 2 and channel_cyclic all produce the byte-identical
-                # final state (digest 1bda67b8fe30a574) from the same seed, and
-                # FIVE DIFFERENT RUN IDS, because `sampler` is an identity
+                # depth 2 all produce the byte-identical final state
+                # (digest 1bda67b8fe30a574) from the same seed, and
+                # FOUR DIFFERENT RUN IDS, because `sampler` is an identity
                 # field. One physical chain in five directories is not a
                 # cosmetic problem: a sweep over trial_density would look like
                 # five settings and be one.
@@ -1698,7 +1692,7 @@ def from_params(p: dict[str, Any]) -> Config:
                         "trial cloud, so sampler.type must be 'metropolis' (got "
                         f"{sampler!r}). Any other sampler is configuration that "
                         "cannot change this run -- measured: channel, "
-                        "rosenbluth, branch and channel_cyclic give the "
+                        "rosenbluth and branch give the "
                         "identical chain here, and four different run ids. Use "
                         "ensemble.type='semigrand' if you want the repack, "
                         "which is the move that reads a sampler."
@@ -2540,7 +2534,7 @@ def from_params(p: dict[str, Any]) -> Config:
         lower_cutoff = float(run.get("lower_cutoff", _lower_default))
     r_squared = lower_cutoff * lower_cutoff
 
-    channel_cyclic = False
+    channel_full = False
     if metropolis:
         trial_box_side = 0.0
         cav = 0.0
@@ -2562,79 +2556,91 @@ def from_params(p: dict[str, Any]) -> Config:
         if isinstance(_clen, (list, tuple)):
             raise ValueError(
                 f"sampler.channel_length must be a single number (the cuboid "
-                f"length along the sweep axis) or the string 'cyclic' for a "
-                f"wall-to-wall rod; got a list of {len(_clen)}. The channel body "
+                f'length along the sweep axis) or the string "full" for the '
+                f"full-span rod; got a list of {len(_clen)}. The channel body "
                 f"is one oriented cuboid, so it has one length; per-axis lists "
                 f"apply to run.cell_length (parallel decomposition), not here."
             )
-        # The cyclic rod runs wall to wall, so its two ends meet through the
-        # periodic boundary and the transfer-matrix sweep closes on itself
-        # (ChannelSweepHardCoreCyclic scores that seam with true minimum-image distances
-        # instead of an axial window).
-        #
-        # R16: the rod kind comes from the SAMPLER, not from this field, and the
-        # four legacy spellings are REFUSED. The text here claimed for two stages
-        # that they were "still accepted so existing params files keep working",
-        # directly above the line that rejects them -- which is how three slow
-        # tests came to be erroring on a retired spelling while reading as though
-        # they were measuring physics. A comment that contradicts the line under
-        # it is worse than none, because it is what a reader checks first.
-        if isinstance(_clen, str) and _clen.strip().lower() in _LEGACY_CYCLIC_SPELLINGS:
+        # ONE ROD, TWO LENGTHS. A number is a fixed oriented cuboid; "full" is
+        # this move's chord less a frozen gap. The spellings below selected the
+        # rod that CLOSED on itself through the boundary, which needed its own
+        # sweep (minimum-image pairs over the whole pool, retention eviction, a
+        # scored seam) and therefore was its own sampler. The gap removes all of
+        # that, so there is nothing left for those spellings to name and they
+        # are refused with the replacement given rather than aliased: a params
+        # file that says "cyclic" was asking for the exact ring, and silently
+        # handing it a ring with a hole in it is the surface this removes.
+        _clen_word = _clen.strip().lower() if isinstance(_clen, str) else None
+        if _clen_word in _LEGACY_CYCLIC_SPELLINGS:
             raise ValueError(
-                f"sampler.channel_length = {_clen!r} used to select the cyclic "
-                f"wall-to-wall rod. It is a different move, not a length, so it "
-                f'is now its own sampler: set sampler.type = "channel_cyclic" '
-                f"and drop channel_length."
+                f"sampler.channel_length = {_clen!r} selected the cyclic "
+                f"wall-to-wall rod, whose two ends met through the periodic "
+                f"boundary and were scored as a seam. That rod is gone: its "
+                f"exterior was not separable from its interior, so no ladder "
+                f'engine could ever run it. Use channel_length = "full" -- the '
+                f"same chord with a frozen gap in it, which keeps the body an "
+                f"open rod, gives it a volume and an exterior, and costs what "
+                f"an open rod costs."
             )
-        channel_cyclic = sampler == "channel_cyclic"
+        channel_full = _clen_word in _FULL_SPELLINGS
         channel_width = float(smp.get("channel_width", 0.0))
         if not (diameter <= channel_width <= 2.0 * diameter + 1e-9):
             raise ValueError(
                 f"channel_width must lie in [sigma, 2 sigma] = "
                 f"[{diameter}, {2 * diameter}]; got {channel_width}"
             )
-        if channel_cyclic:
-            # Cyclic rod: the length is set per move by the orientation (wall
-            # to wall, box for an axis line up to box*sqrt(3) for the body
-            # diagonal), so there is no fixed channel_length and no fixed trial
-            # count. trial_density (spheres per unit volume) fixes the linear
-            # density; the engine draws density * chord_volume trials each move.
-            # A nominal cap sized on the longest possible chord bounds arrays.
+        if channel_full:
+            # FULL-SPAN WITH A FROZEN GAP. The length is set per move by the
+            # orientation, so there is no configured `channel_length` and no
+            # fixed trial count: `trial_density` fixes the density and the
+            # body's own measure fixes the count. The body is an OPEN rod -- the
+            # gap is frozen exterior -- so it has a volume, a separable
+            # exterior, and the ordinary open-rod sweep.
+            #
+            # The gap is derived, not configured. `rod_image_length` returns the
+            # longest body this direction admits, and what is left of the chord
+            # is the gap; for an axis line that is the interaction range and for
+            # most oblique lines it is nothing at all.
             channel_length = 0.0
-            # `trials` and `channel_length` are refused for this sampler by
-            # `_check_sampler`, which is where "which keys does channel_cyclic
-            # read" is now stated once. They used to be refused here (trials) and
-            # not at all (channel_length).
+            if "trials" in smp:
+                raise ValueError(
+                    'sampler.trials means nothing with channel_length = "full": '
+                    "the body's length is set per move by the chord and the "
+                    "image guard, so a fixed count would be a different linear "
+                    "density on every orientation. Give trial_density instead."
+                )
             trial_density = float(smp.get("trial_density", 0.0))
             if trial_density <= 0.0:
-                raise ValueError("cyclic channel needs trial_density > 0")
-            # longest possible chord is the box body diagonal: box*sqrt(dim).
-            # The cross-section carries (dim-1) widths, so the swept measure is
-            # chord * w**(dim-1) -- an area in 2D, a volume in 3D.
+                raise ValueError(
+                    'sampler.channel_length = "full" needs trial_density > 0: '
+                    "the rod's length is a per-move number, so the trial count "
+                    "is set by density rather than by a `trials` key"
+                )
+            # A nominal cap for array sizing, from the longest chord any
+            # orientation can produce (the box body diagonal).
             _maxchord = box * (float(dim) ** 0.5)
             n_trials = max(
                 2,
                 int(round(trial_density * _maxchord * channel_width ** (dim - 1))),
             )
         else:
-            # A string that reached here is not one of the cyclic spellings, so
-            # it is either a typo for "cyclic" or a malformed number. float()
+            # A string that reached here is neither "full" nor one of the
+            # retired spellings, so it is either a typo or a malformed number. float()
             # would report `could not convert string to float`, which names
             # neither cause; say what the key actually accepts instead.
             if isinstance(_clen, str):
                 raise ValueError(
                     f"sampler.channel_length={_clen!r} is not recognised: give a "
-                    f'positive number for a fixed-length rod, or "cyclic" for a '
-                    f"wall-to-wall rod whose ends meet through the periodic "
-                    f'boundary (legacy spellings "full", "box", "full_box", '
-                    f'"span" are also accepted)'
+                    f'positive number for a fixed-length rod, or "full" for the '
+                    f"longest rod this box admits along each drawn direction, "
+                    f"less a frozen gap"
                 )
             channel_length = float(_clen)
             if channel_length <= 0.0:
                 raise ValueError(
                     "channel sampler needs channel_length > 0 "
-                    '(or the string "cyclic" for a wall-to-wall '
-                    "rod), and channel_width > 0"
+                    '(or the string "full" for a full-span rod with a frozen '
+                    "gap), and channel_width > 0"
                 )
             # 3D body is a cuboid L x w x w (a volume); 2D body is a rectangle
             # L x w (an area). trial_density is spheres per unit measure in the
@@ -2981,14 +2987,24 @@ def from_params(p: dict[str, Any]) -> Config:
         )
     if ladder:
         window_M = int(n_trials)
-        _bound = cuboid_packing_bound(channel_length, channel_width, dim, diameter)
+        # THE FULL-SPAN ROD SIZES BOTH FROM THE LONGEST CHORD, not from a
+        # configured length it does not have. `window_M` and `window_kmax` are
+        # CEILINGS there rather than the per-move numbers: each move takes its
+        # own body length from the chord and the image guard, draws
+        # `trial_density * V_W` trials for THAT body, and the ladder truncates
+        # itself above the largest clique the body admits. Sizing on the body
+        # diagonal is what makes the ceiling hold for every orientation.
+        _kmax_len = channel_length
+        if channel_full:
+            _kmax_len = box * (float(dim) ** 0.5)
+        _bound = cuboid_packing_bound(_kmax_len, channel_width, dim, diameter)
         window_kmax = min(window_M, int(math.ceil(_bound)) + kmax_margin)
         if not (1 <= window_kmax <= window_M):
             raise ValueError(
                 f"engine={engine} needs 1 <= kmax <= M, derived "
                 f"kmax={window_kmax} and M={window_M} from trial_density="
-                f"{trial_density:g} on a {channel_length:g} x {channel_width:g} "
-                f"body (V_W = {channel_length * channel_width ** (dim - 1):g}). "
+                f"{trial_density:g} on a {_kmax_len:g} x {channel_width:g} "
+                f"body (V_W = {_kmax_len * channel_width ** (dim - 1):g}). "
                 "M is round(trial_density * V_W), so raise sampler.trial_density "
                 "until the pool can hold at least one particle."
             )
@@ -3004,13 +3020,41 @@ def from_params(p: dict[str, Any]) -> Config:
         # physical channel occupancy is far below M at any realistic
         # trial_density, so they are zero -- and if they are not, the counter
         # says so in the log instead of an estimate saying so at setup.
-        # LAMBDA <= 4 TRIALS PER SIGMA OF CHANNEL LENGTH. A hard scoping rule,
-        # not a tunable. With rc = uc forced (section 1.2) the DP's eviction
-        # window widens, and the measured penalty is 1.3-2x at lambda <= 4 but
-        # 11x at lambda = 8 (state counts: L=24, M=192, lambda=8 goes from 9099
-        # states / 20 ms at rc 1.5 to 283339 / 217 ms at rc 3.0). LJ path only:
-        # the hard-core sweep's eviction window is the contact distance and does
-        # not widen.
+        # TRIALS PER EVICTION WINDOW, which is the quantity the DP's cost is
+        # actually a function of. The old rule counted trials per SIGMA, and
+        # sigma is not a length the sweep ever measures anything against: what
+        # sets the state frame is `_window_structure(x, reach)`, and on the LJ
+        # path `reach` is `upper_cutoff`. A rule written in sigma was therefore
+        # a rule about rc with the conversion factor left implicit, which is why
+        # it had to be recalibrated by hand every time rc moved.
+        #
+        # Two separate things are being bounded here and they were one number:
+        #
+        #   THE WALL. `_enumerate` holds the retained set in an int64, so a
+        #   frame wider than `_MAX_FRAME = 62` trials raises `_TooWide` and the
+        #   sweep falls back to the dict DP. That fallback is CORRECT and
+        #   silent, which is the problem: a run that crosses the wall gets
+        #   slower by orders of magnitude and says nothing. The frame occupancy
+        #   is a count of trials in a window of width `reach`, so it fluctuates
+        #   around `lambda_rc`; the refusal uses a tail allowance rather than
+        #   the mean, because one wide frame in a run is enough to trigger the
+        #   fallback for that window.
+        #
+        #   THE COST. Below the wall the state count still grows steeply with
+        #   the frame, so there is a scoping cap as well. It sits where it does
+        #   because of what PRUNING changed: the frame now holds only trials
+        #   that can hold a molecule, so at loading it is a fraction of the
+        #   geometric count, and the old cap was calibrated on a sweep that
+        #   carried every blocked row. Measured after pruning, ESJD per CPU
+        #   second was still rising at twice the old cap (89 -> 101 at mu = -1).
+        #
+        # THE BOUND IS GEOMETRIC, SO IT IS CONSERVATIVE. `window_M` counts every
+        # trial drawn, placeable or not, and pruning can only lower the number
+        # that reaches the frame. A config that passes here cannot be made to
+        # fail by the exterior being crowded.
+        #
+        # LJ path only: the hard-core sweep's eviction window is the contact
+        # distance, so `lambda_rc` is `lambda_sigma` there and never binds.
         if branch_cavity:
             # THE CAVITY'S COST RULE, and it is a different quantity from the
             # rod's lambda. Lambda <= 4 bounds the TRANSFER MATRIX's state count,
@@ -3050,18 +3094,52 @@ def from_params(p: dict[str, Any]) -> Config:
                     "can be. This is a COST bound, not a scoping one: the ladder "
                     "stays exact at any M and any cavity size."
                 )
-        _lambda = window_M * diameter / channel_length
-        if lj and not branch_cavity and _lambda > 4.0 + 1e-9:
-            raise ValueError(
-                f"engine={engine} refuses {_lambda:.2f} trials per sigma "
-                f"of channel length (M={window_M} over L={channel_length:g} at "
-                f"sigma={diameter:g}); the limit is 4. With the selection radius "
-                "forced to run.upper_cutoff the transfer matrix's eviction "
-                "window widens, and the measured cost is 1.3-2x at lambda <= 4 "
-                "against 11x at lambda = 8. Lower sampler.trial_density to at "
-                f"most {4.0 * channel_length / (diameter * channel_length * channel_width ** (dim - 1)):.4g} "
-                "or lengthen the rod. This is a scoping rule, not a tunable."
+        if lj and not branch_cavity:
+            # Expected trials whose axial coordinate lies within `reach` of a
+            # given one, i.e. the mean occupancy of one DP frame. The full-span
+            # rod has no configured length to divide by, and does not need one:
+            # the quantity is a LINEAR density times a radius, and
+            # `trial_density * w**(dim-1)` is that linear density at any body
+            # length. For a fixed rod the two forms agree up to the rounding of
+            # M, and the fixed one is kept so its refusals do not move.
+            _lambda_rc = (
+                trial_density * channel_width ** (dim - 1) * uc
+                if channel_full
+                else window_M * uc / channel_length
             )
+            # Poisson-ish fluctuation about that mean; five standard deviations
+            # of headroom before the int64 frame, which is cheap insurance
+            # against a silent fallback that costs orders of magnitude.
+            _frame_hi = _lambda_rc + 5.0 * math.sqrt(max(_lambda_rc, 1.0))
+            _max_density = _LAMBDA_RC_CAP / (uc * channel_width ** (dim - 1))
+            if _frame_hi >= _MAX_DP_FRAME:
+                raise ValueError(
+                    f"engine={engine} would put about {_lambda_rc:.1f} trials in "
+                    f"one eviction window (trial_density={trial_density:g}, "
+                    f"channel_width={channel_width:g}, upper_cutoff={uc:g}), "
+                    f"and allowing for fluctuation that "
+                    f"reaches {_frame_hi:.0f} against the transfer matrix's "
+                    f"{_MAX_DP_FRAME}-trial state frame. Above the frame the "
+                    "sweep silently falls back to the dictionary DP, which is "
+                    "correct and orders of magnitude slower, so this is refused "
+                    "rather than left to be discovered in a timing. Lower "
+                    f"sampler.trial_density to at most {_max_density:.4g} or "
+                    "lengthen the rod."
+                )
+            if _lambda_rc > _LAMBDA_RC_CAP + 1e-9:
+                raise ValueError(
+                    f"engine={engine} refuses {_lambda_rc:.2f} trials per "
+                    f"eviction window (trial_density={trial_density:g}, "
+                    f"channel_width={channel_width:g}, upper_cutoff={uc:g}, "
+                    f"i.e. {_lambda_rc * diameter / uc:.2f} per sigma); the "
+                    f"limit is {_LAMBDA_RC_CAP:g}. With the selection radius "
+                    "forced to run.upper_cutoff (section 1.2) the eviction "
+                    "window is rc wide, and the state count grows steeply in "
+                    "the frame occupancy. Lower sampler.trial_density to at "
+                    f"most {_max_density:.4g} or lengthen the rod. This is a "
+                    "scoping rule, not a tunable: raise it with a measurement "
+                    "of ESJD per CPU second, not with a guess."
+                )
     if channel or branch_cavity:
         if parallel:
             # The window move freezes the exterior of the body it draws, which a
@@ -3087,10 +3165,16 @@ def from_params(p: dict[str, Any]) -> Config:
         # periodic guard: for the FIXED-length rod, insertion and removal share
         # one oriented cuboid, so the whole pool lives in that body. Its space
         # diagonal must stay below the box minus the interaction range (sigma for
-        # hard core, rc for LJ) so local distances equal periodic distances. The
-        # cyclic rod lifts this guard on purpose and instead computes true
-        # minimum-image distances in the sweep, so the guard does not apply.
-        if not channel_cyclic:
+        # hard core, rc for LJ) so local distances equal periodic distances.
+        #
+        # THE FULL-SPAN ROD LIFTS IT because it carries its own, sharper
+        # version: `rod_image_length` holds the body below the reach of every
+        # periodic image of its own line, per orientation, which is what this
+        # guard does per length. A single diagonal test cannot express that --
+        # it is orientation-independent by construction, and the whole point of
+        # the full-span body is that the admissible length depends on the
+        # direction.
+        if not channel_full:
             # The margin is the largest distance the SWEEP will ever read, which is
             # not necessarily the physics cutoff. The guarded sweep works on local
             # cuboid coordinates with no minimum image, and its masks are built at
@@ -3105,9 +3189,7 @@ def from_params(p: dict[str, Any]) -> Config:
             # What it buys is modest and worth stating plainly: the cuboid diagonal
             # is orientation-independent, so this relaxes the admissible rod LENGTH,
             # not the set of orientations. At box 12, w 1.4, uc 2.5 the longest
-            # legal rod goes from 9.29 to 10.31 (+11%) at aux_cutoff 1.5. The
-            # cyclic rod already lifts the guard entirely and spans the box, so this
-            # matters only if a fixed-length rod is wanted for its own sake.
+            # legal rod goes from 9.29 to 10.31 (+11%) at aux_cutoff 1.5.
             guard_cut = uc if lj else diameter
             if lj and short_range:
                 assert aux_cutoff is not None
@@ -3356,7 +3438,7 @@ def from_params(p: dict[str, Any]) -> Config:
         channel=channel,
         channel_length=channel_length,
         channel_width=channel_width,
-        channel_cyclic=channel_cyclic,
+        channel_full=channel_full,
         full_repacking=full_repacking,
         move_factor=move_factor,
         temp=temp,

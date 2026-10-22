@@ -102,7 +102,7 @@ POTENTIAL: tuple[str, ...] = (
 )
 
 SAMPLER: tuple[str, ...] = (
-    "sampler",  # metropolis | rosenbluth | branch | channel | channel_cyclic | reweight
+    "sampler",  # metropolis | rosenbluth | branch | channel | reweight
     # THE DYNAMICS AXIS, and it is not the same axis as `sampler`.
     #
     # `sampler` says how a trial cloud is PROPOSED; `engine` says what is then
@@ -137,7 +137,11 @@ SAMPLER: tuple[str, ...] = (
     "move_factor",
     "channel_length",
     "channel_width",
-    "channel_cyclic",  # R16: derived from `sampler`, kept for the reduction check
+    #: `channel_length == "full"`: the rod spans this move's chord, less a
+    #: frozen gap. Identity-bearing, and a separate field rather than a
+    #: sentinel value of `channel_length`, because the length it implies is a
+    #: per-move number and `channel_length` is a configured one.
+    "channel_full",
     "radius",  # hard-core radius; `diameter` is its derived twin
     # ADAPTIVE GAMMA. `fixed` reads the nine fitted exponents in
     # `gamma_dict`; `adaptive` solves one per Rosenbluth level from the trial

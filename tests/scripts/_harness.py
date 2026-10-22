@@ -113,18 +113,16 @@ def _back_translate(params):
 
     Entries
     -------
-    R16 (2026-08)
-        The cyclic wall-to-wall rod became `sampler.type = "channel_cyclic"`.
-        Before that it was `sampler.type = "channel"` plus a string
-        `channel_length`. Identical Config apart from the `sampler` string,
-        hence identical chain.
-
-        The emitted spelling is "full", NOT "cyclic". engineA accepts only
-        ("full", "box", "full_box", "span") -- "cyclic" was added later, as the
-        preferred name, and a frozen engine has no idea it exists. This is the
-        general rule for this function: translate into the vocabulary the
-        FROZEN engine had, which is not necessarily the most recent spelling
-        the current engine deprecated.
+    RETIRED, not translated (2026-10)
+        `hs_channel_full` and `lj_channel_full` characterised the CYCLIC
+        wall-to-wall rod, whose two ends met through the periodic boundary and
+        were scored as a seam. That move no longer exists: its exterior was not
+        separable from its interior, so no ladder engine could run it, and
+        `channel_length = "full"` is now the same chord with a frozen gap in it
+        -- an open rod, a different chain. A rename could not express that, and
+        this file only ever renames, so the two modes are gone rather than
+        pointed at a body that would not reproduce their oracle. The frozen npz
+        files stay in the tree; nothing reads them.
 
     The engine block (2026-09)
         `depth`, `full_repacking` and `kmax_margin` moved out of `sampler` into
@@ -139,9 +137,6 @@ def _back_translate(params):
 
     out = copy.deepcopy(params)
     smp = out.get("sampler", {})
-    if smp.get("type") == "channel_cyclic":
-        smp["type"] = "channel"
-        smp["channel_length"] = "full"
     eng = out.pop("engine", None)
     if eng:
         for key, value in eng.items():
@@ -258,26 +253,6 @@ REF_MODES = {
         "seed": 13,
         "n_seed": 500,
     },
-    "hs_channel_full": {
-        "params": _p(
-            _HS,
-            {
-                "type": "channel_cyclic",
-                "depth": 1,
-                "trial_density": 1.0,
-                # R16: this mode was always the CYCLIC wall-to-wall rod --
-                # "full" was one of five aliases for it. The mode name and the
-                # frozen trajectory are unchanged; only the spelling that
-                # selects it is. The Config it builds is identical apart from
-                # `sampler`, so the chain and the npz oracle still match.
-                "channel_width": 1.5,
-            },
-            {"mu": 3.0, "dimension": 3, "box": 12.0},
-            {"sampling_window": 40},
-        ),
-        "seed": 14,
-        "n_seed": 500,
-    },
     "hs_full_repacking": {
         "params": _p(
             _HS,
@@ -328,26 +303,6 @@ REF_MODES = {
             {"sampling_window": 30},
         ),
         "seed": 18,
-        "n_seed": 700,
-    },
-    "lj_channel_full": {
-        "params": _p(
-            _LJ,
-            {
-                "type": "channel_cyclic",
-                "depth": 1,
-                "trial_density": 0.6,
-                # R16: this mode was always the CYCLIC wall-to-wall rod --
-                # "full" was one of five aliases for it. The mode name and the
-                # frozen trajectory are unchanged; only the spelling that
-                # selects it is. The Config it builds is identical apart from
-                # `sampler`, so the chain and the npz oracle still match.
-                "channel_width": 1.2,
-            },
-            {"mu": -3.2, "dimension": 3, "box": 12.0},
-            {"sampling_window": 20},
-        ),
-        "seed": 19,
         "n_seed": 700,
     },
     "hs_matrix": {

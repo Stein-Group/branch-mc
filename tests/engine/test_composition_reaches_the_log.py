@@ -42,8 +42,9 @@ _TYPED = {
         "species_file": "ff/species_three_reduced.yaml",
     },
     "sampler": {
-        "type": "channel_cyclic",
+        "type": "channel",
         "trial_density": 1.0,
+        "channel_length": 4.0,
         "channel_width": 1.5,
     },
     "engine": {"depth": 1},

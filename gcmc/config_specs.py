@@ -114,7 +114,8 @@ class SamplerSpec:
     move_factor: float
     channel_length: float
     channel_width: float
-    channel_cyclic: bool
+    #: `channel_length == "full"`: full-span rod with a frozen gap.
+    channel_full: bool
     radius: float
     #: fixed = the nine fitted pmf exponents; adaptive = solve one per
     #: Rosenbluth level for a target participation fraction. None means the key

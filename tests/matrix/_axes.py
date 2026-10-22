@@ -3,7 +3,7 @@
 WHY THIS FILE EXISTS (R13 of restructure_plan.md). A hand-written list of modes
 goes stale the first time a feature is added: `tests/scripts/_harness.REF_MODES`
 covers fourteen serial modes and silently misses parallel, reweight, pmf, NVT,
-QA crossed with each sampler, the 2D channel, the cyclic rod, typed
+QA crossed with each sampler, the 2D channel, the full-span rod, typed
 multi-species and the whole framework path. Nobody notices, because a list that
 is missing an entry looks exactly like a list that is complete.
 
@@ -135,13 +135,16 @@ AXES: tuple[Axis, ...] = (
     Axis("kind", _enum_at("run.kind")),
     # None = no auxiliary block at all, which is the common case and its own path.
     Axis("auxiliary", (None, *_enum_at("auxiliary.type"))),
-    # Rod length, numeric only. The wall-to-wall rod is NOT a length here any
-    # more -- it is `sampler.type = "channel_cyclic"` (R16), which is why it
-    # shows up on the sampler axis and gets its own points.
-    #
-    # This axis used to carry ("full",) as a second value, which silently made
-    # 115 of 185 channel points cyclic under a label that read as a rod length.
-    # Two rod lengths keep a genuine length axis without that confusion.
+    # Rod length, numeric only, and the omission is worth stating because the
+    # obvious third value looks free. `channel_length = "full"` is a LADDER
+    # body, and this matrix writes an `engine.depth` key for every non-metropolis
+    # point, which every ladder dynamics refuses -- so not one accepted point
+    # here runs a ladder engine, and adding "full" would have produced 3240
+    # further REJECTED points and no new accepted one. Its refusals are tested
+    # where they are made (tests/engine/test_channel_full_span_engine.py) and
+    # its body against brute force in tests/unit/test_channel_full_span.py.
+    # Enumerating it here belongs with giving the matrix a depth-free point, not
+    # before it.
     Axis("channel_length", (6.0, 10.0)),
     # None = the untyped scalar path. A species file switches the whole typed
     # path on (P2, M9), so it is one axis with one switch, not a family of keys.
@@ -270,16 +273,13 @@ def build_params(point: Point, matrix_dir: Path | None = None) -> dict[str, Any]
             engine["full_repacking"] = True
         else:
             engine["depth"] = point.depth
-    if point.sampler in ("channel", "channel_cyclic"):
+    if point.sampler == "channel":
         # A channel draws its cloud by DENSITY, not by count: the rod's length
-        # (and hence its trial count) changes per move for a full-span rod, so a
-        # fixed `trials` is rejected. Using density for both rod kinds keeps the
-        # two points comparable.
+        # (and hence its trial count) changes per move when the length is
+        # "full", so a fixed `trials` is rejected there. Using density for every
+        # length keeps the points comparable.
         sampler["trial_density"] = 1.5
-        # The cyclic rod has no fixed length: it spans the box, so its extent is
-        # set per move by the orientation. Writing one would be rejected.
-        if point.sampler == "channel":
-            sampler["channel_length"] = point.channel_length
+        sampler["channel_length"] = point.channel_length
         # The rod's cross-section must lie in [sigma, 2 sigma]: narrower than
         # sigma and no sphere fits, wider than 2 sigma and the "thin channel"
         # premise of the transfer-matrix sweep fails. The typed species file

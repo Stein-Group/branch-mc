@@ -50,8 +50,9 @@ TWO AXIS CELLS ARE DELIBERATELY ABSENT from `_POINTS`, and saying which matters
 more than the count of green rows. 2D + `full_repacking` evaluates the correction
 zero times at this density -- the repacking move almost never completes an
 exchange -- so it would be three green rows testing nothing. Nothing else is
-excluded: the cyclic rod at depth 2 used to crash here and was fixed rather than
-skipped (see `test_cyclic_rod_short_chord.py`).
+excluded: the rows that covered the cyclic rod went with that rod, which no
+longer exists -- `channel_length = "full"` replaced it, and it is a ladder-engine
+body, so it has no place in a Metropolis auxiliary control.
 """
 
 from __future__ import annotations
@@ -72,13 +73,8 @@ _POINTS = [
     (3, "channel", "depth1"),
     (3, "channel", "depth2"),
     (3, "channel", "repack"),
-    (3, "channel_cyclic", "depth1"),
-    (3, "channel_cyclic", "depth2"),
-    (3, "channel_cyclic", "repack"),
     (2, "channel", "depth1"),
     (2, "channel", "depth2"),
-    (2, "channel_cyclic", "depth1"),
-    (2, "channel_cyclic", "depth2"),
 ]
 _SEEDS = (18, 19, 20)
 _WINDOWS = 3
@@ -264,7 +260,7 @@ def _typed_params(ff_path: str, rod: str, depth: int) -> dict:
     }
 
 
-@pytest.mark.parametrize("rod", ("channel", "channel_cyclic"))
+@pytest.mark.parametrize("rod", ("channel",))
 @pytest.mark.parametrize("depth", (1, 2))
 @pytest.mark.parametrize("seed", (31, 32, 33))
 def test_the_typed_control_arm_moves_no_bits(rod, depth, seed, tmp_path) -> None:

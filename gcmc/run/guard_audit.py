@@ -141,15 +141,16 @@ def audit(cfg: Config, *, label: str | None = None) -> dict[str, Any] | None:
     """One audit record for a channel Config, or None when the guard cannot
     apply.
 
-    None for three reasons, all of them "the guard is not a statement about this
-    run": the sampler is not a channel; the sampler is `channel_cyclic`, whose
-    rod spans the box by construction so a fits-inside test is meaningless (and
-    which the new engine refuses outright for a different, permanent reason);
-    or the body has no fixed length, which is the same case.
+    None for two reasons, both of them "the guard is not a statement about this
+    run": the sampler is not a channel, or the body has no fixed length. The
+    second is `channel_length = "full"`, whose body is a per-move sub-segment of
+    the chord and is held inside the periodic images by `rod_image_length`, per
+    orientation. A single fits-inside test on a configured length cannot express
+    that and would be answering a question this run does not ask.
     """
     if not cfg.channel:
         return None
-    if cfg.channel_cyclic or cfg.channel_length <= 0.0:
+    if cfg.channel_length <= 0.0:
         return None
     rc_sel, uc = scoring_cutoffs(cfg)
     at_sel = check(cfg.channel_length, cfg.channel_width, cfg.box_dims, rc_sel)

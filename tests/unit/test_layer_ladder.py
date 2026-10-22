@@ -111,7 +111,6 @@ LAYERS: dict[str, int] = {
     "sampling.participation": 5,
     "sampling.branch": 5,
     "sampling.channel": 5,
-    "sampling.channel_cyclic": 5,  # R16: shared DP, own mask policy
     # The Suwa-Todo geometric allocation. LAYER 5 AND NOT 6, although only the
     # L6 Glauber engine calls it: it is a weighting policy over an occupancy
     # ladder and imports nothing but numpy, which is the same reason
@@ -225,10 +224,6 @@ KNOWN_INVERSIONS: dict[tuple[str, str], str] = {
     (
         "proposals.channel_move",
         "sampling.channel",
-    ): "S5: R7 collapses the sweeps; the factory goes with them",
-    (
-        "proposals.channel_move",
-        "sampling.channel_cyclic",
     ): "S5: R7 collapses the sweeps; the factory goes with them",
     # THE THIRD MEMBER OF THE SAME FINDING, not a new one. `ChannelBody.sweep()`
     # picks `CavitySweep` for the cube geometry, where the transfer matrix it

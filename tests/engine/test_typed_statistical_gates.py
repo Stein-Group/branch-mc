@@ -315,7 +315,7 @@ def test_the_swap_move_actually_fires():
 
 
 def _engine_mean_N(species_file: str, mu_per_species: dict, seed: int, windows: int):
-    """<N> over the second half of a typed cyclic-rod run, from a fresh state.
+    """<N> over the second half of a typed channel run, from a fresh state.
 
     From `ChainState.fresh` (via an explicit ChainState with no species column)
     on purpose: that is the start every real run gets, and a column supplied by
@@ -332,7 +332,8 @@ def _engine_mean_N(species_file: str, mu_per_species: dict, seed: int, windows: 
     params = {
         "potential": {"main": "lennard_jones", "T": temp, "species_file": species_file},
         "sampler": {
-            "type": "channel_cyclic",
+            "type": "channel",
+            "channel_length": 4.0,
             "trial_density": 1.0,
             "channel_width": 1.5,
         },

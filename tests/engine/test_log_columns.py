@@ -230,3 +230,111 @@ def test_a_hard_core_log_has_no_energy_column(tmp_path):
     }
     names, _rows = _header(p, tmp_path, "hs_energy")
     assert "energy" not in names and "n_cav" in names
+
+
+# ---------------------------------------------------------------------------
+# `run.esjd` across the dynamics axis.
+# ---------------------------------------------------------------------------
+
+
+def _esjd_params(engine, sampler="channel"):
+    """One state point, one `run` block, three dynamics: the shape an engine
+    comparison is actually set up in."""
+    p = {
+        "potential": {"main": "lennard_jones", "T": 1.5},
+        "sampler": (
+            {"type": "metropolis"}
+            if sampler == "metropolis"
+            else {
+                "type": "channel",
+                "trial_density": 1.0,
+                "channel_width": 1.5,
+                "channel_length": 3.0,
+            }
+        ),
+        "engine": {"type": engine},
+        "ensemble": {"type": "muVT", "dimension": 3, "box": BOX, "mu": -2.0},
+        "run": {
+            "kind": "single",
+            "seed": 5,
+            "esjd": True,
+            "traj_every": 0,
+            "target_cycles": 2400,
+            "sampling_window": 800,
+            "checkpoint_every": 5,
+            "initial_config": "grid",
+        },
+    }
+    if engine == "metropolis_dynamics" and sampler != "metropolis":
+        p["engine"]["depth"] = 1
+    return p
+
+
+@pytest.mark.parametrize(
+    "engine", ("metropolis_dynamics", "glauber_dynamics", "suwa_todo_dynamics")
+)
+def test_run_esjd_is_accepted_by_every_dynamics(engine, tmp_path):
+    """ONE `run` BLOCK ACROSS THE ARMS, which is the whole point of the flag.
+
+    `run.esjd` is a measurement switch: it changes nothing the chain does and
+    never reaches the run id, so the obvious way to set up an engine comparison
+    is to write it once and run it against all three dynamics. That used to
+    kill the two ladder arms on their FIRST log row: only
+    `metropolis_dynamics` builds `stats["esjd"]`, so the columns were declared
+    and never filled, and `_log_row` raised -- correctly, which is why the fix
+    was to stop declaring them rather than to soften the guard.
+
+    The run completing is most of the assertion. The rest is that each arm
+    still reports a squared jump in N under whichever name its block uses.
+    """
+    names, _rows = _header(_esjd_params(engine), tmp_path, f"esjd_{engine}")
+    if engine == "metropolis_dynamics":
+        assert "esjd_dNsq" in names
+        assert "esjd_drsq" in names
+        assert "glb_dN_sq" not in names
+    else:
+        # the ladder's own column is the same quantity and is always on, so the
+        # esjd block would be a second name for it
+        assert "glb_dN_sq" in names
+        assert not [n for n in names if n.startswith("esjd_")], (
+            f"{engine} declared esjd columns no window can fill: "
+            f"{[n for n in names if n.startswith('esjd_')]}"
+        )
+
+
+def test_every_declared_column_is_one_some_window_filled(tmp_path):
+    """The general form of the bug, as a property of the log rather than of
+    one flag: a declared column with no value is a crash waiting for the first
+    window, so no header may name a column the rows cannot carry. Checked here
+    on the widest header the project builds."""
+    for engine in ("metropolis_dynamics", "glauber_dynamics", "suwa_todo_dynamics"):
+        names, rows = _header(_esjd_params(engine), tmp_path, f"wide_{engine}")
+        assert rows, f"{engine} logged no rows"
+        for r in rows:
+            assert len(r) == len(names)
+            assert all(cell.strip() for cell in r), f"{engine} wrote an empty cell"
+
+
+def test_the_single_particle_sampler_declares_no_esjd_column(tmp_path):
+    """The other half of the same bug, and the one that survived the first fix.
+
+    `metropolis_dynamics` is not one code path: the cavity samplers go through
+    `advance`, which builds the esjd block, and the plain `metropolis` sampler
+    goes through `_advance_single_particle`, which returns four keys and none
+    of them is it. Gating on the DYNAMICS alone therefore still crashed the std
+    GCMC baseline -- the one arm an engine comparison is measured against.
+
+    Nothing is lost: an accepted single-particle exchange moves N by exactly
+    one, so the sum of dN^2 is `add_acc + rm_acc`, both of which are logged.
+    """
+    names, _rows = _header(
+        _esjd_params("metropolis_dynamics", sampler="metropolis"),
+        tmp_path,
+        "esjd_std",
+    )
+    assert not [n for n in names if n.startswith("esjd_")], (
+        f"the single-particle path declared esjd columns it cannot fill: "
+        f"{[n for n in names if n.startswith('esjd_')]}"
+    )
+    # and the quantity is still recoverable, exactly
+    assert "add_acc" in names and "rm_acc" in names

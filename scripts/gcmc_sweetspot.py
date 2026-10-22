@@ -283,7 +283,9 @@ def read_params(leaf):
     stype = smp.get("type")
     if "trial_density" in smp:
         td = float(smp["trial_density"])
-        if stype in ("channel", "channel_cyclic"):
+        if stype == "channel" and not isinstance(smp.get("channel_length"), str):
+            # "full" has no configured length, so no pool size to report here:
+            # its body, and therefore M, is drawn per move.
             pool_M = round(td * float(smp["channel_length"])
                            * float(smp["channel_width"]) ** (dim - 1))
         elif stype in ("branch", "rosenbluth", "reweight") and "trial_box_side" in smp:

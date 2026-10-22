@@ -1,7 +1,7 @@
 """Two rules about variants, held as gates so they cannot drift back.
 
 Both come from the same finding. `channel.py` had six sweep classes -- {hard
-core, LJ} x {single, mixture, cyclic} -- and two problems with them:
+core, LJ} x {single, mixture, closed-ring} -- and two problems with them:
 
   1. FOUR of the six overrode `__init__` and nothing else. None of those axes is
      a different algorithm; the dynamic program is one implementation and the
@@ -46,13 +46,14 @@ _NOT_A_PAIR: dict[tuple[str, str], str] = {
 #: Subclasses allowed to override only `__init__`, each with the measured reason.
 #: A mask policy earns a class when it shares little with its parent; when it
 #: shares most of it, it should be a keyword instead.
-_MASK_POLICY_SUBCLASSES: dict[str, str] = {
-    "ChannelSweepHardCoreCyclic": (
-        "21% of its parent's constructor: it lifts the locality guard and pays a "
-        "full minimum-image pass, which is a different mask policy, not a copy"
-    ),
-    "ChannelSweepLJCyclic": "27% of its parent's constructor; same reason",
-}
+#: EMPTY, AND THAT IS THE RESULT. The two entries here were the closed-ring
+#: sweeps, allowed because they really were a different mask policy: they lifted
+#: the locality guard and paid a full minimum-image pass over the pool. Leaving
+#: a frozen gap in that body removes the reason -- a rod with a gap in it is an
+#: open rod, swept by the parent class on local coordinates -- so the policy and
+#: its two subclasses went together. The gate below is what noticed; the entries
+#: did not have to be remembered.
+_MASK_POLICY_SUBCLASSES: dict[str, str] = {}
 
 
 def _definitions() -> dict[str, tuple[str, ast.AST]]:
@@ -104,11 +105,13 @@ def test_a_potential_variant_never_wears_the_generic_name() -> None:
 def test_a_subclass_that_overrides_only_init_is_justified() -> None:
     """A subclass whose only difference is its constructor is a policy, not a type.
 
-    Sometimes that is right: the cyclic rod builds its masks from periodic
-    geometry and shares almost nothing with the parent's constructor. Sometimes
-    it is a copy: the two mixture sweeps were 69% and 74% the same as the
+Sometimes that is right: a sweep that builds its masks from a different
+    geometry shares almost nothing with the parent's constructor. Sometimes it
+    is a copy: the two mixture sweeps were 69% and 74% the same as the
     constructors they inherited, and became a keyword. This test forces the
-    distinction to be made and written down rather than assumed.
+    distinction to be made and written down rather than assumed. All six
+    classes are now two: the mixture axis became a keyword and the closed-ring
+    axis went with the rod that needed it.
     """
     unjustified: list[str] = []
     for path in sorted(_PKG.rglob("*.py")):

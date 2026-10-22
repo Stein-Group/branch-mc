@@ -260,12 +260,12 @@ def test_the_sampler_is_pinned_because_it_cannot_change_the_chain(tmp_path):
     """Every sampler gives the SAME canonical chain, so only one may be stated.
 
     This is the measurement behind the refusal, kept as a test because the
-    refusal is only justified while it stays true. Five sampler blocks -- two
-    channel geometries, rosenbluth, branch at depth 2, the cyclic rod -- produced
-    the byte-identical final state from one seed, and five different run ids,
-    because `sampler` is an identity field. One physical chain in five
+    refusal is only justified while it stays true. Four sampler blocks -- two
+    channel geometries, rosenbluth, branch at depth 2 -- produced the
+    byte-identical final state from one seed, and four different run ids,
+    because `sampler` is an identity field. One physical chain in four
     directories is not cosmetic: a sweep over `trial_density` would have read as
-    five settings and been one measurement repeated.
+    four settings and been one measurement repeated.
 
     If a future move set makes the sampler live in this ensemble, this test fails
     first and the refusal above should go with it.
@@ -286,10 +286,6 @@ def test_the_sampler_is_pinned_because_it_cannot_change_the_chain(tmp_path):
         ),
         ({"type": "rosenbluth", "trials": 20, "trial_box_side": 3.0}, {}),
         ({"type": "branch", "trials": 20, "trial_box_side": 3.0}, {"depth": 2}),
-        (
-            {"type": "channel_cyclic", "trial_density": 2.0, "channel_width": 1.2},
-            {"depth": 1},
-        ),
     ):
         p = _params(start, MODEL_DEMIX)
         p["sampler"] = block

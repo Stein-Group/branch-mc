@@ -77,10 +77,10 @@ _NINF_ACC = -math.inf
 #
 # EXACT BY CONSTRUCTION (no sampling involved)
 #   * bit-identical to the no-auxiliary engine at aux_cutoff == upper_cutoff, over
-#     2D/3D x fixed/cyclic rod x depth-2/full_repacking x 3 seeds
+#     2D/3D x fixed/full-span rod x depth-2/full_repacking x 3 seeds
 #   * clique weight sums == brute-force enumeration over all C(n,k) subsets at the
 #     SHORT radius, in 2D and 3D, with non-uniform member weights, including
-#     minimum-image pairs across the cyclic seam
+#     minimum-image pairs across the periodic boundary
 #   * the same sums == ljbranch_weight_sum, an independent implementation
 #   * sample() draws proportional to clique weight, 40k draws against exact
 #     per-clique weights
@@ -1553,8 +1553,16 @@ def advance(
         log_p_trial = None
         log_z = None
         guest_ids = []
-    channel_cyclic = samp.channel_cyclic  # wall-to-wall rod
     n_trials_base = n_trials  # full-span resets n_trials/move
+    #: `channel_length = "full"`: the body's length is drawn per move from the
+    #: orientation, so it is read here rather than off the config.
+    channel_full = bool(samp.channel_full)
+    #: The largest distance the SWEEP reads, which is what the full-span body's
+    #: image guard has to hold its periodic copies beyond. `rc_sel` on the LJ
+    #: path (the auxiliary radius when one is on, `upper_cutoff` otherwise) and
+    #: the overlap floor on the hard-core one -- the same quantity `sim_setup`'s
+    #: diagonal guard uses for the fixed cuboid.
+    chan_reach = float(rc_sel if kern.potential_type != "hard_sphere" else lower)
     full_repacking = samp.full_repacking  # whole-cavity repack
     reweight = kern.potential_type == "reweight"
     if branch and reweight:
@@ -2106,6 +2114,27 @@ def advance(
             # must be offset in its own frame: for the channel the mirror offset
             # runs along the cuboid's local axes, not the lab axes.
             chan_R = channel_move.draw_rotation(rng, dim, channel=channel)
+            # THE BODY'S LENGTH, BEFORE ITS POSITION, which is the order the
+            # removal leg needs. On `channel_length = "full"` the length comes
+            # from the orientation (`full_span_length`), so it is known here,
+            # one line after the rotation is drawn and before anything has
+            # looked at the configuration. Both legs compute the same number
+            # from the same R, which is what lets the removal leg offset the
+            # body around its anchor over the body's own extent -- the fixed
+            # cuboid's construction, unchanged, with a length that happens to
+            # vary per move.
+            chan_len = samp.channel_length
+            if channel_full and chan_R is not None:
+                chan_len = channel_move.full_span_length(
+                    chan_R, box, samp.channel_width, dim, chan_reach
+                )
+                if chan_len <= 0.0:
+                    # This direction runs within reach of its own periodic image
+                    # along its whole length, so there is no body to propose
+                    # into. The step is already counted above (`add_step` and
+                    # friends), so this bails like the short-pool one below:
+                    # a proposal made and not accepted.
+                    continue
             anchor_d1 = -1
             if choice == "add":
                 center = rng.uniform(0.0, 1.0, size=3)[:dim] * side
@@ -2120,8 +2149,7 @@ def advance(
                         chan_R,
                         side,
                         dim,
-                        cyclic=channel_cyclic,
-                        half_len=0.5 * samp.channel_length,
+                        half_len=0.5 * chan_len,
                         half_wid=0.5 * samp.channel_width,
                     )
                 else:
@@ -2137,13 +2165,12 @@ def advance(
                     side,
                     box,
                     dim,
-                    cyclic=channel_cyclic,
-                    channel_length=samp.channel_length,
+                    channel_length=chan_len,
                     channel_width=samp.channel_width,
                     trial_density=samp.trial_density,
                     n_trials_base=n_trials_base,
-                    # The floor the cyclic rod's chord-derived trial count must
-                    # respect: the reverse-move mirror claims one trial slot per
+                    # The floor a chord-derived trial count must respect: the
+                    # reverse-move mirror claims one trial slot per
                     # removed molecule, so a body holding fewer than the group
                     # size cannot express the move at all. `n_add`/`n_remove` are
                     # still the depth-based pair here -- `full_repacking`
@@ -2153,6 +2180,8 @@ def advance(
                     # full_repacking path keeps its own `max(n_add, n_remove) >
                     # n_trials` bail, which is the guard for the occupancy case.
                     n_trials_min=max(2, n_add, n_remove),
+                    full=channel_full,
+                    reach=chan_reach,
                 )
                 if channel and chan_R is not None
                 else None
@@ -2469,11 +2498,10 @@ def advance(
             chan_sweep: ChannelSweepHardCore | ChannelSweepLJ | None = None
             if chan_body is not None and len(pool):
                 kmx = max(n_add, n_remove)
-                if not chan_body.cyclic:
-                    _dv("kmax", kmx)
-                    _dv("pool_size", len(pool))
-                    _dv("trials_admissible", len(trial_set))
-                    _dv("n_remove", n_remove)
+                _dv("kmax", kmx)
+                _dv("pool_size", len(pool))
+                _dv("trials_admissible", len(trial_set))
+                _dv("n_remove", n_remove)
                 chan_sweep = chan_body.make_sweep(
                     pool,
                     kmx,
