@@ -68,6 +68,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+log = logging.getLogger(__name__)
+
 _THREAD_VARS = (
     "OMP_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",
@@ -525,6 +527,22 @@ def launch_sweep(
     # serial runs take one core and can be pinned; parallel runs manage their
     # own workers, so they are not taskset-pinned
     taskset = shutil.which("taskset") if (pin and per == 1) else None
+    # THE CPUS THIS PROCESS MAY USE, not 0..cores-1. Under SLURM a job's
+    # allowed set is whatever the scheduler handed it (22-43, say). Pinning to
+    # absolute ids 0..15 either fails the probe below and runs unpinned, or, on
+    # a node without cpuset confinement, lands every job sharing the node on the
+    # SAME sixteen cpus, so each run's wall time depends on how many neighbours
+    # it had. Pin inside the allowed set instead.
+    try:
+        allowed = sorted(os.sched_getaffinity(0))
+    except AttributeError:  # not Linux
+        allowed = list(range(cores))
+    if len(allowed) < min(cores, len(combos)):
+        log.warning(
+            "the core budget is %d but this process may run on only %d cpus "
+            "(%s); runs will share cpus and their wall times will not compare",
+            cores, len(allowed), allowed,
+        )
 
     next_core = [0]
 
@@ -553,7 +571,7 @@ def launch_sweep(
             # prefix taskset, but fall back to unpinned if affinity is refused
             # (e.g. restricted cgroups): pinning is an optimisation, not a
             # correctness requirement, so a node that forbids it must not fail
-            core = str(next_core[0] % cores)
+            core = str(allowed[next_core[0] % min(cores, len(allowed))])
             next_core[0] += 1
             probe = subprocess.run([taskset, "-c", core, "true"], capture_output=True)
             if probe.returncode == 0:

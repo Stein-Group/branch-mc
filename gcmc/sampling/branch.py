@@ -699,8 +699,39 @@ def _wsum(g: FloatArray, h: FloatArray, k: int) -> float:
     for i in range(d - k + 1):
         fwd = np.where(g[i, i + 1 :] > 0.0)[0] + (i + 1)
         if fwd.size >= k - 1:
-            total += h[i] * _wsum(g[np.ix_(fwd, fwd)], h[fwd] * g[i, fwd], k - 1)
+            total += h[i] * _wsum(g[fwd][:, fwd], h[fwd] * g[i, fwd], k - 1)
     return total
+
+
+def _wladder(g: FloatArray, h: FloatArray, kmax: int) -> FloatArray:
+    """[W_0, .., W_kmax] in one recursion: `_wsum` for every rung at once.
+
+    `_wsum(g, h, k)` partitions the k-cliques by their lowest member and
+    recurses, and a ladder built from it repeats that recursion once per rung:
+    the tree for rung k contains the trees for every rung below it. Here one
+    descent returns the whole vector, so the ladder costs what its top rung
+    costs instead of the sum over rungs.
+
+    BIT-IDENTICAL to `_wsum`, rung by rung, by construction rather than by
+    tolerance: rungs 1-3 ARE `_wsum`'s closed forms on the same arrays, and
+    every higher rung adds the same products in the same order of lowest
+    member, skipping exactly the terms `_wsum` skips (whose value is zero).
+    """
+    d = h.shape[0]
+    out = np.zeros(kmax + 1)
+    out[0] = 1.0
+    for k in range(1, min(kmax, 3) + 1):
+        out[k] = _wsum(g, h, k)
+    if kmax < 4 or d < 4:
+        return out
+    for i in range(d - 3):
+        fwd = np.where(g[i, i + 1 :] > 0.0)[0] + (i + 1)
+        if fwd.size < 3:
+            continue
+        sub = _wladder(g[fwd][:, fwd], h[fwd] * g[i, fwd], kmax - 1)
+        for k in range(4, min(kmax, fwd.size + 1) + 1):
+            out[k] += h[i] * sub[k - 1]
+    return out
 
 
 def _wsample(g: FloatArray, h: FloatArray, k: int, rng: _RNG) -> list[int] | None:
@@ -729,14 +760,14 @@ def _wsample(g: FloatArray, h: FloatArray, k: int, rng: _RNG) -> list[int] | Non
         fwd = np.where(g[i, i + 1 :] > 0.0)[0] + (i + 1)
         fwds[i] = fwd
         if fwd.size >= k - 1:
-            share[i] = h[i] * _wsum(g[np.ix_(fwd, fwd)], h[fwd] * g[i, fwd], k - 1)
+            share[i] = h[i] * _wsum(g[fwd][:, fwd], h[fwd] * g[i, fwd], k - 1)
     total = float(share.sum())
     if total <= 0.0:
         return None
     i = int(np.searchsorted(np.cumsum(share), rng.uniform(0.0, total)))
     fwd = fwds[i]
     assert fwd is not None  # share[i] > 0 means the branch above ran
-    inner = _wsample(g[np.ix_(fwd, fwd)], h[fwd] * g[i, fwd], k - 1, rng)
+    inner = _wsample(g[fwd][:, fwd], h[fwd] * g[i, fwd], k - 1, rng)
     assert inner is not None  # share[i] > 0 guarantees a completion
     return [i] + [int(fwd[x]) for x in inner]
 
@@ -924,6 +955,15 @@ class CavitySweep:
             return -np.inf
         if k == 0:
             return 0.0
+        if not self._cache and 0 < self.kmax:
+            # THE WHOLE LADDER IN ONE DESCENT. `window_ladder_logw` asks for every
+            # rung 0..kmax in turn, and `_wsum` per rung repeats the lower rungs'
+            # recursion inside each higher one. Same numbers, bit for bit.
+            for j, w in enumerate(_wladder(self._g, self._h, min(self.kmax, self.n))):
+                if j:
+                    self._cache[j] = (
+                        float(np.log(w) + j * self._log_c) if w > 0.0 else -np.inf
+                    )
         if k not in self._cache:
             w = _wsum(self._g, self._h, k)
             self._cache[k] = float(np.log(w) + k * self._log_c) if w > 0.0 else -np.inf
