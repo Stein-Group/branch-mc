@@ -1,6 +1,7 @@
 """io round-trips: a checkpoint restores positions and the RNG stream exactly,
-the previous checkpoint rotates to .bak, and the CSV Log writes its header once
-across a reopen. These are the disk-boundary guarantees a resume relies on.
+the previous checkpoint rotates to .bak, and trim_log drops rows a killed leg
+streamed past its checkpoint. These are the disk-boundary guarantees a resume
+relies on (the log format itself is tested in tests/engine/test_run_log.py).
 """
 
 from __future__ import annotations
@@ -33,7 +34,6 @@ def test_checkpoint_roundtrip_restores_positions_and_rng(tmp_path):
         positions=pos,
         step=1000,
         rng=io.rng_state(rng),
-        counters={"acc": 3},
         params={"run": {"seed": 42}},
         mu=2.0,
     )
@@ -42,7 +42,7 @@ def test_checkpoint_roundtrip_restores_positions_and_rng(tmp_path):
     ck = io.load_checkpoint(p)
     assert ck is not None
     assert np.array_equal(ck["positions"], pos)
-    assert ck["step"] == 1000 and ck["counters"] == {"acc": 3}
+    assert ck["step"] == 1000
 
     restored = io.set_rng_state(np.random.default_rng(), ck["rng"])
     assert np.array_equal(restored.uniform(size=4), want_next)
@@ -52,7 +52,6 @@ def test_second_save_rotates_previous_to_bak(tmp_path):
     p = _paths(tmp_path)
     common = {
         "rng": io.rng_state(np.random.default_rng(1)),
-        "counters": {},
         "params": {},
     }
     io.save_checkpoint(p, positions=np.zeros((1, 3)), step=1, **common)
@@ -60,18 +59,6 @@ def test_second_save_rotates_previous_to_bak(tmp_path):
     io.save_checkpoint(p, positions=np.zeros((2, 3)), step=2, **common)
     assert p.checkpoint_bak.exists()
     assert io.load_checkpoint(p)["step"] == 2  # primary is the newest
-
-
-def test_log_writes_header_once_across_reopen(tmp_path):
-    path = tmp_path / "run.csv"
-    log = io.Log(path, "# a,b,c", flush_every=1)
-    log.write("1,2,3")
-    log.close()
-    reopened = io.Log(path, "# a,b,c", flush_every=1)
-    reopened.write("4,5,6")
-    reopened.close()
-    lines = path.read_text().splitlines()
-    assert lines == ["# a,b,c", "1,2,3", "4,5,6"]
 
 
 def test_trim_log_drops_rows_past_the_cutoff(tmp_path):

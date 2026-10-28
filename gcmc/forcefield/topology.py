@@ -101,11 +101,6 @@ class Topology:
 
     species: Species
 
-    @property
-    def n_sites_per_mol(self) -> int:
-        """Sites per molecule (constant: one species per system for now)."""
-        return self.species.n_sites
-
     def site_types(self, n_mol: int) -> np.ndarray:
         """Flat per-site type array for `n_mol` molecules (template tiled)."""
         return np.tile(self.species.site_types, n_mol)

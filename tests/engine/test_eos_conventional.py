@@ -68,7 +68,10 @@ def _run(mu: float, seed: int) -> float:
     w = engine.make_weigher(config_specs.kernel_spec(cfg), pot)
     st = ChainState.fresh(cfg.dimension, seed=seed)
     st.positions = np.random.default_rng(seed).uniform(0, cfg.box, size=(60, 3))
-    eta = [engine.advance(st, cfg, pot, w)["packing_fraction"] for _ in range(WINDOWS)]
+    eta = [
+        cfg.packing_fraction(engine.advance(st, cfg, pot, w)["N"])
+        for _ in range(WINDOWS)
+    ]
     return float(np.mean(eta[WINDOWS // 2 :]))  # drop the fill-up half
 
 

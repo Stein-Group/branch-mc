@@ -203,15 +203,15 @@ def _assert_invariants(
     # is how this was missed the first time.
     steps = 0
     for s in summaries:
-        c = s.get("counters", {})
+        c = s.get("columns", {})
         steps += sum(
             int(c.get(k, 0))
             for k in (
-                "add_step",
-                "remove_step",
-                "move_step",
-                "repack_step",
-                "swap_step",
+                "insert_tried",
+                "delete_tried",
+                "translate_tried",
+                "repack_tried",
+                "swap_tried",
             )
         )
     assert steps > 0, (

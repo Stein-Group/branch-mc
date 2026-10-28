@@ -14,7 +14,7 @@
 # them from ff/forcefield_A.yaml and compares, so this file cannot drift away
 # from the anchor without the suite noticing. Regenerate rather than retype:
 #
-#   python -m scripts.mof.units ff/forcefield_A.yaml --T 298
+#   python -m gcmc.forcefield.species_file ff/forcefield_A.yaml --T 298
 #
 # Why a reduced copy at all, when the MOF path already reduces FF-A on the fly:
 # because the pure-fluid multispecies engine takes a species file and has no

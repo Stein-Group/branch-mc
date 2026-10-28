@@ -104,10 +104,9 @@ def _params(start, n, **ens_over):
 
 
 def _log(paths):
-    lines = [ln for ln in paths.log.read_text().splitlines() if ln.strip()]
-    names = lines[0].lstrip("#").split()
-    rows = np.array([[float(x) for x in ln.split()] for ln in lines[1:]])
-    return {n: rows[:, i] for i, n in enumerate(names)}
+    log = gio.read_log(paths.log)
+    log["N"] = log["N_A"] + log["N_B"]
+    return log
 
 
 def test_a_mixture_at_fixed_n_conserves_n_and_still_mixes(tmp_path):
@@ -122,7 +121,6 @@ def test_a_mixture_at_fixed_n_conserves_n_and_still_mixes(tmp_path):
         f"N took the values {sorted(set(log['N'].tolist()))}; semigrand must hold it at "
         f"{n} exactly, and a density that moves is not the arm this run is for"
     )
-    assert np.allclose(log["N_A"] + log["N_B"], log["N"])
 
     # THE REACHABLE-VALUE HALF. Everything above is satisfied by a chain that
     # never changes a label, which is precisely what a species-blind repack or a
@@ -177,7 +175,7 @@ def test_a_typed_nvt_sweep_spelling_is_refused_with_the_replacement_named(tmp_pa
     start, n = _start(tmp_path)
     params = _params(start, n)
     params["ensemble"]["sweep"] = {"start": 1.0, "stop": 2.0, "num": 2}
-    with pytest.raises(ValueError, match="LIST OF MAPS"):
+    with pytest.raises(ValueError, match="unknown keys \\['sweep'\\]"):
         from_params(params)
 
 

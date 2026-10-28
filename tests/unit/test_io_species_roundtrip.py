@@ -12,7 +12,7 @@ from __future__ import annotations
 import numpy as np
 
 from gcmc.run import io
-from gcmc.system.state import ChainState, zero_counters
+from gcmc.system.state import ChainState
 
 
 def _paths(tmp_path):
@@ -37,7 +37,6 @@ def test_species_column_round_trips(tmp_path):
         positions=pos,
         step=10,
         rng=rng.bit_generator.state,
-        counters=zero_counters(),
         params={"mode": "mof-ms"},
         species=species,
     )
@@ -59,7 +58,6 @@ def test_single_species_writes_no_species_and_loads_none(tmp_path):
         positions=pos,
         step=3,
         rng=rng.bit_generator.state,
-        counters=zero_counters(),
         params={},
     )
     with np.load(paths.checkpoint, allow_pickle=False) as data:
@@ -79,7 +77,6 @@ def test_schema_two_checkpoint_still_loads(tmp_path):
         positions=pos,
         step=1,
         rng=rng.bit_generator.state,
-        counters=zero_counters(),
         params={},
         schema=2,
     )

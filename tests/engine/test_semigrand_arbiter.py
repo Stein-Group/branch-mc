@@ -120,12 +120,9 @@ def _run_arm(tmp_path, tag: str, comp, mu: dict[str, float]) -> np.ndarray:
     p.write_text(json.dumps(params))
     _state, paths = runner.run(str(p), root=str(tmp_path / f"runs_{tag}"))
 
-    lines = [ln for ln in paths.log.read_text().splitlines() if ln.strip()]
-    names = lines[0].lstrip("#").split()
-    rows = np.array([[float(x) for x in ln.split()] for ln in lines[1:]])
-    cols = [names.index(f"N_{s}") for s in ("A", "B", "C")]
-    counts_series = rows[:, cols]
-    assert set(rows[:, names.index("N")].tolist()) == {float(n)}, (
+    log = gio.read_log(paths.log)
+    counts_series = np.column_stack([log[f"N_{s}"] for s in ("A", "B", "C")])
+    assert set(counts_series.sum(axis=1).tolist()) == {float(n)}, (
         "N moved during a fixed-N run, so this is not the ensemble being tested"
     )
     return counts_series / counts_series.sum(axis=1, keepdims=True)

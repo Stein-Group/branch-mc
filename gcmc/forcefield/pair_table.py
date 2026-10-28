@@ -52,6 +52,13 @@ class PairTable:
     eps: np.ndarray  # eps*_ij (reduced)
     sigma2: np.ndarray  # sigma*_ij ** 2, so the sq path never re-squares
     core_floor: np.ndarray  # c * sigma*_ij, the per-pair overlap radius argument
+    # Truncated-and-shifted convention (off by default). When on, every pair
+    # energy below is u(r) - u(rc) for r < rc and exactly 0 at r >= rc, which is
+    # RASPA's "shifted". When off, the functions take their original code path
+    # and return the same bits as before this field existed.
+    shifted: bool = False
+    rc2: float = float("inf")  # rc*^2, the shift's own cutoff (inf when unshifted)
+    shift: np.ndarray | None = None  # u_ij(rc*) per pair, subtracted inside rc*
 
     @classmethod
     def from_reduced(
@@ -61,11 +68,20 @@ class PairTable:
         sigma_star: np.ndarray,
         eps_star: np.ndarray,
         core_floor_c: float,
+        *,
+        rc: float | None = None,
+        shifted: bool = False,
     ) -> PairTable:
         """From units.ReducedTables' sigma_star / eps_star and the P0.6 floor.
 
         Kept independent of the units module (which imports yaml and ASE) so a
         potential can be built from bare arrays; sim_setup does the wiring.
+
+        `shifted=True` needs `rc` (reduced, the same cutoff every caller
+        truncates at): the table then carries u_ij(rc) and its energies are
+        u(r) - u(rc) inside rc, zero outside. The shift lives HERE, in the one
+        place every pair energy is computed, so no call site can apply it to one
+        term and forget another.
         """
         sigma = np.asarray(sigma_star, float)
         eps = np.asarray(eps_star, float)
@@ -78,6 +94,18 @@ class PairTable:
             raise ValueError(
                 f"core floor fraction must be in (0, 1], got {core_floor_c}"
             )
+        if not shifted:
+            return cls(
+                types=types,
+                n_guests=n_guests,
+                sigma=sigma,
+                eps=eps,
+                sigma2=sigma * sigma,
+                core_floor=core_floor_c * sigma,
+            )
+        if rc is None or not (rc > 0 and np.isfinite(rc)):
+            raise ValueError(f"a shifted table needs a positive finite rc, got {rc}")
+        ir6_rc = (sigma / float(rc)) ** 6
         return cls(
             types=types,
             n_guests=n_guests,
@@ -85,6 +113,9 @@ class PairTable:
             eps=eps,
             sigma2=sigma * sigma,
             core_floor=core_floor_c * sigma,
+            shifted=True,
+            rc2=float(rc) * float(rc),
+            shift=eps * _lj_from_ir6(ir6_rc),
         )
 
     def index(self, type_name: str) -> int:
@@ -107,8 +138,12 @@ def table_pair_energy_sq(
     `lj_pair_energy_sq` exactly -- same operations in the same order, so same
     bits. That identity is the reduction test in test_pair_table.py.
     """
-    ir6 = (table.sigma2[ti, tj] / np.asarray(d2, float)) ** 3
-    return table.eps[ti, tj] * _lj_from_ir6(ir6)
+    d2 = np.asarray(d2, float)
+    ir6 = (table.sigma2[ti, tj] / d2) ** 3
+    u = table.eps[ti, tj] * _lj_from_ir6(ir6)
+    if not table.shifted:
+        return u
+    return _shift_inside(u, d2, table.shift[ti, tj], table.rc2)  # type: ignore[index]
 
 
 def table_pair_energy(d: FloatArray, ti: int, tj: int, table: PairTable) -> FloatArray:
@@ -117,8 +152,25 @@ def table_pair_energy(d: FloatArray, ti: int, tj: int, table: PairTable) -> Floa
     Mirrors `lj_pair_energy`: ir6 = (sigma_ij / d)^6. At one type it is
     (1/d)^6 into `_lj_from_ir6`, i.e. `lj_pair_energy` bit for bit.
     """
-    ir6 = (table.sigma[ti, tj] / np.asarray(d, float)) ** 6
-    return table.eps[ti, tj] * _lj_from_ir6(ir6)
+    d = np.asarray(d, float)
+    ir6 = (table.sigma[ti, tj] / d) ** 6
+    u = table.eps[ti, tj] * _lj_from_ir6(ir6)
+    if not table.shifted:
+        return u
+    return _shift_inside(u, d * d, table.shift[ti, tj], table.rc2)  # type: ignore[index]
+
+
+def _shift_inside(
+    u: FloatArray, d2: FloatArray, shift: FloatArray | float, rc2: float
+) -> FloatArray:
+    """u - u(rc) strictly inside rc, exactly 0 at and beyond it.
+
+    The mask is applied HERE rather than trusted to the caller: several callers
+    feed rows padded with inf distances, whose raw energy is 0 and must stay 0
+    (a pad that came back as -u(rc) would be a phantom neighbour). Strict `<`
+    matches RASPA (`rr < CutOffVDWSquared`) and every caller's own `d < rc`.
+    """
+    return np.where(d2 < rc2, u - shift, 0.0)
 
 
 def table_pair_energy_vec(
@@ -144,8 +196,12 @@ def table_pair_energy_vec(
     the same order -- which is what makes it bit-identical rather than merely
     close. `test_pair_table.py` asserts that against the scalar form.
     """
-    ir6 = (table.sigma[si, sj] / np.asarray(d, float)) ** 6
-    return table.eps[si, sj] * _lj_from_ir6(ir6)
+    d = np.asarray(d, float)
+    ir6 = (table.sigma[si, sj] / d) ** 6
+    u = table.eps[si, sj] * _lj_from_ir6(ir6)
+    if not table.shifted:
+        return u
+    return _shift_inside(u, d * d, table.shift[si, sj], table.rc2)  # type: ignore[index]
 
 
 def pair_floor(ti: int, tj: int, table: PairTable) -> float:
@@ -166,9 +222,6 @@ def overlaps_table(
 
     Kept as a thin wrapper rather than reimplemented: the invariant is that the
     overlap comparison exists once, in geometry.py, and the pair floor changes
-    only which number is handed to it. This module used to repeat the tolerance
-    as a local constant to avoid importing geometry into a potential; geometry
-    imports nothing but numpy at module scope (its one scipy use is a local
-    import), so that cost was imaginary and the second copy was not.
+    only which number is handed to it.
     """
     return overlap.pair_overlaps(d, ti, tj, table.core_floor)

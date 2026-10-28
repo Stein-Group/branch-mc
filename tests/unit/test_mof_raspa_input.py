@@ -22,13 +22,13 @@ import pytest
 from ase import Atoms
 from ase.io import write as ase_write
 
+from gcmc.forcefield.species_file import load_forcefield, peng_robinson, reduce_tables
 from scripts.mof.raspa_input import (
     force_field_json,
     guest_json,
     simulation_json,
     write_case,
 )
-from scripts.mof.units import load_forcefield, peng_robinson, reduce_tables
 
 FF_A = Path(__file__).resolve().parents[2] / "ff" / "forcefield_A.yaml"
 

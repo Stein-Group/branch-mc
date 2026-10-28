@@ -1,8 +1,7 @@
 """IO: checkpoint, trajectory, log. One file, nothing clever.
 
 Checkpoint is a single .npz holding the positions plus a small JSON blob with
-the step counter, the move counters, the RNG state, the params, and a schema
-version. It is written to a temp file and moved into place atomically,
+the step counter, the RNG state, the params, and a schema version. It is written to a temp file and moved into place atomically,
 which is atomic on POSIX, and the previous checkpoint is kept as a .bak so a
 kill mid-write can never destroy the last good state. Restart reads only the
 checkpoint, never the trajectory.
@@ -11,16 +10,16 @@ Trajectory is extxyz, written either as a single overwritten snapshot (space
 saving, the default) or appended as a full trajectory. Params go into each
 frame's info for eyeballing. It is analysis-only and never read on restart.
 
-Log is the plain counters table, opened in append so a resumed run continues
-its rows; trim_log drops any rows past the checkpoint so the cycle column stays
-monotonic after a mid-window kill.
+The run log has one row per window of raw observables and counts (`RunLog`),
+appended to on resume; trim_log drops any rows past the checkpoint so the cycle
+column stays monotonic after a mid-window kill. `read_log` reads it back.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -80,7 +79,6 @@ def save_checkpoint(
     positions: FloatArray,
     step: int,
     rng: dict[str, Any],
-    counters: dict[str, int],
     params: dict[str, Any],
     mu: float | None = None,
     n_history: list[float] | None = None,
@@ -99,7 +97,6 @@ def save_checkpoint(
             "schema": int(schema),
             "step": int(step),
             "n": len(positions),
-            "counters": counters,
             "rng": rng,
             "params": params,
             "mu": mu,
@@ -142,7 +139,6 @@ def _read_npz(path: str | Path) -> dict[str, Any]:
         "positions": positions,
         "step": meta["step"],
         "n": meta["n"],
-        "counters": meta["counters"],
         "rng": meta["rng"],
         "params": meta["params"],
         "schema": meta["schema"],
@@ -185,9 +181,8 @@ def write_frame(
 
     SPECIES. With `species` and `symbols` given, each particle is written
     under its own element symbol from the species file, so a frame is a valid
-    warm start for the same model. Every particle used to be written as "H"
-    whatever it was, which made a typed trajectory unreadable back into species
-    -- the coordinates survived and the composition did not.
+    warm start for the same model: without it a typed trajectory cannot be read
+    back into species.
 
     Left at "H" when `species` is None, which is the single-species case. That is
     not laziness: `tests/engine/test_stageA_traj_identity.py` compares trajectory
@@ -251,96 +246,104 @@ def write_frame(
 
 
 # ---------------------------------------------------------------- log
-class Log:
-    """Append-only CSV log with buffered writes: the header is written once per
-    file lifetime, rows are flushed on the triggers below, and reopening appends
-    (a resumed run continues the same file).
+#: First column of every run log: the cumulative MC step in millions.
+LOG_CYCLE = "MC_cycle"
 
-    THE FLUSH TRIGGERS, and why there are two.
 
-    `flush_every` is a COUNT: flush once this many rows have accumulated. This is
-    what the original had (`LOG_FLUSH_EVERY`, "tune this; bigger = fewer
-    syscalls") and it shipped at 1, i.e. never batching. A count is an awkward
-    knob because the right value depends on how fast rows arrive, which depends
-    on `sampling_window`, the system size and the sampler -- so it has to be
-    re-tuned per run, and in practice never was. It survives here as a MEMORY
-    CAP, not as the primary control.
+def _cell(value: Any) -> str:
+    """One log cell: integers as integers, floats to ten significant digits."""
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    return format(float(value), ".10g")
 
-    `min_interval` is a TIME FLOOR in seconds: never flush more often than this.
-    It is the primary control because it is self-tuning in exactly the way the
-    problem demands. A slow producer (the production case: one row per window,
-    hundreds of milliseconds apart) exceeds the floor on every row and so flushes
-    on every row -- byte-for-byte today's behaviour, no durability lost. A fast
-    producer (a small `sampling_window`, where rows arrive every millisecond and
-    the writes really are too frequent) batches automatically, and the batch size
-    is whatever the observed row rate implies rather than a number someone
-    guessed. Crucially the thing bounded is the WINDOW OF LOSS IN TIME: a kill
-    costs at most `min_interval` seconds of log, whatever the row rate. That is
-    how production logging systems handle this (logback's non-immediate flush
-    plus a periodic flusher, journald, Postgres `wal_writer_delay`, MySQL
-    `innodb_flush_log_at_trx_commit=2`); bounding a count instead bounds memory
-    while leaving the loss window free to grow, which is the wrong invariant for
-    log data.
 
-    Default `min_interval=0.0` means flush every row: unchanged from before, so
-    turning this on is a decision, not a side effect.
+#: Longest time a written row waits before the log is flushed.
+FLUSH_SECONDS = 1.0
 
-    MEASURED, so the knob is used for the right reason: at
-    `sampling_window=1000` the log costs 0.02% of runtime, and batching it saves
-    nothing worth having. The write amplification at that cadence is
-    `checkpoint_every=1` (~10%) and `traj_every=1` (+100%). Reach for this only
-    when a diagnostic run drives `sampling_window` down far enough that rows
-    arrive in milliseconds.
 
-    `clock` is injectable so the triggers can be tested without sleeping.
+class RunLog:
+    """The run log: a `#` header naming the columns, then one whitespace
+    separated row per window.
+
+    Rows reach the disk at most once per `FLUSH_SECONDS`, at every checkpoint
+    (the caller's `flush()`) and on `close()`, so a one-step window does not pay
+    a filesystem write per row. A killed run loses only rows past its last
+    checkpoint, which a resume drops and rewrites anyway.
+
+    The header is written with the first row, so the columns are whatever the
+    first window reports, in that order. Reopening an existing log (a resumed
+    run) reads its header, and a row whose columns differ is refused rather than
+    appended under the wrong names.
     """
 
-    def __init__(
-        self,
-        path: str | Path,
-        header: str,
-        flush_every: int = 1,
-        min_interval: float = 0.0,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        """Open (or reopen) `path` for appending; write `header` only if the
-        file is new or empty."""
+    def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self.flush_every = flush_every
-        self.min_interval = float(min_interval)
-        self._clock = clock
-        self._buf: list[str] = []
-        self._last_flush = clock()
-        new = (not self.path.exists()) or self.path.stat().st_size == 0
-        self._f = open(path, "a")  # noqa: SIM115  (held open; closed by close())
-        if new:
-            self._f.write(header if header.endswith("\n") else header + "\n")
-            self._f.flush()
+        self._cols: list[str] | None = None
+        if self.path.exists() and self.path.stat().st_size:
+            self._cols = log_columns(self.path)
+            if not self._cols or self._cols[0] != LOG_CYCLE:
+                raise ValueError(
+                    f"{self.path} is a run log in an older format (its first "
+                    f"column is not {LOG_CYCLE}). Finish that run with the code "
+                    "that started it, or delete the run folder to start afresh."
+                )
+        self._f = open(self.path, "a")  # noqa: SIM115  (closed by close())
+        self._last_flush = time.monotonic()
 
-    def write(self, line: str) -> None:
-        """Buffer one row (newline added if missing), then flush if either
-        trigger has fired: enough time has passed since the last flush, or the
-        buffer has hit its cap."""
-        self._buf.append(line if line.endswith("\n") else line + "\n")
-        if (
-            self._clock() - self._last_flush >= self.min_interval
-            or len(self._buf) >= self.flush_every
-        ):
+    def write(self, row: dict[str, Any]) -> None:
+        """Append one row; the first row of a new file writes the header."""
+        cols = list(row)
+        widths = [max(len(c) + 1, 12) for c in cols]
+        if self._cols is None:
+            self._cols = cols
+            head = " ".join(c.rjust(w) for c, w in zip(cols, widths))
+            self._f.write("#" + head[1:] + "\n")
+        elif cols != self._cols:
+            raise ValueError(
+                f"{self.path} has columns {self._cols} and this window produced "
+                f"{cols}; the run's configuration no longer matches its log"
+            )
+        cells = (_cell(v).rjust(w) for v, w in zip(row.values(), widths))
+        self._f.write(" ".join(cells) + "\n")
+        if time.monotonic() - self._last_flush >= FLUSH_SECONDS:
             self.flush()
 
     def flush(self) -> None:
-        """Write the buffer through to disk (fsync-free; the OS flush is
-        enough for log data whose loss is tolerable)."""
-        if self._buf:
-            self._f.writelines(self._buf)
-            self._f.flush()
-            self._buf.clear()
-        self._last_flush = self._clock()
+        """Push every written row to the file."""
+        self._f.flush()
+        self._last_flush = time.monotonic()
 
     def close(self) -> None:
         """Flush and release the file handle."""
-        self.flush()
         self._f.close()
+
+
+def log_columns(path: str | Path) -> list[str]:
+    """The column names of a run log (its last `#` line before the data)."""
+    names: list[str] = []
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith("#"):
+                names = line[1:].split()
+            elif line.strip():
+                break
+    return names
+
+
+def read_log(path: str | Path) -> dict[str, np.ndarray]:
+    """A run log as {column: array}, one entry per window."""
+    names = log_columns(path)
+    if not names:
+        raise ValueError(f"{path}: no '#' header line naming the columns")
+    data = np.loadtxt(path, comments="#", ndmin=2)
+    if data.size == 0:
+        return {n: np.empty(0) for n in names}
+    if data.shape[1] != len(names):
+        raise ValueError(
+            f"{path}: the header names {len(names)} columns and the rows have "
+            f"{data.shape[1]}"
+        )
+    return {n: data[:, i] for i, n in enumerate(names)}
 
 
 def trim_trajectory(path: str | Path, max_step: int) -> None:
@@ -381,7 +384,7 @@ def trim_trajectory(path: str | Path, max_step: int) -> None:
 
 
 def trim_log(path: str | Path, max_cycle_millions: float) -> None:
-    """Drop data rows whose leading MC-cycle value (in millions) exceeds the
+    """Drop data rows whose leading MC_cycle value (in millions) exceeds the
     checkpoint, keeping the header. No-op if the file is absent."""
     path = Path(path)
     if not path.exists():
@@ -398,7 +401,7 @@ def trim_log(path: str | Path, max_cycle_millions: float) -> None:
         except (ValueError, IndexError):
             kept.append(ln)
             continue
-        if cyc <= max_cycle_millions:
+        if cyc <= max_cycle_millions * (1.0 + 1e-12):
             kept.append(ln)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text("".join(kept))
@@ -505,12 +508,11 @@ def load_config_species(
 ) -> IntArray:
     """Read the species column of a warm-start frame back into type ids.
 
-    THE OTHER HALF OF `write_frame`'s symbols. Both directions used to lose
-    species: `write_frame` labelled every particle "H", and every reader called
-    `get_positions()` and discarded `get_chemical_symbols()`. A warm start
-    therefore restored the coordinates of a mixture and none of its composition,
-    which is worse than failing -- the run continues and reports a pure
-    species-0 system at the density of a mixture.
+    THE OTHER HALF OF `write_frame`'s symbols. A reader that takes
+    `get_positions()` and discards `get_chemical_symbols()` restores the
+    coordinates of a mixture and none of its composition, which is worse than
+    failing: the run continues as a pure species-0 system at the density of a
+    mixture.
 
     `symbols` is the species file's own per-type symbol tuple, so the mapping
     that reads a frame is the mapping that wrote it.

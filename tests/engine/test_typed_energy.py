@@ -91,9 +91,9 @@ def test_one_species_at_unit_sigma_reduces_to_the_untyped_engine() -> None:
     )
 
     for i, (a, b) in enumerate(zip(sum_u, sum_t)):
-        assert a["counters"] == b["counters"], (
-            f"window {i}: counters diverged.\n  untyped {a['counters']}\n"
-            f"  typed   {b['counters']}\n"
+        assert a["columns"] == b["columns"], (
+            f"window {i}: counters diverged.\n  untyped {a['columns']}\n"
+            f"  typed   {b['columns']}\n"
             "A degenerate typed run must be the untyped chain. A divergence here "
             "means the typed path consumed the rng differently or weighted a "
             "trial differently, and every single-species result is affected."

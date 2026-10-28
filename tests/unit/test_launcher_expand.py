@@ -68,13 +68,6 @@ def test_cores_per_run_parallel_is_the_cell_count():
     assert cores_per_run(_parallel({"n_cell": [3, 2, 1]})) == 6
 
 
-def test_cores_per_run_ignores_the_deprecated_worker_count():
-    """run.n_workers is accepted with a warning and ignored, not honoured: it
-    stated cores per run, which is exactly what D4 retires. The cell count wins."""
-    cfg = _parallel({"cell_length": 8.0, "buffer": 2.0, "n_workers": 4})
-    assert cores_per_run(cfg) == 27  # floor(30 / (8 + 2)) = 3 per axis
-
-
 def test_cores_per_run_of_a_swept_base_asks_the_first_combo():
     """A base with a list axis is not a single run; from_params rightly refuses
     an unexpanded sweep, so cores_per_run expands first."""
@@ -198,75 +191,6 @@ def test_a_single_engine_is_applied_but_stays_out_of_the_label():
     combos, labels = expand_sweep(base)
     assert len(combos) == 1 and labels == ["single"]
     assert combos[0]["sampler"]["engine"] == "metropolis_dynamics"
-
-
-def test_pr_target_is_a_sweep_axis():
-    """G6 is a comparison and therefore has to be ONE launch.
-
-    `pr_target` is claimed to be a variance knob that cannot move an equilibrium
-    average, and the check is the same state point at several targets. Three
-    launches whose roots are kept apart by hand is how that turns into three
-    different experiments, which is the failure the invariance gate exists to
-    detect. Swept here alongside `seed`, because the error bar needs both.
-    """
-    sweep = {
-        **_BASE,
-        "sampler": {
-            **_BASE["sampler"],
-            "gamma_mode": "adaptive",
-            "pr_target": [0.15, 0.25, 0.35],
-        },
-    }
-    combos, labels = expand_sweep(sweep)
-    assert len(combos) == 3
-    assert labels == ["pr_target0.15", "pr_target0.25", "pr_target0.35"]
-    assert [c["sampler"]["pr_target"] for c in combos] == [0.15, 0.25, 0.35]
-
-
-def test_a_single_pr_target_is_applied_but_stays_out_of_the_label():
-    """Same rule the engine axis follows: a one-valued axis must not rename a
-    run directory, or adding the axis re-addresses every fixed-gamma run."""
-    sweep = {
-        **_BASE,
-        "sampler": {
-            **_BASE["sampler"],
-            "gamma_mode": "adaptive",
-            "pr_target": 0.25,
-        },
-    }
-    combos, labels = expand_sweep(sweep)
-    assert len(combos) == 1
-    assert labels == ["single"]
-    assert combos[0]["sampler"]["pr_target"] == 0.25
-
-
-def test_an_unexpanded_pr_target_list_is_refused_by_name():
-    """The failure mode this guard exists for: `gcmc run` on a sweep file, or a
-    stale launcher that does not know the axis. Without it `float([...])` raises
-    a TypeError that names neither the key nor the cause.
-
-    A real adaptive-gamma params file, not `_BASE`: adaptive needs rosenbluth
-    plus a 3D pmf auxiliary, and on `_BASE` the sampler axis would refuse the
-    key first and this test would assert an unrelated guard.
-    """
-    from gcmc.run import sim_setup
-
-    sweep = {
-        "potential": {"main": "lennard_jones", "T": 0.85},
-        "sampler": {
-            "type": "rosenbluth",
-            "trials": 30,
-            "trial_box_side": 3.0,
-            "gamma_mode": "adaptive",
-            "pr_target": [0.15, 0.35],
-        },
-        "engine": {"depth": 2},
-        "ensemble": {"mu": -1.0, "dimension": 3, "box": 10.0},
-        "auxiliary": {"type": "pmf", "g3_csv": "data/g3_analysis_data.csv"},
-        "run": {"seed": 1},
-    }
-    with pytest.raises(ValueError, match=r"sampler\.pr_target is a list"):
-        sim_setup.from_params(sweep)
 
 
 def test_starts_that_share_a_file_name_still_get_separate_directories():

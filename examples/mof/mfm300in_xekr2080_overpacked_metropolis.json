@@ -1,0 +1,60 @@
+{
+  "_comment": "Robustness figure: 16 independent over-packed, Kr-rich starts (260 guests, x_Xe = 0.19) at the densest 20:80 point; compare with the empty start of the same method at 1e6 Pa in the isotherm file.",
+  "potential": {
+    "main": "lennard_jones",
+    "T": 298.0,
+    "species_file": "ff/forcefield_A_shift.yaml"
+  },
+  "framework": {
+    "cif": "structures/MFM-300-In.cif",
+    "replicate": [
+      2,
+      2,
+      3
+    ]
+  },
+  "engine": {
+    "type": "metropolis_dynamics"
+  },
+  "sampler": {
+    "type": "metropolis"
+  },
+  "ensemble": {
+    "type": "muVT",
+    "dimension": 3,
+    "pressure": 1000000.0,
+    "y": {
+      "Xe": 0.2,
+      "Kr": 0.8
+    }
+  },
+  "run": {
+    "kind": "single",
+    "n_cores": 16,
+    "seed": [
+      575845,
+      575846,
+      575847,
+      575848,
+      575849,
+      575850,
+      575851,
+      575852,
+      575853,
+      575854,
+      575855,
+      575856,
+      575857,
+      575858,
+      575859,
+      575860
+    ],
+    "initial_config": {
+      "Xe": 50,
+      "Kr": 210
+    },
+    "sampling_window": 1000,
+    "target_cycles": 20000000.0,
+    "checkpoint_every": 10
+  }
+}

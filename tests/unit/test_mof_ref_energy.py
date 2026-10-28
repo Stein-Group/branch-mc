@@ -19,7 +19,8 @@ from ase import Atoms
 from ase.io import write as ase_write
 
 from gcmc.forcefield.lennard_jones import lj_pair_energy
-from scripts.mof.build_framework import (
+from gcmc.forcefield.species_file import lj_energy_kelvin, load_forcefield
+from gcmc.framework.structure import (
     build,
     orthogonal_lengths,
     replication_for,
@@ -34,7 +35,6 @@ from scripts.mof.ref_energy import (
     read_extxyz,
     total_energy,
 )
-from scripts.mof.units import lj_energy_kelvin, load_forcefield
 
 FF_A = Path(__file__).resolve().parents[2] / "ff" / "forcefield_A.yaml"
 

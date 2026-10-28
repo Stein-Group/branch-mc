@@ -222,6 +222,8 @@ def scan_params_files(paths: list[Path]) -> list[dict[str, Any]]:
                 continue
             if not isinstance(doc, dict) or "sampler" not in doc:
                 continue
+            if "framework" in doc:  # a MOF run; gcmc.framework checks its own guard
+                continue
             smp = doc.get("sampler")
             if not isinstance(smp, dict) or smp.get("type") != "channel":
                 continue
@@ -333,33 +335,3 @@ def summarise(records: list[dict[str, Any]]) -> dict[str, Any]:
         "guard_is_enforced_by_sim_setup": True,
         "verdict": "all pass at rc_sel" if not viol else "VIOLATION at rc_sel",
     }
-
-
-def load_sink(path: Path) -> list[dict[str, Any]]:
-    """Read a JSONL audit sink back, de-duplicated on the geometry that matters.
-
-    A test suite builds the same channel Config dozens of times; the guard
-    verdict depends only on (dimension, box, L, w, cutoff), so the distinct
-    records are what a reader wants and the raw line count says nothing.
-    """
-    seen: dict[tuple, dict[str, Any]] = {}
-    if not path.exists():
-        return []
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            r = json.loads(line)
-        except Exception:
-            continue
-        key = (
-            r.get("dimension"),
-            tuple(r.get("box_dims", ())),
-            r.get("channel_length"),
-            r.get("channel_width"),
-            r.get("at_rc_sel", {}).get("cutoff"),
-            r.get("at_uc", {}).get("cutoff"),
-        )
-        seen.setdefault(key, r)
-    return list(seen.values())

@@ -21,9 +21,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from gcmc.run import io
 from scripts.tau_report import analyse_run, ratios, read_log
 
-_HEADER = "# MC_cycle(M)      N   wall_s\n"
+_HEADER = "# MC_cycle      N   wall_s\n"
 
 
 def _ar1(n: int, phi: float, seed: int, mean: float = 100.0) -> np.ndarray:
@@ -54,7 +55,8 @@ def _write_run(
         json.dumps(
             {
                 "potential": {"main": "lennard_jones", "T": 1.5},
-                "sampler": {"type": sampler, "engine": engine},
+                "sampler": {"type": sampler},
+                "engine": {"type": engine},
                 "ensemble": {"type": "muVT", "box": 8.0, "mu": mu},
                 "run": {"seed": 1},
             }
@@ -66,7 +68,7 @@ def _write_run(
 def test_the_log_is_parsed_by_column_name(tmp_path):
     d = _write_run(tmp_path / "r", np.arange(10.0) + 100.0)
     cols = read_log(d / "run.log")
-    assert set(cols) == {"MC_cycle(M)", "N", "wall_s"}
+    assert set(cols) == {"MC_cycle", "N", "wall_s"}
     assert cols["N"][0] == 100.0 and cols["N"][-1] == 109.0
 
 
@@ -100,7 +102,7 @@ def test_tau_and_the_cost_per_independent_N_come_out_of_the_log(tmp_path):
     assert got["wall_s_per_independent_N"] == pytest.approx(got["tau_windows"] * 0.5)
     assert got["engine"] == "glauber_dynamics" and got["sampler"] == "channel"
     # no window group in this synthetic log, so none is reported
-    assert "glauber" not in got
+    assert "ladder" not in got
 
 
 def test_half_the_series_is_discarded(tmp_path):
@@ -182,31 +184,39 @@ def test_two_samplers_at_one_mu_are_not_compared_with_each_other(tmp_path):
     }
 
 
-def test_the_window_diagnostics_are_reported_when_the_group_was_written(tmp_path):
-    """A nonzero `cut_M` counter is a scope statement rather than an exactness
-    failure, so it is surfaced rather than summarised away."""
+def test_the_ladder_counts_are_reported_when_the_run_wrote_them(tmp_path):
+    """A nonzero `ladder_cut_pool` count is a scope statement rather than an
+    exactness failure, so it is surfaced rather than summarised away."""
     d = tmp_path / "r"
     d.mkdir()
-    head = "# MC_cycle(M)      N   wall_s  glb_step  glb_same  glb_dN  glb_cut_k  glb_cut_M  glb_infeas  glb_kmax  glb_nhat_sum  glb_nhat_n\n"
-    rows = [
-        f"{(i + 1) * 2e-4:14.6f} {100 + i:6d} {0.5:8.4f} {200:8d} {40:7d} "
-        f"{300:7d} {0:8d} {3:8d} {0:8d} {9:9d} {20000.0:9.1f} {200:7d}"
-        for i in range(10)
-    ]
-    (d / "run.log").write_text(head + "\n".join(rows) + "\n")
+    log = io.RunLog(d / "run.log")
+    for i in range(10):
+        log.write(
+            {
+                "MC_cycle": (i + 1) * 2e-4,
+                "N": 100 + i,
+                "ladder_unchanged": 40,
+                "ladder_sum_abs_dN": 300,
+                "ladder_max_k": 9,
+                "ladder_infeasible": 0,
+                "ladder_cut_kmax": 0,
+                "ladder_cut_pool": 3,
+                "wall_s": 0.5,
+            }
+        )
+    log.close()
     (d / "params.json").write_text(
         json.dumps(
             {
                 "sampler": {"type": "channel"},
                 "engine": {"type": "glauber_dynamics"},
                 "ensemble": {"mu": -2.5, "box": 8.0},
-                "run": {"seed": 1},
+                "run": {"seed": 1, "sampling_window": 200},
             }
         )
     )
-    w = analyse_run(d)["glauber"]
-    assert w["cut_M"] == 30.0  # 3 per window over ten windows
-    assert w["identity_fraction"] == pytest.approx(40.0 / 200.0)
-    assert w["dN_per_step"] == pytest.approx(300.0 / 200.0)
+    w = analyse_run(d)["ladder"]
+    assert w["cut_pool"] == 30.0  # 3 per window over ten windows
+    assert w["unchanged_fraction"] == pytest.approx(40.0 / 200.0)
+    assert w["dN_per_move"] == pytest.approx(300.0 / 200.0)
     assert w["max_k"] == 9.0
-    assert w["N_hat"] == pytest.approx(100.0)  # 20000 / 200, on the kept half

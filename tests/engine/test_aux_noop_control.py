@@ -79,10 +79,6 @@ _POINTS = [
 _SEEDS = (18, 19, 20)
 _WINDOWS = 3
 
-#: The correction's own diagnostics. Excluded from the byte comparison because
-#: their PRESENCE is the difference between the arms -- the aux-off run has no
-#: such keys at all -- and their values are separately asserted to be zero.
-_DIAG = ("aux_corr_mean", "aux_corr_sd", "aux_corr_n")
 
 _SPECIES_FF = Path(__file__).resolve().parents[2] / "ff" / "species_three_reduced.yaml"
 
@@ -109,13 +105,15 @@ def _params(dim: int, rod: str, deep: str) -> dict:
 
 
 def _flatten(summary: dict) -> dict[str, float]:
-    """The window summary as one flat name -> float map, diagnostics dropped."""
+    """The window summary as one flat name -> float map."""
     out: dict[str, float] = {}
     for key, value in summary.items():
+        if value is None:
+            continue
         if isinstance(value, dict):
             for sub, inner in value.items():
                 out[f"{key}.{sub}"] = float(inner)
-        elif key not in _DIAG:
+        else:
             out[key] = float(value)
     return out
 
@@ -127,27 +125,32 @@ def _run(params: dict, seed: int, dim: int, n_seed: int) -> tuple:
     cfg, potential, weigher, state = H.build(params, seed, positions=pos)
     rows: list[list[float]] = []
     keys: list[str] | None = None
-    evaluated = 0
-    stats: list[tuple[float, float]] = []
-    for _ in range(_WINDOWS):
-        summary = metropolis_dynamics.advance(state, cfg, potential, weigher)
-        n = int(summary.get("aux_corr_n", 0))
-        evaluated += n
-        if n:
-            stats.append(
-                (float(summary["aux_corr_mean"]), float(summary["aux_corr_sd"]))
-            )
-        flat = _flatten(summary)
-        if keys is None:
-            keys = sorted(flat)
-        rows.append([flat[k] for k in keys])
+    # every evaluation of the correction's two shell energies, recorded
+    calls: list[tuple[float, float]] = []
+    orig = metropolis_dynamics._lj_set_energy_split
+
+    def counted(*a, **k):
+        out = orig(*a, **k)
+        calls.append(out)
+        return out
+
+    metropolis_dynamics._lj_set_energy_split = counted
+    try:
+        for _ in range(_WINDOWS):
+            summary = metropolis_dynamics.advance(state, cfg, potential, weigher)
+            flat = _flatten(summary)
+            if keys is None:
+                keys = sorted(flat)
+            rows.append([flat[k] for k in keys])
+    finally:
+        metropolis_dynamics._lj_set_energy_split = orig
     return (
         cfg,
         keys,
         np.asarray(rows, float),
         np.asarray(state.positions, float),
-        evaluated,
-        stats,
+        len(calls) // 2,
+        [(u_full - u_short, 0.0) for u_short, u_full in calls],
     )
 
 

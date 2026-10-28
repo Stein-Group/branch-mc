@@ -27,7 +27,7 @@ from gcmc import config_specs
 from gcmc.engine import cell_parallel
 from gcmc.engine import metropolis_dynamics as engine
 from gcmc.run.sim_setup import from_params
-from gcmc.system.state import ChainState, zero_counters
+from gcmc.system.state import ChainState
 
 # One cell is one core, so cfg.n_workers is the cell count; without this
 # hook a 9- or 27-cell case would spawn that many processes inside a test.
@@ -42,7 +42,6 @@ def _state(n, hi):
         positions=rng.uniform(2, hi, size=(n, 2)),
         step=0,
         rng=np.random.default_rng(7),
-        counters=zero_counters(),
     )
 
 
@@ -75,8 +74,10 @@ def run_parallel(n_win):
     etas, last = [], None
     for _ in range(n_win):
         last = cell_parallel.advance_parallel(st, cfg, pot, w)
-        etas.append(last["packing_fraction"])
-    return etas, last
+        etas.append(cfg.packing_fraction(last["N"]))
+    # every cell runs one window per call, and the step count says so
+    n_cells = st.step // (WIN * n_win)
+    return etas, last, n_cells
 
 
 def run_serial(n_win):
@@ -102,15 +103,15 @@ def run_serial(n_win):
     st = _state(60, 38)
     etas = []
     for _ in range(n_win):
-        etas.append(engine.advance(st, cfg, pot, w)["packing_fraction"])
+        etas.append(cfg.packing_fraction(engine.advance(st, cfg, pot, w)["N"]))
     return etas
 
 
 # 1. runs and stays populated; gridded into >1 cell
-ep, last = run_parallel(NW)
-assert last["n_cells"] > 1, "expected the box to grid into several cells"
+ep, last, n_cells = run_parallel(NW)
+assert n_cells > 1, "expected the box to grid into several cells"
 assert last["N"] > 0, "parallel run depopulated"
-print(f"  ok  parallel-2D runs over {last['n_cells']} cells, stays populated")
+print(f"  ok  parallel-2D runs over {n_cells} cells, stays populated")
 
 # 2. equilibrium packing fraction agrees with the serial path
 es = run_serial(NW)
@@ -127,11 +128,12 @@ print("  ok  parallel and serial reach the same equilibrium density")
 # 3. 3D parallel is supported (2D-only constraint dropped: cell_unify_plan.md
 #    U0, Dipesh GO 2026-07-14). metropolis, rosenbluth, and branch all build
 #    in 3D and run a live window over several cells without depopulating.
-def _run3d(sampler_block, n_win=4):
+def _run3d(sampler_block, depth, n_win=4):
     p = {
         "potential": {"main": "hard_core"},
         "ensemble": {"mu": 2.0, "dimension": 3, "box": 24.0},
         "sampler": sampler_block,
+        "engine": {} if depth is None else {"depth": depth},
         "run": {
             "kind": "parallel",
             "sampling_window": 60,
@@ -149,26 +151,22 @@ def _run3d(sampler_block, n_win=4):
         positions=rng.uniform(1.0, 23.0, size=(120, 3)),
         step=0,
         rng=np.random.default_rng(7),
-        counters=zero_counters(),
     )
     last = None
     for _ in range(n_win):
         last = cell_parallel.advance_parallel(st, cfg, pot, w)
-    return last
+    return last, st.step // (60 * n_win)
 
 
-for name, blk in [
-    ("metropolis", {"type": "metropolis"}),
-    (
-        "rosenbluth",
-        {"type": "rosenbluth", "trials": K, "trial_box_side": 2 * CAVR, "depth": 0},
-    ),
-    ("branch", {"type": "branch", "trials": K, "trial_box_side": 2 * CAVR, "depth": 1}),
+for name, blk, depth in [
+    ("metropolis", {"type": "metropolis"}, None),
+    ("rosenbluth", {"type": "rosenbluth", "trials": K, "trial_box_side": 2 * CAVR}, 0),
+    ("branch", {"type": "branch", "trials": K, "trial_box_side": 2 * CAVR}, 1),
 ]:
-    last = _run3d(blk)
-    assert last["n_cells"] > 1, f"{name}: box did not grid into several cells"
+    last, n_cells = _run3d(blk, depth)
+    assert n_cells > 1, f"{name}: box did not grid into several cells"
     assert last["N"] > 0, f"{name}: 3D parallel depopulated"
-    print(f"  ok  3D parallel {name} runs over {last['n_cells']} cells, N={last['N']}")
+    print(f"  ok  3D parallel {name} runs over {n_cells} cells, N={last['N']}")
 
 
 # 4. mixes that stay serial-only must still be rejected at config time.

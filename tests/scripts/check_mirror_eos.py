@@ -69,13 +69,16 @@ def run(kind, *, depth=0, trials=30, side=2.0, nwin=600, win=200, seed=1):
     here we simply start from nothing.
     """
     sampler = {"type": kind}
+    eng = {}
     if kind != "metropolis":
-        sampler.update({"trials": trials, "trial_box_side": side, "depth": depth})
+        sampler.update({"trials": trials, "trial_box_side": side})
+        eng = {"depth": depth}
     cfg = from_params(
         {
             "potential": {"main": "hard_core"},
             "ensemble": {"mu": MU, "dimension": 2, "box": BOX},
             "sampler": sampler,
+            "engine": eng,
             "run": {"sampling_window": win, "seed": seed},
         }
     )
@@ -84,7 +87,7 @@ def run(kind, *, depth=0, trials=30, side=2.0, nwin=600, win=200, seed=1):
     state = ChainState.fresh(2, seed=seed)
     state.positions = np.empty((0, 2))
     series = [
-        engine.advance(state, cfg, pot, weigher)["packing_fraction"]
+        cfg.packing_fraction(engine.advance(state, cfg, pot, weigher)["N"])
         for _ in range(nwin)
     ]
 

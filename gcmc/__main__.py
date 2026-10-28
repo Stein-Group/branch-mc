@@ -11,6 +11,7 @@ the one a parallel job runs directly.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 
 from .run import runner
@@ -40,12 +41,21 @@ def main(argv: list[str] | None = None) -> int:
         # caught; anything else is a bug in this package and a traceback is the
         # correct output for one.
         try:
-            state, paths = runner.run(args.params, root=args.root)
+            with open(args.params) as fh:
+                params = json.load(fh)
+            if "framework" in params:  # guests in a MOF: gcmc.framework
+                from .framework.driver import run_framework
+
+                res = run_framework(params, root=args.root)
+                step, n, directory = res.step, res.n, res.directory
+            else:
+                state, paths = runner.run(params, root=args.root)
+                step, n, directory = state.step, len(state.positions), paths.directory
         except (ValueError, FileNotFoundError) as exc:
             p.exit(2, f"error: {exc}\n")
         # Compatibility contract: this exact "done: ..." line goes to stdout;
         # cluster sweep scripts grep it. Keep it a print, not a log record.
-        print(f"done: step={state.step} N={len(state.positions)} dir={paths.directory}")
+        print(f"done: step={step} N={n} dir={directory}")
     return 0
 
 

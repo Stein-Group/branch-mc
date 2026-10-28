@@ -304,7 +304,7 @@ def test_typed_mode_takes_no_target_controller():
 
 
 def test_typed_mode_takes_no_scalar_sweep():
-    _raises(_typed(ensemble={"sweep": [-2.0, -1.0]}), "LIST OF MAPS")
+    _raises(_typed(ensemble={"sweep": [-2.0, -1.0]}), "unknown keys ['sweep']")
 
 
 def test_typed_mode_needs_lennard_jones():
@@ -458,7 +458,6 @@ def test_the_fingerprint_ignores_operational_knobs():
             "target_cycles": 5e6,
             "checkpoint_every": 7,
             "traj_every": 3,
-            "log_flush_interval": 11,
         }
     )
 

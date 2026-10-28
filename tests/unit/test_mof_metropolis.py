@@ -21,12 +21,21 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from gcmc.engine.rigid_framework import advance_metropolis_mof
+from gcmc.engine.rigid_framework import advance_metropolis_mof_ms
 from gcmc.forcefield.lj_table import FrameworkField, LennardJonesTable
 from gcmc.forcefield.pair_table import PairTable
+from gcmc.forcefield.species_file import load_forcefield, reduce_tables
 from gcmc.run.io_framework import load_framework_typed
 from scripts.mof.ref_energy import read_extxyz, total_energy
-from scripts.mof.units import load_forcefield, reduce_tables
+
+
+def advance_metropolis_mof(positions, rng, *, guest_type, z_star, **kw):
+    """One single-species framework window through the multi-species loop."""
+    spc = np.full(len(positions), guest_type, dtype=np.int64)
+    return advance_metropolis_mof_ms(
+        positions, spc, rng, z_star={guest_type: z_star}, **kw
+    )
+
 
 ROOT = Path(__file__).resolve().parents[2]
 FF_A = ROOT / "ff" / "forcefield_A.yaml"
@@ -34,7 +43,7 @@ FF_A = ROOT / "ff" / "forcefield_A.yaml"
 
 @pytest.fixture(scope="module")
 def env(tmp_path_factory):
-    from scripts.mof.build_framework import build, write_extxyz
+    from gcmc.framework.structure import build, write_extxyz
 
     tmp = tmp_path_factory.mktemp("a35move")
     ff = load_forcefield(FF_A)
@@ -208,7 +217,7 @@ def test_empty_start_and_grow(env):
             window=50,
         )
         pos = res.positions
-        total_added += res.counters["add_accept"]
+        total_added += res.counters["insert_accepted"]
     assert total_added > 0  # something inserted over 8 windows at z* = 0.1
     assert res.loading == len(pos) / 8.0
 

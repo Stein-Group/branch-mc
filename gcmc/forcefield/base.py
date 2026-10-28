@@ -90,46 +90,6 @@ class Potential:
         together with the carried reference neighbour."""
         return self.weight_pair(np.sqrt(sq), gamma)
 
-    # ---- split accessors ----------------------------------------------------
-    # `weight_bulk` and `pairwise` return w_i * b_i^gamma as one number, which
-    # is all a FIXED gamma ever needs. Solving for gamma needs the two factors
-    # apart: w_i, and log b_i. These two methods are that view, and they exist
-    # only where the potential has a bias that is separable in the first place
-    # -- a tabulated g3 raised to gamma. Every other potential refuses, with the
-    # axis named, rather than returning something plausible: a zero log_g3 would
-    # make the solver read "gamma changes nothing here" and hand back gamma = 0
-    # from a pool it never actually looked at.
-
-    def weight_bulk_split(
-        self,
-        dists: FloatArray,
-        *,
-        coords: FloatArray | None = None,
-        idxs: IntArray | None = None,
-        kdtree: Any = None,
-        **_ignored: Any,
-    ) -> tuple[FloatArray, FloatArray, FloatArray]:
-        """(base weight, log of the bias, reference neighbours) per trial at the
-        first Rosenbluth level, with gamma NOT applied."""
-        raise NotImplementedError(
-            f"{type(self).__name__} has no separable selection bias, so "
-            f"weight_bulk_split has nothing to split: adaptive gamma is defined "
-            f"only for the tabulated 3D pmf auxiliary ('aux3d', 'ljaux3d'), "
-            f"whose weight is (Boltzmann factor) * g3**gamma."
-        )
-
-    def pairwise_split(
-        self, sq: FloatArray, **_ignored: Any
-    ) -> tuple[FloatArray, FloatArray]:
-        """(base weight, log of the bias) per survivor for one deeper-level
-        refresh, with gamma NOT applied."""
-        raise NotImplementedError(
-            f"{type(self).__name__} has no separable selection bias, so "
-            f"pairwise_split has nothing to split: adaptive gamma is defined "
-            f"only for the tabulated 3D pmf auxiliary ('aux3d', 'ljaux3d'), "
-            f"whose weight is (Boltzmann factor) * g3**gamma."
-        )
-
 
 _REGISTRY: dict[str, type[Potential]] = {}
 

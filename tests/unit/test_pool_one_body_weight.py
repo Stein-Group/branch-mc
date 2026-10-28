@@ -26,9 +26,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gcmc.engine.rigid_framework import _exterior_logweights
 from gcmc.forcefield.lj_table import FrameworkField
 from gcmc.forcefield.pair_table import PairTable
+from gcmc.forcefield.species_file import load_forcefield, reduce_tables
 from gcmc.proposals.channel_move import (
     frozen_neighbours_from_array,
     frozen_neighbours_from_cell_list,
@@ -36,7 +36,6 @@ from gcmc.proposals.channel_move import (
     pool_one_body_logweights_batched,
 )
 from gcmc.space.neighbors import CellList
-from scripts.mof.units import load_forcefield, reduce_tables
 
 
 @pytest.fixture(scope="module")
@@ -68,52 +67,11 @@ def env():
     }
 
 
-@pytest.mark.parametrize("seed", range(6))
-def test_the_definition_reproduces_the_shipped_framework_reference(env, seed):
-    """`pool_one_body_logweights` == `_exterior_logweights`, TO THE BIT.
-
-    Same activity, same framework energy, same per-species grouping of the
-    exterior sum, same order -- so this is an equality of floats, not of
-    physics. It is the statement that the new definition did not quietly change
-    the MOF path's number while generalising it.
-    """
-    rng = np.random.default_rng(seed)
-    box, table, beta, rc = env["box"], env["table"], env["beta"], env["rc"]
-    gt = [env["xe"], env["kr"]]
-    z_star = {gt[0]: 0.37, gt[1]: 0.11}
-    n_pool, n_ext = 14, 25
-    pool_P = rng.uniform(0, box[0], size=(n_pool, 3))
-    pool_s = np.asarray(rng.choice(gt, size=n_pool), dtype=np.int64)
-    ext_P = rng.uniform(0, box[0], size=(n_ext, 3))
-    ext_s = np.asarray(rng.choice(gt, size=n_ext), dtype=np.int64)
-
-    want_w, want_a = _exterior_logweights(
-        pool_P, pool_s, ext_P, ext_s, env["field"], table, box, beta, rc, z_star
-    )
-    got_w, got_a = pool_one_body_logweights(
-        pool_P,
-        pool_s,
-        beta=beta,
-        log_z={t: float(np.log(z_star[t])) for t in gt},
-        neighbours=frozen_neighbours_from_array(ext_P, ext_s, box, rc),
-        floor=table.core_floor,
-        field=env["field"],
-        table=table,
-        lj=True,
-    )
-    assert (got_a == want_a).all()
-    finite = np.isfinite(want_w)
-    assert np.array_equal(got_w[~finite], want_w[~finite])
-    assert (got_w[finite] == want_w[finite]).all(), (
-        f"max deviation {np.abs(got_w[finite] - want_w[finite]).max():.3e}; "
-        "the two must agree bit for bit, not merely closely"
-    )
-
-
+@pytest.mark.parametrize("with_field", [False, True])
 @pytest.mark.parametrize("typed", [False, True])
 @pytest.mark.parametrize("lj", [False, True])
 @pytest.mark.parametrize("seed", range(4))
-def test_the_batched_fast_path_matches_the_definition(env, typed, lj, seed):
+def test_the_batched_fast_path_matches_the_definition(env, typed, lj, seed, with_field):
     """The engine's batched form against the per-point definition.
 
     Over a real cell list, because that is what the engine hands it and because
@@ -123,7 +81,13 @@ def test_the_batched_fast_path_matches_the_definition(env, typed, lj, seed):
     the tolerance here is a few ulps rather than zero -- and that is stated
     rather than hidden, because a mismatch larger than that is a missing term
     and not a summation order.
+
+    `with_field` adds the framework, which is how the rigid-framework driver
+    calls the engine's window move: the host's overlap and energy must enter the
+    batched form exactly as they enter the definition.
     """
+    if with_field and not typed:
+        pytest.skip("a framework is a typed table; the untyped path has no host")
     rng = np.random.default_rng(20 + seed)
     box, table, beta = env["box"], env["table"], env["beta"]
     gt = [env["xe"], env["kr"]] if typed else [0]
@@ -139,6 +103,13 @@ def test_the_batched_fast_path_matches_the_definition(env, typed, lj, seed):
         cl.species[i] = int(sp)
     pool_P = rng.uniform(0, box[0], size=(n_pool, 3))
     pool_s = np.asarray(rng.choice(gt, size=n_pool), dtype=np.int64)
+    if with_field:
+        # a quarter of the rows on top of framework atoms, so overlap rejection
+        # is exercised, and a quarter just outside their floor, so the field's
+        # steep repulsive energy is too
+        fp = env["field"].pos
+        pool_P[:4] = (fp[:4] + 0.3) % box
+        pool_P[4:8] = (fp[4:8] + 0.75) % box
 
     log_z = {t: 0.3 * (1 + i) for i, t in enumerate(gt)}
     log_p = {t: float(np.log(1.0 / len(gt))) for t in gt}
@@ -158,11 +129,11 @@ def test_the_batched_fast_path_matches_the_definition(env, typed, lj, seed):
         log_p=log_p,
         neighbours=frozen_neighbours_from_cell_list(cl, radius),
         floor=floor,
-        field=None,
+        field=env["field"] if with_field else None,
         table=tab,
         lj=lj,
     )
-    got_w, got_a = pool_one_body_logweights_batched(
+    got_w, got_a, _uh, _ug = pool_one_body_logweights_batched(
         pool_P,
         pool_s,
         cl=cl,
@@ -174,7 +145,10 @@ def test_the_batched_fast_path_matches_the_definition(env, typed, lj, seed):
         floor=floor,
         table=tab,
         lj=lj,
+        field=env["field"] if with_field else None,
     )
+    if with_field:
+        assert not got_a.all(), "no row met the framework: the case is vacuous"
     assert (got_a == want_a).all(), (
         f"admissibility differs at rows {np.flatnonzero(got_a != want_a)}"
     )

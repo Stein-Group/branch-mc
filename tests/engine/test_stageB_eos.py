@@ -159,6 +159,10 @@ SEEDS = tuple(range(1, 11))
 BURN, MEASURE = 12, 30
 
 
+#: the frozen engine's counter prefix -> the current engine's column prefix
+_COLUMN = {"move": "translate", "add": "insert", "remove": "delete", "repack": "repack"}
+
+
 def _run_chain(params, n_seed, seed, engine, rates):
     rng = np.random.default_rng(500 + seed)
     pos = H.lattice_seed(params["ensemble"]["box"], n_seed, 3, rng)
@@ -171,11 +175,21 @@ def _run_chain(params, n_seed, seed, engine, rates):
     for _ in range(MEASURE):
         s = advance(st, cfg, pot, wgh)
         n.append(s["N"])
-        ncav.append(s["n_cav"])
-        c = s["counters"]
-        for k in rates:
-            steps = c[f"{k}_step"]
-            acc[k].append(c[f"{k}_accept"] / steps if steps else 0.0)
+        if "columns" in s:
+            # the current engine's log columns
+            c = s["columns"]
+            draws = c.get("cavity_draws", 0)
+            ncav.append(c["cavity_sum_n"] / draws if draws else 0.0)
+            for k in rates:
+                name = _COLUMN[k]
+                steps = c[f"{name}_tried"]
+                acc[k].append(c[f"{name}_accepted"] / steps if steps else 0.0)
+        else:
+            ncav.append(s["n_cav"])
+            c = s["counters"]
+            for k in rates:
+                steps = c[f"{k}_step"]
+                acc[k].append(c[f"{k}_accept"] / steps if steps else 0.0)
     third = MEASURE // 3
     out = {
         "N": float(np.mean(n)),

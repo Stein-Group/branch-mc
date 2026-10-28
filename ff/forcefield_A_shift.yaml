@@ -1,0 +1,153 @@
+# FF-A-shift: FF-A with the LJ potential truncated AND SHIFTED at rc.
+#
+# Identical to forcefield_A.yaml in every number; only interaction.shifted
+# differs. Why a second file: the anchor never states its truncation scheme, and
+# the measurement settles it. Widom Henry constants in all seven MFM-300(M) SI
+# structures (2x2x3, 298 K) against their Table S4:
+#   unshifted (FF-A)  ~55-65 % high for Xe, ~25-35 % high for Kr, every metal
+#   shifted           Al, Ga, Sc, V, Cr, Fe within 0.3-1.6 % (Xe) and 0-1 % (Kr);
+#                     In +8 % (Xe) / +5 % (Kr), the one outlier
+# So this is the file the Kancharlapalli reproduction and the CFCMC benchmark run
+# on. FF-A stays as it was, because V0 and every pinned MOF test were made with it.
+#
+# FF-A: the anchor parameter set (D1, re-anchored 2026-07-17).
+#
+# ANCHOR: Kancharlapalli, Natarajan, Ghanty, "Confinement-Directed Adsorption of
+# Noble Gases (Xe/Kr) in MFM-300(M)-Based Metal-Organic Framework Materials",
+# J. Phys. Chem. C 2019, 123, 27531-27541, DOI 10.1021/acs.jpcc.9b06961.
+# Every number below is Table S1 of the Supporting Information
+# (jp9b06961_si_001.pdf), transcribed verbatim, in that table's own units and
+# precision. Nothing here is derived, converted, or recalled.
+#
+# The paper's own description (p. 27533, Computational Details): interatomic
+# interactions by standard LJ, framework parameters from DREIDING (Mayo 1990) and
+# UFF (Rappe 1992), Xe and Kr from the literature (their ref 78 = Talu & Myers,
+# Colloids Surf. A 2001, 187-188, 83-93; ref 79 = Hirschfelder & Curtiss,
+# Molecular Theory of Gases and Liquids, Wiley 1965), van der Waals treated up to
+# 12.0 A, rigid framework, GCMC in RASPA at 298 K over 0.1-10 bar.
+#
+# Which source supplies which framework element is settled by the numbers, not by
+# the prose: C, O and H match DREIDING's table exactly under sigma = R0/2^(1/6)
+# and eps/kB = D0/kB (test_dreiding_convention), while In matches UFF. The earlier
+# open question -- whether DREIDING covers In and should therefore be preferred
+# for it -- is moot: the anchor uses UFF for In, and FF-A follows the anchor.
+#
+# STATUS: both blocks `confirmed` against the primary SI table.
+#
+# NOTE on the guests, because it cost a session: the values the Xe/Kr MOF
+# literature commonly attributes to Hirschfelder (3.924 A / 257.4 K) are NOT the
+# ones this anchor used. Table S1 gives Xe as 4.1 A / 221.0 K. Hirschfelder
+# tabulates several Xe sets fitted to different data and the anchor took this one.
+# Since sigma_XeXe is the reference scale for the whole reduced-unit pipeline,
+# that difference moves T*, rc*, z* and the core floor, and it would have moved
+# every V-rung number quietly. This is why the guest block was gated.
+#
+# Units: sigma in angstrom, epsilon as epsilon/kB in kelvin.
+
+schema: 1
+name: FF-A-shift
+
+mixing: lorentz-berthelot
+
+interaction:
+  form: lennard-jones-12-6
+  rc: 12.0                 # angstrom; anchor p. 27533, "up to 12.0 A"
+  shifted: true            # truncated AND shifted: u(r) - u(rc) inside rc (RASPA "shifted")
+  tail_correction: false   # no-tail on both sides
+
+# Fraction c of sigma_ij below which a pair is rejected as an overlap (P0.6, D3).
+# Measured, never guessed: see the ledger for the number and the binding pair.
+# FF-A pins 0.7155, measured for MFM-300(In) (binding pair Kr-H). This file serves
+# all seven MFM-300(M), and two metals need a lower floor at 298 K for the same
+# 1e-10 Boltzmann target: Cr 0.71514 (Kr-Cr) and Fe 0.71115 (Kr-Fe). The minimum
+# over the seven type sets is pinned, so no metal's floor is ever too high.
+core_floor:
+  c: 0.7111
+  measured_at_T: 298.0
+
+# Critical constants for the Peng-Robinson fugacity (G1). The anchor relates
+# chemical potential to pressure through PR (p. 27533) and plots against
+# pressure, so reproducing its state points means reproducing its fugacities.
+#
+# These are NOT in the anchor's SI: RASPA ships no Xe or Kr definition (checked
+# in the RASPA2 tree), so its authors supplied their own constants and did not
+# report them. The values below are the standard NIST/CRC criticals. The acentric
+# factor is the soft one -- noble gases sit near zero and published values differ
+# in the third decimal (RASPA's own argon.def just uses 0.0) -- so the sensitivity
+# of phi to w is measured rather than argued: see
+# test_fugacity_is_insensitive_to_the_acentric_factor and the ledger.
+eos:
+  form: peng-robinson
+  mixing: van-der-waals
+  binary_interaction_parameter: 0.0   # RASPA3 hard-codes kij = 0 (equation_of_states.cpp)
+  Xe:
+    critical_temperature: 289.733     # K
+    critical_pressure: 5842000.0      # Pa
+    acentric_factor: 0.002
+    source: NIST/CRC critical constants; not reported by the anchor, see note above.
+  Kr:
+    critical_temperature: 209.48      # K
+    critical_pressure: 5525000.0      # Pa
+    acentric_factor: -0.002
+    source: NIST/CRC critical constants; not reported by the anchor, see note above.
+
+guests:
+  status: confirmed
+  Xe:
+    sigma: 4.1
+    epsilon: 221.0
+    source: >-
+      Kancharlapalli 2019, Table S1. The paper attributes Xe to Hirschfelder &
+      Curtiss, Molecular Theory of Gases and Liquids (Wiley 1965), their ref 79.
+  Kr:
+    sigma: 3.636
+    epsilon: 166.4
+    source: >-
+      Kancharlapalli 2019, Table S1. The paper attributes Kr to Talu & Myers,
+      Colloids Surf. A 2001, 187-188, 83-93, their ref 78.
+
+# The full Table S1 framework list, so the whole MFM-300(M) series stays reachable
+# without a second transcription. MFM-300(In) uses In, C, O, H only; the other
+# metals are carried for the sensitivity work and for M-series runs.
+framework:
+  status: confirmed
+  In:
+    sigma: 3.97608
+    epsilon: 301.428
+    source: Kancharlapalli 2019, Table S1 (UFF, Rappe 1992).
+  Al:
+    sigma: 3.91105
+    epsilon: 155.998
+    source: Kancharlapalli 2019, Table S1 (UFF, Rappe 1992).
+  Ga:
+    sigma: 3.90481
+    epsilon: 208.836
+    source: Kancharlapalli 2019, Table S1 (UFF, Rappe 1992).
+  Sc:
+    sigma: 2.93551
+    epsilon: 9.56117
+    source: Kancharlapalli 2019, Table S1 (UFF, Rappe 1992).
+  V:
+    sigma: 2.80099
+    epsilon: 8.05151
+    source: Kancharlapalli 2019, Table S1 (UFF, Rappe 1992).
+  Cr:
+    sigma: 2.69319
+    epsilon: 7.54829
+    source: Kancharlapalli 2019, Table S1 (UFF, Rappe 1992).
+  Fe:
+    sigma: 2.5943
+    epsilon: 6.54185
+    source: Kancharlapalli 2019, Table S1 (UFF, Rappe 1992).
+  C:
+    sigma: 3.47299
+    epsilon: 47.8562
+    source: Kancharlapalli 2019, Table S1 (DREIDING C_, Mayo 1990; R0 = 3.8983 A, D0 = 0.0951 kcal/mol).
+  O:
+    sigma: 3.03315
+    epsilon: 48.1581
+    source: Kancharlapalli 2019, Table S1 (DREIDING O_, Mayo 1990; R0 = 3.4046 A, D0 = 0.0957 kcal/mol).
+  H:
+    sigma: 2.84642
+    epsilon: 7.64893
+    source: Kancharlapalli 2019, Table S1 (DREIDING H_, Mayo 1990; R0 = 3.1950 A, D0 = 0.0152 kcal/mol).

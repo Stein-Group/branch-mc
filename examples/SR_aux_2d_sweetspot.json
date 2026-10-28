@@ -32,7 +32,6 @@
     "sampling_window": 100,
     "target_cycles": 5e6,
     "seed": 576347,
-    "esjd": true,
     "initial_config": "/dss/dsshome1/01/ge74fer3/dss/BRANCH_MC/equilibrated/hard_disk_2d/box_75"
   }
 }

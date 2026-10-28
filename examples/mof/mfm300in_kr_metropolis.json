@@ -1,0 +1,55 @@
+{
+  "potential": {
+    "main": "lennard_jones",
+    "T": 298.0,
+    "species_file": "ff/forcefield_A_shift.yaml"
+  },
+  "framework": {
+    "cif": "structures/MFM-300-In.cif",
+    "replicate": [
+      2,
+      2,
+      3
+    ]
+  },
+  "engine": {
+    "type": "metropolis_dynamics"
+  },
+  "sampler": {
+    "type": "metropolis"
+  },
+  "ensemble": {
+    "type": "muVT",
+    "dimension": 3,
+    "pressure": [
+      10000.0,
+      20000.0,
+      30000.0,
+      50000.0,
+      75000.0,
+      100000.0,
+      150000.0,
+      200000.0,
+      250000.0,
+      300000.0,
+      400000.0,
+      500000.0,
+      600000.0,
+      750000.0,
+      875000.0,
+      1000000.0
+    ],
+    "y": {
+      "Kr": 1.0
+    }
+  },
+  "run": {
+    "kind": "single",
+    "n_cores": 16,
+    "seed": 575845,
+    "initial_config": "empty",
+    "sampling_window": 1000,
+    "target_cycles": 20000000.0,
+    "checkpoint_every": 10
+  }
+}

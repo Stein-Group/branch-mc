@@ -11,9 +11,8 @@ search inside a cell. The verbatim 2D helpers below `grid_up_the_system` are
 kept as the reference the characterisation tier pins against orig/; the engine
 does not call them (see cell_unify_plan.md U2).
 
-3D parallel is no longer guarded: it is supported deliberately for metropolis,
-rosenbluth and branch (cell_unify_plan.md U0, GO 2026-07-14). What is still
-rejected up front, in sim_setup, is reweight, QA, channel and confined.
+3D parallel is supported for metropolis, rosenbluth and branch. sim_setup
+rejects reweight, QA, channel and confined up front.
 
 `cell_length_global` is the per-cell side the grid uses; the parallel engine
 sets it via configure() before applying the cell PBC, matching the original
@@ -33,8 +32,8 @@ cell_length_global = 30
 
 
 # --------------------------------------------------------------------------
-# dimension-generic gridding (2D and 3D), seedable. The legacy 2D helpers
-# above are kept for reference; the parallel engine no longer uses them.
+# dimension-generic gridding (2D and 3D), seedable. The 2D helpers above are
+# the characterisation reference; the parallel engine does not call them.
 # --------------------------------------------------------------------------
 
 

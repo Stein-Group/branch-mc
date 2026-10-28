@@ -39,18 +39,14 @@ with tempfile.TemporaryDirectory() as root:
     _ = gen.random(3)
     st = io.rng_state(gen)
     pos = np.random.default_rng(1).uniform(0, 10, size=(17, 3))
-    counters = {"add_acc": 5, "add_att": 9, "rm_acc": 2}
     params = {
         "potential": {"main": "lennard_jones", "T": 0.85},
         "ensemble": {"mu": -4.0},
     }
-    io.save_checkpoint(
-        P, positions=pos, step=4000, rng=st, counters=counters, params=params
-    )
+    io.save_checkpoint(P, positions=pos, step=4000, rng=st, params=params)
     ck = io.load_checkpoint(P)
     assert np.allclose(ck["positions"], pos), "positions round-trip"
     assert ck["step"] == 4000 and ck["n"] == 17, "step/n round-trip"
-    assert ck["counters"] == counters, "counters round-trip"
     assert ck["params"] == params, "params round-trip"
     print("  ok  checkpoint round-trip")
 
@@ -63,9 +59,7 @@ with tempfile.TemporaryDirectory() as root:
 
     # 3. atomic fallback: second save rotates v1 -> bak; corrupt primary -> load bak
     pos2 = pos + 100.0
-    io.save_checkpoint(
-        P, positions=pos2, step=8000, rng=st, counters=counters, params=params
-    )
+    io.save_checkpoint(P, positions=pos2, step=8000, rng=st, params=params)
     assert os.path.exists(P.checkpoint_bak), "bak should exist after second save"
     with open(P.checkpoint, "wb") as f:
         f.write(b"corrupt not an npz")
@@ -99,22 +93,19 @@ with tempfile.TemporaryDirectory() as root:
     print("  ok  2D frame pads z")
 
     # 5. log: header once across reopen, then trim
-    hdr = "#MC_cycle(M)  eta  N"
-    lg = io.Log(P.log, hdr)
-    lg.write("0.001000 0.10 5")
-    lg.write("0.002000 0.11 6")
+    lg = io.RunLog(P.log)
+    lg.write({"MC_cycle": 0.001, "N": 5})
+    lg.write({"MC_cycle": 0.002, "N": 6})
     lg.close()
-    lg2 = io.Log(P.log, hdr)
-    lg2.write("0.003000 0.12 7")
+    lg2 = io.RunLog(P.log)
+    lg2.write({"MC_cycle": 0.003, "N": 7})
     lg2.close()
     with open(P.log) as _f:
         body = _f.read()
-    assert body.count("#MC_cycle") == 1, "header written once"
+    assert body.count("#") == 1, "header written once"
     assert body.count("\n") == 4, "header + 3 rows"
     io.trim_log(P.log, max_cycle_millions=0.002)  # drop the 0.003 row
-    with open(P.log) as _f:
-        rows = [l for l in _f.read().splitlines() if l and not l.startswith("#")]
-    assert len(rows) == 2 and rows[-1].startswith("0.002000"), "trim past checkpoint"
+    assert list(io.read_log(P.log)["N"]) == [5, 6], "trim past checkpoint"
     print("  ok  log header-once and trim")
 
 print("\nALL IO TESTS PASSED")

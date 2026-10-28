@@ -30,7 +30,6 @@
     "kind": "single",
     "n_cores": 19,
     "sampling_window": 1,
-    "log_flush_interval": 1000,
     "checkpoint_every": 1000,
     "target_cycles": 1e6,
     "traj_every": 1000,

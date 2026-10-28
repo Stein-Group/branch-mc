@@ -71,8 +71,6 @@ class PotentialSpec:
     gamma_max: float | None
     gamma_dict: Any
     delta_eta: float | None
-    x_spacing: float | None
-    y_spacing: float | None
     volume_of_molecule: float
     g3_csv: str | None
     min_g3: float | None
@@ -117,19 +115,6 @@ class SamplerSpec:
     #: `channel_length == "full"`: full-span rod with a frozen gap.
     channel_full: bool
     radius: float
-    #: fixed = the nine fitted pmf exponents; adaptive = solve one per
-    #: Rosenbluth level for a target participation fraction. None means the key
-    #: was absent, which is fixed as well -- see `config_fields.SAMPLER` for why
-    #: this is identity-bearing and why absent and explicit "fixed" are not the
-    #: same run.
-    gamma_mode: str | None
-    #: target participation fraction PR / k; None unless gamma_mode is adaptive
-    pr_target: float | None
-    #: participation | perplexity; None unless gamma_mode is adaptive
-    gamma_criterion: str | None
-    #: moments | grid; None unless gamma_mode is adaptive. Which solver returns
-    #: the exponent: the closed-form expansion or the 17-point grid search.
-    gamma_solver: str | None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -197,13 +182,8 @@ class IOSpec:
     target_cycles: float
     checkpoint_every: int
     traj_every: int
-    log_flush_interval: float
-    log_columns: tuple[str, ...] | None
-    log_drop: tuple[str, ...] | None
     initial_config: str | None
     sweep_label: str | None
-    #: record the ESJD counters in each window summary (and in the log)
-    esjd: bool
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

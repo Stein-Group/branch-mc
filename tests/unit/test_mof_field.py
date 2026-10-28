@@ -23,9 +23,9 @@ import pytest
 
 from gcmc.forcefield.lj_table import FrameworkField
 from gcmc.forcefield.pair_table import PairTable
+from gcmc.forcefield.species_file import load_forcefield, reduce_tables
 from gcmc.run.io_framework import load_framework_typed
 from scripts.mof.ref_energy import read_extxyz, total_energy
-from scripts.mof.units import load_forcefield, reduce_tables
 
 ROOT = Path(__file__).resolve().parents[2]
 FF_A = ROOT / "ff" / "forcefield_A.yaml"
@@ -34,7 +34,7 @@ V0 = ROOT / "raspa" / "v0"
 
 def _framework_extxyz(tmp_path) -> Path:
     """Build the MFM-300(In) supercell once for this module."""
-    from scripts.mof.build_framework import build, write_extxyz
+    from gcmc.framework.structure import build, write_extxyz
 
     ff = load_forcefield(FF_A)
     atoms, _ = build(ROOT / "structures" / "MFM-300-In.cif", ff)

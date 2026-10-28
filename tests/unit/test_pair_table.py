@@ -23,7 +23,7 @@ from gcmc.forcefield.pair_table import (
     table_pair_energy,
     table_pair_energy_sq,
 )
-from scripts.mof.units import load_forcefield, reduce_tables
+from gcmc.forcefield.species_file import load_forcefield, reduce_tables
 
 FF_A = Path(__file__).resolve().parents[2] / "ff" / "forcefield_A.yaml"
 
@@ -176,8 +176,8 @@ def test_gate1_table_energy_matches_ref_energy_on_a_real_config():
     wiring the table into _lj_singleparticle_weight (no wiring before Gate 1)."""
     import numpy as np
 
+    from gcmc.forcefield.species_file import lj_energy_kelvin
     from scripts.mof.ref_energy import minimum_image
-    from scripts.mof.units import lj_energy_kelvin
 
     ff = load_forcefield(FF_A)
     red = reduce_tables(ff, 298.0)

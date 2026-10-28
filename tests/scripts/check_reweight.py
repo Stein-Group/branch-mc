@@ -145,7 +145,7 @@ st = ChainState.fresh(2, seed=12345)
 st.positions = seed_config(300, cfg.box, 2)
 me = np.array(
     [
-        engine.advance(st, cfg, pot, w)["packing_fraction"]
+        cfg.packing_fraction(engine.advance(st, cfg, pot, w)["N"])
         for _ in range(MC // cfg.sampling_window)
     ]
 )

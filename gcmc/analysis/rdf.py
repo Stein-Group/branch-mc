@@ -60,7 +60,6 @@ class RDFAccumulator:
         self._h11 = np.zeros(self.n_bins)
         self._n11_frames = 0
         self._sum_Nf = 0.0  # for mean fluid density
-        self._sum_Nf2_pairs = 0.0
         # 01 (fluid-matrix) accumulators
         self._h01 = np.zeros(self.n_bins)
         self._sum_Nf_for01 = 0.0

@@ -104,26 +104,13 @@ LAYERS: dict[str, int] = {
     # -- L5 sampling --------------------------------------------------------
     "sampling.base": 5,
     "sampling.rosenbluth": 5,
-    # Adaptive gamma's solver. L5 by content and by edge: it answers "how should
-    # this trial cloud be weighted", which is the layer's question, and it
-    # imports nothing in-package but `_types` (L0), so it sits at the bottom of
-    # L5 with `rosenbluth` and both engine passes above it.
-    "sampling.participation": 5,
     "sampling.branch": 5,
     "sampling.channel": 5,
     # The Suwa-Todo geometric allocation. LAYER 5 AND NOT 6, although only the
     # L6 Glauber engine calls it: it is a weighting policy over an occupancy
-    # ladder and imports nothing but numpy, which is the same reason
-    # `flat_histogram` sits here rather than with the engine that reads it. A
-    # module's layer is what it depends on, never who happens to call it.
+    # ladder and imports nothing but numpy. A module's layer is what it depends
+    # on, never who happens to call it.
     "sampling.suwa_todo": 5,
-    # Flat-histogram biasing in N plus the transition-matrix solve that reads it
-    # back. PROPOSAL machinery, not analysis: `eta` multiplies the weight of a
-    # macrostate inside the sampler and the engine reads it every step, so it
-    # sits with the other weighting policies. The solve rides in the same module
-    # because it consumes the same array and is what the chain reads to refresh
-    # its own bias -- it never touches a finished run.
-    "sampling.flat_histogram": 5,
     "sampling.reweighting": 5,
     # -- L6 engine ----------------------------------------------------------
     "engine.metropolis_dynamics": 6,
@@ -148,7 +135,6 @@ LAYERS: dict[str, int] = {
     # group 2C must stay empty of; and a baseline computed by the code under
     # test shares that code's mistakes, so its pair energy, minimum image and
     # acceptance are written out and share nothing with the samplers.
-    "engine.expanded_ensemble": 6,
     # -- L7 run -------------------------------------------------------------
     "run.sim_setup": 7,
     "run.guard_audit": 7,
@@ -157,7 +143,16 @@ LAYERS: dict[str, int] = {
     "run.io_framework": 7,
     "run.runner": 7,
     "run.launcher": 7,
-    "run.migrate": 7,
+    # Guests in a rigid framework (MOF): a params file with a `framework` block,
+    # read, run and resumed beside the bulk runner. Same layer as `run`: the
+    # driver reuses the runner's lock and log columns and `sim_setup`'s window
+    # rules, and only `__main__` (also L7) dispatches to it.
+    "framework.params": 7,
+    "framework.structure": 7,
+    "framework.system": 7,
+    "framework.driver": 7,
+    "framework.raspa2": 7,
+    "framework.raspa2_parse": 7,
     "__main__": 7,
     # -- off-ladder ---------------------------------------------------------
     "analysis.rdf": 3,
@@ -188,6 +183,7 @@ _SHIMS = {
     "engine",
     "run",
     "analysis",
+    "framework",
 }
 
 

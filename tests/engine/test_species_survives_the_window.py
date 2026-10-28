@@ -177,7 +177,7 @@ def test_an_untouched_particle_keeps_its_species_across_the_boundary(
     finally:
         metropolis_dynamics.moves.draw_move = real_draw
 
-    assert summary["counters"]["swap_step"] == 0, (
+    assert summary["columns"].get("swap_tried", 0) == 0, (
         "the swap suppression did not take effect, so a legal relabel is "
         "indistinguishable from a boundary reset and this test proves nothing"
     )

@@ -38,12 +38,11 @@ import concurrent.futures
 import numpy as np
 
 from .. import config_specs
-from .._types import BoolArray
+from .._types import BoolArray, FloatArray
 from ..proposals.trials import TrialSet
 from ..sampling.branch import count_and_sample
 from ..sampling.rosenbluth import select_forward, select_reverse
 from ..space import decomposition, geometry, neighbors
-from ..system.state import zero_counters
 from .metropolis_dynamics import (
     _lj_energy,
     _lj_set_energy,
@@ -123,7 +122,9 @@ def advance_cell(
     ens     : EnsembleSpec -- the state point (mu)
     n_offset: global molecule count outside this cell at window start (for the
               LJ tail, which is a system-level quantity)
-    Returns (new_main_global, counters).
+    Returns (new_main_global, counters, species, dU_pair): dU_pair is the
+    pair-energy change of the accepted moves (the tail is added by the caller,
+    which knows the global count after every cell has run).
 
     FOUR SUB-CONFIGS RATHER THAN `Config`. `advance_parallel` still takes a
     `Config` -- it must, because `runner` assigns it and
@@ -141,10 +142,9 @@ def advance_cell(
 
     Engineering: ONE persistent `neighbors.CellList` answers every neighbour
     question for the whole cell-window, built once here and updated in place by
-    every accepted move. It replaces the per-move `cKDTree` this used to build
-    from scratch (5.4 ms at N = 18,000 against a ~0.14 ms cell-list
-    query+update), and it is the same structure the serial engine runs on:
-    exactly one neighbour structure in the hot path.
+    every accepted move (a ~0.14 ms query+update at N = 18,000, against 5.4 ms
+    for a per-move `cKDTree` rebuild), and it is the same structure the serial
+    engine runs on: exactly one neighbour structure in the hot path.
 
     The list holds the border ring as well as the live molecules, in GLOBAL
     coordinates over the GLOBAL box, because the physics (distances, overlaps,
@@ -190,7 +190,26 @@ def advance_cell(
     # the hard-core weight is 1 for every admissible trial and reads no
     # distance, so that path may ask the query for the nearest neighbour only
     hs_needs_dists = kern.potential_type != "hard_sphere"
-    c = zero_counters()
+    c: dict = {
+        "translate_tried": 0,
+        "translate_accepted": 0,
+        "translate_sum_dr2": 0.0,
+        "insert_tried": 0,
+        "insert_evaluated": 0,
+        "insert_accepted": 0,
+        "delete_tried": 0,
+        "delete_evaluated": 0,
+        "delete_accepted": 0,
+    }
+    du = 0.0
+
+    def _pair_change(ins: FloatArray, rem: FloatArray) -> float:
+        """Pair-energy change of replacing `rem` by `ins` (removed slots are
+        tombstoned, so both groups see the same rest)."""
+        ins = np.atleast_2d(ins)
+        u_i = _lj_set_energy(ins, None, box, uc, rest_neighbors=cl) if len(ins) else 0.0
+        u_r = _lj_set_energy(rem, None, box, uc, rest_neighbors=cl) if len(rem) else 0.0
+        return u_i - u_r
 
     u_main = (np.asarray(main, float).reshape(-1, dim) - origin) % side
     border = np.asarray(border, float).reshape(-1, dim)
@@ -227,15 +246,17 @@ def advance_cell(
 
         # ----- translate (cell-torus wrap keeps the molecule owned) -----
         if choice == "move":
-            c["move_step"] += 1
+            c["translate_tried"] += 1
             j = int(rng.choice(N))
-            u_new = (u_main[j] + mf * (rng.uniform(0, 1, dim) - 0.5)) % L_c
+            disp = mf * (rng.uniform(0, 1, dim) - 0.5)
+            u_new = (u_main[j] + disp) % L_c
             moved = to_global(u_new)[0]
             slot = int(main_slots[j])
             # tombstone self: the queries below must see the environment, not
             # the molecule being moved
             cl.remove(slot)
             accepted = False
+            d_e = 0.0
             try:
                 if cl.n_active == 0:
                     accepted = True  # empty environment: nothing to overlap
@@ -265,7 +286,9 @@ def advance_cell(
                     cl.reactivate(slot)
             if accepted:
                 u_main[j] = u_new
-                c["move_accept"] += 1
+                c["translate_accepted"] += 1
+                c["translate_sum_dr2"] += float(disp @ disp)
+                du += d_e
             if DEBUG_CELL_LIST:
                 _check_cell_list_consistency(
                     cl, main_slots, u_main, border, origin, side, dim
@@ -274,10 +297,10 @@ def advance_cell(
 
         # ----- insertion / deletion -----
         if choice == "add":
-            c["add_step"] += 1
+            c["insert_tried"] += 1
             n_add, n_remove = depth + 1, depth
         else:
-            c["remove_step"] += 1
+            c["delete_tried"] += 1
             n_add, n_remove = depth, depth + 1
         step += 1
 
@@ -346,10 +369,7 @@ def advance_cell(
             elif n_cav < n_remove:
                 # capped group size; the two directions must cap to each other's
                 # inverse or detailed balance fails. See the long note at the
-                # matching branch in metropolis_dynamics.advance -- the add
-                # used to remove
-                # n_cav - 1 and leave one occupant behind, which no remove
-                # proposal undoes.
+                # matching branch in metropolis_dynamics.advance.
                 if choice == "add":
                     n_add, n_remove = n_cav + 1, n_cav
                 else:
@@ -563,7 +583,7 @@ def advance_cell(
                 delta_E += e_u_r_new - e_u_r_current
 
             if choice == "add":
-                c["add_attempt"] += 1
+                c["insert_evaluated"] += 1
                 mu_ideal = -np.log(v_cell / (N + 1))
                 if branch:
                     k_trials = -np.log((n_trials - n_remove) / n_add)
@@ -572,6 +592,8 @@ def advance_cell(
                 mu_excess = -sum_new + sum_current - k_trials
                 log_alpha = max(0.0, mu_ideal - beta * mu + mu_excess + delta_E)
                 if log_alpha <= -np.log(rng.uniform(0, 1)):
+                    if lj:
+                        du += _pair_change(chosen_coords, disk_in)
                     committed = True  # set BEFORE any insert: a rebuild may
                     # reclaim the tombstoned slots and they must never be
                     # reactivated afterwards
@@ -583,8 +605,9 @@ def advance_cell(
                     main_slots = np.concatenate(
                         [rest_slots, np.asarray(fresh, dtype=np.int64)]
                     )
-                    c["add_accept"] += 1
+                    c["insert_accepted"] += 1
             else:
+                c["delete_evaluated"] += 1
                 mu_ideal = -np.log(N / v_cell)
                 if branch:
                     k_trials = -np.log((n_trials - n_add) / n_remove)
@@ -593,6 +616,8 @@ def advance_cell(
                 mu_excess = -sum_new + sum_current + k_trials
                 log_alpha = max(0.0, mu_ideal + beta * mu + mu_excess + delta_E)
                 if log_alpha <= -np.log(rng.uniform(0, 1)):
+                    if lj:
+                        du += _pair_change(chosen_coords, disk_in)
                     committed = True  # see the note above
                     if n_add > 0:
                         # at depth >= 1 a deletion re-inserts n_add molecules
@@ -605,7 +630,7 @@ def advance_cell(
                     else:
                         u_main = rest_u
                         main_slots = rest_slots
-                    c["remove_accept"] += 1
+                    c["delete_accepted"] += 1
         finally:
             if not committed:
                 for _s in doomed:
@@ -623,7 +648,7 @@ def advance_cell(
         out_species = None
     else:
         out_species = np.asarray(cl.species[main_slots], dtype=np.int64)
-    return out_main, c, out_species
+    return out_main, c, out_species, du
 
 
 def _run_cell(args):
@@ -705,15 +730,15 @@ def advance_parallel(state, cfg, potential, weigher):
     # test or a script can call `advance_parallel` directly, and the failure it
     # would get otherwise is a plausible number rather than an error.
     #
-    # What P7 adds is the CELL KERNEL. The plumbing is already here: `grid_up_nd`
-    # splits a species column, the reassembly below puts it back, and it fixes
-    # the writeback that used to drop it whenever the caller had not supplied one.
+    # What a typed parallel run still needs is the CELL KERNEL. The plumbing is
+    # here: `grid_up_nd` splits a species column and the reassembly below puts
+    # it back.
     if kern.n_species > 1:
         raise NotImplementedError(
             f"advance_parallel is single-species; this config has "
             f"{kern.n_species}. The cell kernel draws no species and proposes no "
-            "identity swap, so the run would silently sample species 0 only. "
-            "P7 is the stage that wires it; sim_setup refuses the combination."
+            "identity swap, so the run would silently sample species 0 only; "
+            "sim_setup refuses the combination."
         )
 
     cells, rest, rest_species = decomposition.grid_up_nd(
@@ -747,7 +772,8 @@ def advance_parallel(state, cfg, potential, weigher):
         for cell, s in zip(cells, seeds)
     ]
 
-    total = zero_counters()
+    total: dict | None = None
+    du_pair = 0.0
     new_mains = []
     new_species = []
     if exe.n_workers > 1 and len(tasks) > 1 and not IN_PROCESS:
@@ -755,11 +781,15 @@ def advance_parallel(state, cfg, potential, weigher):
             results = list(ex.map(_run_cell, tasks))
     else:
         results = [_run_cell(t) for t in tasks]
-    for new_main, counters, cell_species in results:
+    for new_main, counters, cell_species, cell_du in results:
         new_mains.append(new_main)
         new_species.append(cell_species)
-        for k in total:
-            total[k] += counters[k]
+        du_pair += cell_du
+        if total is None:
+            total = dict(counters)
+        else:
+            for k in total:
+                total[k] += counters[k]
 
     # Reassembly: the species column is concatenated in the SAME cell order as the
     # coordinates, with `rest` last, so a molecule's type follows its coordinates
@@ -786,10 +816,10 @@ def advance_parallel(state, cfg, potential, weigher):
     state.positions = pos
     state.species = spc
     state.step += io_.sampling_window * max(1, len(cells))
-    packing = (len(pos) * pot_spec.volume_of_molecule) / kern.total_volume
+    lj_run = pot_spec.potential == "lennard_jones"
+    tail = pot_spec.lj_tail_pref or 0.0
     return {
         "N": len(pos),
-        "packing_fraction": packing,
-        "counters": total,
-        "n_cells": len(cells),
+        "columns": total or {},
+        "dU": (du_pair + tail * (len(pos) ** 2 - n_global**2)) if lj_run else None,
     }

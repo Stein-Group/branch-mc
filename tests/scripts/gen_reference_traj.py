@@ -34,8 +34,7 @@ def run_mode(name):
         stats.append(
             {
                 "N": int(s["N"]),
-                "n_cav": float(s["n_cav"]),
-                "counters": dict(s["counters"]),
+                "columns": dict(s["columns"]),
             }
         )
     return frames, stats

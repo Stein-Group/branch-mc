@@ -60,7 +60,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # characterisation scripts mutate sys.argv/sys.path before imports, on purpose
 "tests/**" = ["E402"]
-"gcmc/potentials/__init__.py" = ["F401"]
+"gcmc/forcefield/__init__.py" = ["F401"]
 # Legacy parallel path, transcribed from the original scripts: its module-level
 # np.random stream is pinned by check_parallel/check_decomposition against
 # orig/, so converting to np.random.Generator would change the sampled chain.

@@ -19,7 +19,7 @@ knob, like `min_g3`. What has to hold is that the function be
     unbiased,
   EXACT on the tabulated points, so the coarse reader is the table and not an
     approximation to it,
-  DETERMINISTIC and floored, because the adaptive solver reads log g3 and the
+  DETERMINISTIC and floored, because the weight is a log of g3 and the
     reverse pass must read the same numbers as the forward one.
 
 The accuracy tests below are CHARACTERISATION with loose bounds: they say the
@@ -131,7 +131,7 @@ def test_the_departure_from_the_interpolated_value_is_a_fraction_of_a_percent() 
 
 def test_the_floor_reaches_the_table_before_the_lookup() -> None:
     """`min_g3` floors the grid in `build`, so no lookup can return less than
-    the floor -- which the adaptive solver depends on, because it takes a log."""
+    the floor, which the log of the weight depends on."""
     pts, _ = _nodes()
     for floor in (0.005, 0.25):
         got = HardCoreAux3D.build(

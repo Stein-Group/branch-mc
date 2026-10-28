@@ -164,7 +164,11 @@ def _lattice_offsets(nmax: int, dim: int) -> FloatArray:
     got = _LATTICE_CACHE.get(key)
     if got is None:
         got = np.array(
-            [c for c in itertools.product(range(-nmax, nmax + 1), repeat=dim) if any(c)],
+            [
+                c
+                for c in itertools.product(range(-nmax, nmax + 1), repeat=dim)
+                if any(c)
+            ],
             dtype=float,
         )
         _LATTICE_CACHE[key] = got
@@ -267,7 +271,6 @@ def rod_image_length(
         return limit
     bound = float(np.abs(na[near]).min()) - reach
     return max(0.0, min(limit, bound))
-
 
 
 def random_rotation_matrix(rng: RNG, dim: int = 3) -> FloatArray:
@@ -451,12 +454,11 @@ def rod_members_full(
     # STICKS OUT PAST on some face, and that is a property of where this rod
     # sits, not a constant.
     #
-    # It used to be `reach` on every face, which was right only because every
-    # caller clipped the chord to the box (`ray_box_chord`): the axis line then
-    # lay inside, so the rod overhung a face by at most its cross-section. A
-    # body whose length comes from the orientation rather than from the walls
-    # overhangs by however much of it is outside, and atoms that far from the
-    # face wrap onto it. Missing them is silent -- they are simply not members,
+    # `reach` on every face is right only for a chord clipped to the box
+    # (`ray_box_chord`): the axis line then lies inside, so the rod overhangs a
+    # face by at most its cross-section. A body whose length comes from the
+    # orientation rather than from the walls overhangs by however much of it is
+    # outside, and atoms that far from the face wrap onto it. Missing them is silent -- they are simply not members,
     # and the trial cloud then draws points the membership test disowns.
     #
     # Per lab axis `a` the rod spans `c_a +/- h_a` with

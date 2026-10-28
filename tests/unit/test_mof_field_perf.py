@@ -21,7 +21,7 @@ import numpy as np
 
 from gcmc.forcefield.lj_table import FrameworkField
 from gcmc.forcefield.pair_table import PairTable
-from scripts.mof.units import load_forcefield, reduce_tables
+from gcmc.forcefield.species_file import load_forcefield, reduce_tables
 
 FF_A = "ff/forcefield_A.yaml"
 

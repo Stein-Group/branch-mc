@@ -296,10 +296,8 @@ class FrameworkField:
         self.rc = float(upper_cutoff)
         if len(self.pos) != len(self.types):
             raise ValueError("framework positions and type ids differ in length")
-        # One reduced-units potential per table type, built once. energy() used to
-        # construct a fresh LennardJonesTable on every call (millions per run); the
-        # object is a few references, so caching it is a pure hot-path win with no
-        # behaviour change (beta is folded in by the caller, so beta=1.0 here).
+        # One reduced-units potential per table type, built once rather than per
+        # energy() call (beta is folded in by the caller, so beta=1.0 here).
         self._pots = {
             t: LennardJonesTable(
                 beta=1.0, table=table, trial_type=t, upper_cutoff=self.rc

@@ -296,8 +296,8 @@ def test_the_swap_move_actually_fires():
             window=300,
         )
         pos, spc = res.positions, res.species
-        swap_step += res.counters["swap_step"]
-        swap_accept += res.counters["swap_accept"]
+        swap_step += res.counters["swap_tried"]
+        swap_accept += res.counters["swap_accepted"]
     assert swap_step > 500, f"only {swap_step} swaps proposed"
     assert swap_accept > 50, f"only {swap_accept} swaps accepted of {swap_step}"
 

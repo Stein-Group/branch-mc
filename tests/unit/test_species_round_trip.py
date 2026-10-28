@@ -215,7 +215,6 @@ def test_a_checkpoint_round_trips_the_species_column(tmp_path) -> None:
         positions=pos,
         step=7,
         rng={"a": 1},
-        counters={"add_step": 3},
         params={},
         species=species,
     )

@@ -3,6 +3,8 @@ knobs, with a hard core budget.
 
 Sweepable axes and where they live in the base params:
     ensemble.mu                 (single value or a list; muVT)
+    ensemble.fugacity / .z      (a list of {species: value} maps; typed runs)
+    ensemble.pressure           (framework runs, with ensemble.y)
     ensemble.packing_fraction   (single value or a list; NVT)
     ensemble.N                  (single value or a list; NVT)
     sampler.trials              (absolute trial-pool size; XOR trial_density)
@@ -15,9 +17,6 @@ Sweepable axes and where they live in the base params:
                                  supply the dynamics a pool)
     engine.depth                (metropolis_dynamics only)
     engine.kmax_margin          (ladder dynamics only)
-    sampler.pr_target           (adaptive gamma only; the target spread PR / k)
-    sampler.gamma_criterion     (adaptive gamma only; participation/perplexity)
-    sampler.gamma_solver        (adaptive gamma only; moments/grid)
     auxiliary.gamma             (fixed gamma; each arm a scalar or an array of
                                  up to 9 per-level exponents)
     run.seed
@@ -80,6 +79,11 @@ _THREAD_VARS = (
 # (axis label, params section, key). Order fixes the product / id ordering.
 _AXES = (
     ("mu", "ensemble", "mu"),
+    # typed and framework state points: a list of maps (fugacity, z) or of
+    # total pressures (framework runs, with ensemble.y) is one run per entry
+    ("f", "ensemble", "fugacity"),
+    ("z", "ensemble", "z"),
+    ("p", "ensemble", "pressure"),
     ("packing_fraction", "ensemble", "packing_fraction"),
     ("N", "ensemble", "N"),
     ("target_N", "ensemble", "target_N"),
@@ -113,24 +117,6 @@ _AXES = (
     # cutoff == run.upper_cutoff is the exact no-op, so one launch produces both
     # the tuning curve and the reference it must agree with.
     ("aux_cutoff", "auxiliary", "cutoff"),
-    # ADAPTIVE GAMMA, and the argument the `engine` axis makes applies here with
-    # more force. `pr_target` is CLAIMED to be a variance knob that cannot move
-    # an equilibrium average, and the only way to check that claim is to run the
-    # same state point, box, trial cloud and seed at several targets and require
-    # the excess chemical potential to agree. Three launches whose roots are
-    # kept apart by hand is how that comparison becomes three different
-    # experiments, which is the failure the invariance gate exists to detect.
-    #
-    # `gamma_criterion` is an axis for the same reason: whether the
-    # participation ratio or perplexity is the right spread to target is
-    # empirical -- the two disagree about how hard one dominant trial should be
-    # punished -- so the answers are raced rather than argued. Crossed with
-    # `pr_target` it is a 2 x 3 heatmap from one launch.
-    #
-    # Both inert for a fixed-gamma params file, which sets neither.
-    ("pr_target", "sampler", "pr_target"),
-    ("gamma_criterion", "sampler", "gamma_criterion"),
-    ("gamma_solver", "sampler", "gamma_solver"),
     # THE MODEL AXIS. Every other entry above is a knob of the experiment; this
     # one sweeps the force field itself, which is what the k_ij demixing series
     # is: `eps_ij = (1 - k_ij) sqrt(eps_i eps_j)`, and a run at a different k is
@@ -176,6 +162,21 @@ def _map_label(val: dict[str, Any]) -> str:
     return "_".join(f"{k}{_fmt_num(v)}" for k, v in val.items())
 
 
+#: State-point axes whose values span decades (Pa, activities): labelled in %g
+#: so a folder reads `fCH4_1e+06` / `p2.5e+05`, not `fCH41000000`.
+_STATE_AXES = (
+    ("f", "ensemble", "fugacity"),
+    ("z", "ensemble", "z"),
+    ("p", "ensemble", "pressure"),
+)
+
+
+def _state_label(val: Any) -> str:
+    if isinstance(val, dict):
+        return "_".join(f"{k}_{float(v):g}" for k, v in val.items())
+    return f"{float(val):g}"
+
+
 def _file_fragment(val: Any, depth: int) -> str:
     """The last `depth` path components of a path-valued axis, the file itself
     rendered as its stem. A leading `species_` is dropped because every file on
@@ -188,11 +189,6 @@ def _file_fragment(val: Any, depth: int) -> str:
     stem = Path(parts[-1]).stem
     parts[-1] = stem[len("species_") :] if stem.startswith("species_") else stem
     return "_".join(parts[-depth:])
-
-
-def _file_label(val: Any) -> str:
-    """Id fragment for a single path-valued axis value: its stem."""
-    return _file_fragment(val, 1)
 
 
 def _file_label_grid(vals: list[Any]) -> list[str]:
@@ -406,6 +402,8 @@ def expand_sweep(
                     shown = _gamma_label(val)
                 elif axis in _FILE_AXES:
                     shown = file_frags[i][str(val)]
+                elif axis in _STATE_AXES:
+                    shown = _state_label(val)
                 elif isinstance(val, dict):
                     shown = _map_label(val)
                 else:
@@ -541,7 +539,9 @@ def launch_sweep(
         log.warning(
             "the core budget is %d but this process may run on only %d cpus "
             "(%s); runs will share cpus and their wall times will not compare",
-            cores, len(allowed), allowed,
+            cores,
+            len(allowed),
+            allowed,
         )
 
     next_core = [0]
@@ -549,11 +549,11 @@ def launch_sweep(
     def start(params: dict[str, Any], label: str) -> subprocess.Popen[bytes]:
         # The snapshot name must be unique to its CONTENT, not just its label.
         # `label` only encodes the swept axes ("mu15"), so two jobs launched
-        # from different base files into the same launch_dir used to write the
+        # from different base files into the same launch_dir would write the
         # same `params_mu15.json`. The child reads it a second or so later
-        # (after importing numpy/scipy/ase), and by then the second job had
-        # overwritten it: the first job's runs silently took the other job's
-        # physics and landed under the first job's --root. A digest of the
+        # (after importing numpy/scipy/ase), by which time the second job can
+        # have overwritten it, and the first job's runs would silently take the
+        # other job's physics. A digest of the
         # content makes the names disjoint, and identical content writing the
         # same file is harmless. Written to a temp name and renamed, so a
         # reader never sees a half-written file.

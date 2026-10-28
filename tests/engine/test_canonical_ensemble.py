@@ -42,6 +42,7 @@ import pytest
 from gcmc import config_specs
 from gcmc.analysis import demixing
 from gcmc.engine import metropolis_dynamics
+from gcmc.run import io as gio
 from gcmc.run import runner, sim_setup
 from gcmc.system.state import ChainState
 
@@ -123,10 +124,10 @@ def test_every_species_count_is_exactly_constant(tmp_path):
 
     # ...and not constant because nothing happened, which is the reachable-value
     # half: both moves must actually be proposed.
-    c = summaries[-1]["counters"]
-    assert c["move_step"] > 0 and c["swap_step"] > 0, (
-        f"a canonical window proposed {c['move_step']} translations and "
-        f"{c['swap_step']} pair exchanges; it is not sampling"
+    c = summaries[-1]["columns"]
+    assert c["translate_tried"] > 0 and c["swap_tried"] > 0, (
+        f"a canonical window proposed {c['translate_tried']} translations and "
+        f"{c['swap_tried']} pair exchanges; it is not sampling"
     )
 
 
@@ -142,11 +143,11 @@ def test_degenerate_species_accept_every_pair_exchange(tmp_path):
     """
     start = _start(tmp_path, MODEL_NULL)
     _state, summaries = _drive(_params(start, MODEL_NULL), windows=2)
-    c = summaries[-1]["counters"]
+    c = summaries[-1]["columns"]
     like_fraction = 0.5  # x_A = x_B = 1/2 exactly, by construction of the start
     expected = 1.0 - like_fraction
-    got = c["swap_accept"] / c["swap_step"]
-    sd = np.sqrt(expected * (1 - expected) / c["swap_step"])
+    got = c["swap_accepted"] / c["swap_tried"]
+    sd = np.sqrt(expected * (1 - expected) / c["swap_tried"])
     assert abs(got - expected) < 4 * sd, (
         f"degenerate species accepted {got:.3f} of pair exchanges against the "
         f"{expected:.3f} the null rate alone predicts ({sd:.4f} sd). Anything "
@@ -242,16 +243,15 @@ def test_the_log_of_a_canonical_run_carries_its_own_moves(tmp_path):
         json.dumps(_params(start, MODEL_DEMIX, window=2000, target_cycles=6000))
     )
     _state, paths = runner.run(str(params), root=str(tmp_path / "runs"))
-    lines = [ln for ln in paths.log.read_text().splitlines() if ln.strip()]
-    names = lines[0].lstrip("#").split()
-    assert {"mv_acc", "mv_stp", "swp_acc", "swp_stp", "N_A", "N_B"} <= set(names)
-    for absent in ("rpk_stp", "clqP_n", "add_stp"):
+    log = gio.read_log(paths.log)
+    names = set(log)
+    want = {"translate_tried", "translate_accepted", "swap_tried", "swap_accepted"}
+    assert want | {"N_A", "N_B"} <= names
+    for absent in ("repack_tried", "repack_sum_new", "insert_tried"):
         assert absent not in names, (
             f"a canonical log declares {absent!r}, which it can never fill"
         )
-    rows = [ln.split() for ln in lines[1:]]
-    i_a, i_b = names.index("N_A"), names.index("N_B")
-    assert len({(r[i_a], r[i_b]) for r in rows}) == 1, (
+    assert len(set(zip(log["N_A"], log["N_B"]))) == 1, (
         "the composition changed between log rows of a fixed-composition run"
     )
 

@@ -78,14 +78,16 @@ def main() -> None:
                 t = time.perf_counter()
                 out = adv(st, cfg, pot, wgh)
                 ts.append(time.perf_counter() - t)
-                for k, v in (out.get("glauber") or {}).items():
+                for k, v in out["columns"].items():
                     agg[k] = agg.get(k, 0.0) + v
             extra = ""
-            if agg.get("step"):
-                extra = (
-                    f"  pool M {agg['pool_M_sum'] / agg['step']:.1f}"
-                    f"  body len {agg['body_len_sum'] / agg['step']:.2f}"
-                )
+            # every step of a ladder window that is not a translation is a
+            # window move
+            moves = a.windows * a.window - agg.get("translate_tried", 0.0)
+            if "ladder_sum_pool" in agg and moves:
+                extra = f"  pool M {agg['ladder_sum_pool'] / moves:.1f}"
+                if "ladder_sum_length" in agg:
+                    extra += f"  body len {agg['ladder_sum_length'] / moves:.2f}"
             print(
                 f"mu={mu:5.1f}  {path.stem:32s} {1e3 * np.median(ts) / a.window:8.2f} ms/step"
                 f"  N={out['N']}{extra}",

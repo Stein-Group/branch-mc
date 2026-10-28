@@ -12,7 +12,7 @@ pays for it in seconds per move; only the quotient says whether the trade was
 worth making.
 
 ACCEPTANCE. Every run here is accept/reject: acceptance is
-(add_acc + rm_acc) / (add_stp + rm_stp). An accepted single-particle exchange
+(insert_accepted + delete_accepted) / (insert_tried + delete_tried). An accepted single-particle exchange
 moves N by exactly one, so this is also <dN^2> per move for these engines.
 Ladder engines (Glauber, Suwa-Todo) have no accept/reject step and are skipped.
 
@@ -28,6 +28,7 @@ run.log, or a directory of such leaves.
 """
 
 import json
+import sys
 import warnings
 from pathlib import Path
 
@@ -36,6 +37,9 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm, LinearSegmentedColormap
 from matplotlib.ticker import MaxNLocator, NullLocator, FuncFormatter
 from matplotlib import gridspec
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts import runlog  # noqa: E402
 
 # ============================================================================
 # CONFIG
@@ -86,7 +90,7 @@ SLICE_KEY = "depth"        # the third sampler axis: one slice of it is drawn
 #: highest acceptance per second; a number forces that depth everywhere.
 SLICE_PICK = "best"
 
-BURN_IN_M = 0.0            # drop rows with MC_cycle(M) below this
+BURN_IN_M = 0.0            # drop rows with MC_cycle (millions) below this
 BURN_IN_FRACTION = 0.5     # AND drop this leading fraction of what is left.
                            # These runs start from a lattice at a guessed N and
                            # the approach to the stationary density is itself a
@@ -109,7 +113,7 @@ SHOW_N_AXIS = True
 PARTICLE_RADIUS = 0.5
 
 #: Packing fraction per (dimension, mu), measured at the state point. Anything
-#: not listed falls back to the mean of the run's own pckng_frctn column, which
+#: not listed falls back to the mean of the run's own packing fraction, which
 #: is the same number as long as the run is equilibrated.
 PACKING_FRACTION = {
     (2, 10): 0.647,     # 2D hard disks at mu = 10
@@ -158,8 +162,8 @@ SPLIT_BY = "dim"
 #: sets the first two columns, and it is the only place a t/step below 1 can
 #: come from other than the hardware.
 #:
-#:    "exchange"  add_stp + rm_stp, or glb_step. The proposal count.
-#:    "all"       the above plus mv_stp, so the denominator covers every move
+#:    "exchange"  insert_tried + delete_tried. The proposal count.
+#:    "all"       the above plus translate_tried, so the denominator covers every move
 #:                the wall clock was spent on, displacement moves included.
 #:    "cycle"     MC cycles. Nothing is left out and nothing engine-specific is
 #:                counted, but a cycle is only comparable if both codes define
@@ -254,6 +258,7 @@ def read_log(path):
         if rows.shape[1] > len(LEGACY_POSITIONS):
             raise ValueError("headerless log with more columns than the legacy layout")
     names = [LEGACY_COLUMNS.get(n, n) for n in names]
+    names = [runlog.OLD_NAMES.get(n, n) for n in names]
     return {n: rows[:, i] for i, n in enumerate(names)}
 
 
@@ -350,19 +355,19 @@ def read_run(leaf):
     """One leaf -> a record holding the three metrics and their errors, or None.
 
     Accepted exchanges over proposed exchanges, per window:
-        add_acc + rm_acc  over  add_stp + rm_stp
+        insert_accepted + delete_accepted  over  insert_tried + delete_tried
     Ladder engines have no accept/reject step, so they are skipped rather
     than given a number that means something else.
     """
     par = read_params(leaf)
     col = read_log(leaf / "run.log")
-    if not col or "MC_cycle(M)" not in col:
+    if not col or "MC_cycle" not in col:
         return None
-    keep = col["MC_cycle(M)"] >= BURN_IN_M
+    keep = col["MC_cycle"] >= BURN_IN_M
     col = {k: v[keep] for k, v in col.items()}
-    if len(col["MC_cycle(M)"]) < 2:
+    if len(col["MC_cycle"]) < 2:
         return None
-    cut = int(len(col["MC_cycle(M)"]) * BURN_IN_FRACTION)
+    cut = int(len(col["MC_cycle"]) * BURN_IN_FRACTION)
     tail = {k: v[cut:] for k, v in col.items()}
 
     if "wall_s" not in tail:
@@ -374,13 +379,13 @@ def read_run(leaf):
         print(f"  ! {leaf.name}: engine={par['engine']} has no accept/reject step, "
               "so acceptance is undefined. Skipped.")
         return None
-    need = ("add_acc", "rm_acc", "add_stp", "rm_stp")
+    need = ("insert_accepted", "delete_accepted", "insert_tried", "delete_tried")
     if not all(c in tail for c in need):
         print(f"  ! {leaf.name}: log is missing some of {need} -- written by "
               "another version? Skipped.")
         return None
-    acc = tail["add_acc"] + tail["rm_acc"]
-    steps = tail["add_stp"] + tail["rm_stp"]
+    acc = tail["insert_accepted"] + tail["delete_accepted"]
+    steps = tail["insert_tried"] + tail["delete_tried"]
 
     # ---- THE DENOMINATOR, and the one place a t/step below 1 can be
     # manufactured. `steps` above is the proposal count; the wall clock, in
@@ -389,16 +394,16 @@ def read_run(leaf):
     # on work that is not in `steps`, its seconds-per-step is not the cost of
     # its proposal, and dividing two such numbers compares two different
     # mixtures of work rather than two proposals.
-    mv = tail.get("mv_stp")
+    mv = tail.get("translate_tried")
     exch_steps = steps
     if STEP_DEFINITION == "all":
         if mv is not None:
             steps = steps + mv
     elif STEP_DEFINITION == "cycle":
-        d = np.diff(tail["MC_cycle(M)"])
+        d = np.diff(tail["MC_cycle"])
         per = float(np.median(d)) * 1e6 if d.size and np.median(d) > 0 else np.nan
         if not np.isfinite(per) or per <= 0:
-            print(f"  ! {leaf.name}: MC_cycle(M) does not advance -- cannot use "
+            print(f"  ! {leaf.name}: MC_cycle does not advance -- cannot use "
                   "STEP_DEFINITION='cycle'")
             return None
         steps = np.full(wall.shape, per)
@@ -411,13 +416,13 @@ def read_run(leaf):
     rec["n_windows"] = len(wall)
     # absolute numbers, kept so the diagnostics can say whether a ratio moved
     # because of the run or because of the reference
-    rec["packing"] = (float(np.mean(tail["pckng_frctn"]))
-                      if "pckng_frctn" in tail else np.nan)
+    raw = json.loads((leaf / "params.json").read_text())
+    rec["packing"] = float(np.mean(runlog.packing_fraction(tail, raw)))
     rec["raw_wall_per_window"] = float(wall.mean())
     rec["raw_steps_per_window"] = float(np.mean(steps))
     rec["raw_exch_per_window"] = float(np.mean(exch_steps))
-    rec["raw_cycles_per_window"] = (float(np.median(np.diff(tail["MC_cycle(M)"]))) * 1e6
-                                    if len(tail["MC_cycle(M)"]) > 1 else np.nan)
+    rec["raw_cycles_per_window"] = (float(np.median(np.diff(tail["MC_cycle"]))) * 1e6
+                                    if len(tail["MC_cycle"]) > 1 else np.nan)
     # what fraction of the counted moves are displacement moves -- i.e. how much
     # of the wall clock the exchange denominator is silently absorbing
     rec["mv_frac"] = (float(mv.sum() / (mv.sum() + exch_steps.sum()))
@@ -732,7 +737,7 @@ def n_of_L(dim, eta):
 
 def packing_for(recs):
     """(dim, eta) for a row, from the table if the state point is listed, else
-    from the runs' own pckng_frctn column."""
+    from the runs' own packing fraction."""
     dims = {r["dim"] for r in recs}
     mus = {r["mu"] for r in recs}
     if len(dims) != 1 or len(mus) != 1:
@@ -875,7 +880,7 @@ def draw(rows, out, name=None):
         dim_row, eta = packing_for(recs)
         if SHOW_N_AXIS and not eta:
             print(f"  ! {label}: no packing fraction for this state point and no "
-                  "pckng_frctn column -- second x axis left off this row")
+                  "measured one -- second x axis left off this row")
         # the star: the cell with the highest efficiency, marked on every column
         xs_e, ys_e, Ze, _Re = grid_for(recs, EFFICIENCY, ykey)
         star = None

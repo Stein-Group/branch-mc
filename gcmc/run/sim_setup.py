@@ -40,8 +40,7 @@ of this block is examples/schema.json, which validation uses.
                                                      #   schedule. A SCALAR applies at every level; an
                                                      #   ARRAY of 1..9 values gives the first levels and
                                                      #   leaves the rest at 0 (bias off). Both dimensions.
-                                                     #   Refused with sampler.gamma_mode='adaptive', which
-                                                     #   solves the same number instead. Swept by the
+                                                     #   Swept by the
                                                      #   launcher as a list of arms, each arm a scalar or
                                                      #   an array.
                  "g3_r_cut": float,                  # 3D pmf only; OPTIONAL. Neighbours beyond this
@@ -82,27 +81,6 @@ of this block is examples/schema.json, which validation uses.
                  "trials": int | "trial_density": float,   # trials default 30; XOR
                  "trial_box_side": float,                  # default 3.0; the cube trial region
                                                            #   (rosenbluth, branch, reweight)
-                 "gamma_mode": "fixed" | "adaptive",       # default "fixed": read the nine fitted pmf
-                                                           #   exponents. "adaptive" solves one per
-                                                           #   Rosenbluth level to hit `pr_target`, and
-                                                           #   requires rosenbluth + 3D pmf under
-                                                           #   metropolis_dynamics.
-                 "pr_target": float,                       # adaptive only, and required by it: the target
-                                                           #   participation fraction PR / k in (0, 1],
-                                                           #   e.g. 0.4. A variance knob; it cannot move an
-                                                           #   equilibrium average.
-                 "gamma_criterion":                        # adaptive only; OPTIONAL, default
-                     "participation" | "perplexity",       #   "participation". Which spread pr_target is
-                                                           #   measured with: PR = (sum w)^2 / sum w^2, or
-                                                           #   perplexity = exp(-sum p log p). Applies at
-                                                           #   every level, depth included.
-                 "gamma_solver":                           # adaptive only; OPTIONAL, default "moments".
-                     "moments" | "grid",                   #   "moments" is the closed form (two weighted
-                                                           #   moments of log b, one square root, no
-                                                           #   exponentials); "grid" searches 17 candidate
-                                                           #   exponents and costs ~13% of move time.
-                                                           #   Same question, two answers within a percent
-                                                           #   of each other, two run identities.
                  "channel_length": float,                  # the oriented cuboid (channel)
                  "channel_width": float}
                                                            # GEOMETRY ONLY. `sampler` says WHERE
@@ -147,52 +125,22 @@ of this block is examples/schema.json, which validation uses.
                           "H": float,                          #   slit gap; must exceed 2*run.radius
                           "R": float,                          #   cylinder radius; 2R must exceed 2*run.radius
                           "L_z": float},                       #   cylinder axis length, default ensemble.box
-                 "box": float,                       # default by (dimension, run.kind): 2D 75 / 2D par 200
+                 "box": float},                      # default by (dimension, run.kind): 2D 75 / 2D par 200
                                                      #   / 3D 20 / 3D par 50
-                 "sweep": [float]},                  # LEGACY, unusable: the launcher does not expand it (it
-                                                     #   is not a sweep axis), so it reaches here unexpanded
-                                                     #   and raises. Sweep with a LIST on an axis instead.
 
   "run":        {"kind": "single" | "parallel",
                  "n_cell": int | [int, ...],         # PARALLEL, recommended: cells the box is cut into. One
                                                      #   cell is one core, so this IS the run's core count.
                                                      #   int is factored into the most cubic per-axis split;
-                                                     #   a list is honoured verbatim. cell_length/buffer/
-                                                     #   x_spacing/y_spacing are then DERIVED and must not
-                                                     #   be given alongside it (either/or, nothing between).
-                 "n_workers": int,                   # DEPRECATED (accepted + warned): cores are implied by
-                                                     #   the cell count and cannot be set independently
+                                                     #   a list is honoured verbatim. cell_length/buffer
+                                                     #   are then DERIVED and must not be given alongside it.
                  "n_cores": int,                     # launcher only: TOTAL sweep core budget (= --cores N);
                                                      #   rejected on a parallel base (cores = cells there)
                  "sampling_window": int,             # default 1000
                  "target_cycles": float,             # default 1.0025e9 -- set it for real runs
                  "burn_in": int,                     # default 0
                  "traj_every": int,                  # default 0 (off)
-                 "checkpoint_every": int,            # default 1
-                 "log_flush_interval": float,        # default 0.0 = flush every row (unchanged). Seconds:
-                                                     #   a TIME FLOOR between log flushes, so the log only
-                                                     #   batches when rows arrive faster than this. Bounds
-                                                     #   the loss window in time, not in rows. Only worth
-                                                     #   setting for tiny sampling_window; measured, the log
-                                                     #   is 0.02% of runtime at the default cadence
-                 "log_columns": list,                # which COLUMN GROUPS the run log carries. The set is
-                 "log_drop": list,                   #   a function of the run -- a column is written when
-                                                     #   the run can put a nonzero value in it -- and these
-                                                     #   two narrow it further. Groups: core and species are
-                                                     #   forced; state, moves, clique, clique_acc optional.
-                                                     #   log_columns lists what to keep, log_drop what to
-                                                     #   remove; giving both raises. Default is every group
-                                                     #   the run can fill, which for a single-species muVT
-                                                     #   run is exactly the historical layout.
-                 "esjd": bool,                       # default false. Record the expected squared jump
-                                                     #   distance in the window summary and the log:
-                                                     #   esjd_dNsq (sum (dN)^2 over PROPOSED MOVES, which on this
-                                                     #   engine is the accepted exchange count, since an
-                                                     #   exchange moves N by +/-1 at every depth) and
-                                                     #   esjd_drsq (sum of squared translation displacement,
-                                                     #   minimum imaged). Divide either by wall_s for the
-                                                     #   per-second form. MEASUREMENT: it changes nothing
-                                                     #   the chain does and never reaches the run id.
+                 "checkpoint_every": int,            # default 10
                  "seed": int, "initial_config": str,
                                                      #   a path (file or equilibrated library), or the
                                                      #   literal token "grid" / "grid:<eta>" to bootstrap
@@ -211,9 +159,6 @@ of this block is examples/schema.json, which validation uses.
                                                      #   interaction reach and cell_length+buffer must fit box
                  "control_gain": float, "control_gain_tau": float, "control_window": int,
                                                      # muVT target controller; defaults 0.5 / 20.0 / 20
-                 "x_spacing": float, "y_spacing": float,  # DEPRECATED and INERT (accepted + warned): they
-                                                     #   feed only the verbatim 2D grid_up_the_system, which
-                                                     #   the engine no longer calls
                  "sweep_label": str}                 # written BY the launcher into each expanded run
 }
 
@@ -450,25 +395,6 @@ _MAIN = {"hard_core", "lennard_jones"}
 #: it is stated here, in the schema and in the refusal messages -- not left
 #: implied -- because every params file written before this field existed relies
 #: on it.
-#: The exponent policy for the pmf selection bias. `fixed` reads the nine
-#: fitted per-level numbers in `_GAMMA_AUX_2D` / `_GAMMA_AUX_3D`; `adaptive`
-#: solves one exponent per Rosenbluth level from the trial weights to hit a
-#: target participation fraction. Two values and not a boolean, because a third
-#: policy (perplexity in place of the participation ratio) is a one-line swap in
-#: `sampling.participation` and would need a name rather than a second flag.
-_GAMMA_MODES = {"fixed", "adaptive"}
-#: How the spread of a level's trial weights is measured. Named rather than a
-#: boolean because a third measure is a function and an entry in
-#: `sampling.participation.CRITERIA`, and because a run's log should say which
-#: one it used in words.
-_GAMMA_CRITERIA = {"participation", "perplexity"}
-#: How the exponent is obtained. `moments` solves the second-order expansion of
-#: the spread in closed form; `grid` evaluates the spread at 17 candidate
-#: exponents and takes the closest. Named and not a boolean for the reason above,
-#: and kept as a key at all because the grid was the measured cost of the method
-#: (13% of move time) and a run that wants to show the closed form loses nothing
-#: has to be able to ask for the thing it is compared against.
-_GAMMA_SOLVERS = {"moments", "grid"}
 _ENGINES = {"metropolis_dynamics", "glauber_dynamics", "suwa_todo_dynamics"}
 _ENGINE_DEFAULT = "metropolis_dynamics"
 #: THE TWO LADDER DYNAMICS, which are siblings and not a parent and a variant.
@@ -509,73 +435,30 @@ _SAMPLERS = {
 #: Which keys of the `sampler` block each sampler actually READS, and one line
 #: saying what its trial region is so a refusal can explain itself.
 #:
-#: WHY THIS IS A TABLE. It used to be a union: `_check` accepted every sampler
-#: key for every sampler, and each sampler then refused, one at a time and in
-#: four different places, the subset someone had thought to write a message for.
-#: The keys nobody had written a message for were accepted and ignored -- and
-#: `channel_length` and `channel_width` are in `_IDENTITY_FIELDS`, so they were
-#: not merely ignored, they reached the RUN ID. Measured, hard core, one seed,
-#: 400 cycles:
-#:
-#:     rosenbluth, no channel keys       trajectory cec73cf7309c   id 65d0fb249188
-#:     rosenbluth, channel_length = 5    trajectory cec73cf7309c   id c1ac02cead40
-#:     rosenbluth, channel_length = 6    trajectory cec73cf7309c   id 362f95b2cc6a
-#:     rosenbluth, channel_width  = 1.8  trajectory cec73cf7309c   id 73d66d2ff8c9
-#:
-#: One chain, four run directories. A sweep over a key the sampler cannot read
-#: produces N directories of the same chain, and nothing in the output says so --
-#: they would be averaged as independent measurements at different settings.
+#: WHY THIS IS A TABLE. A key the sampler cannot read must be refused, not
+#: ignored: `channel_length` and `channel_width` are in `_IDENTITY_FIELDS`, so an
+#: ignored one still reaches the RUN ID, and a sweep over it produces N
+#: directories of the same chain that nothing marks as such -- they would be
+#: averaged as independent measurements at different settings.
 #:
 #: So the sampler names its keys once, here, and everything outside its own row
 #: is refused by the same mechanism for every sampler. What remains as a separate
 #: check is only what a table cannot express: CONFLICTS between two keys the
 #: sampler does read (trials XOR trial_density, depth XOR full_repacking).
-#: GEOMETRY ONLY, now that `depth` and `full_repacking` live under `engine`.
-#: What is left is one question -- where do trial points come from -- which is
+#: GEOMETRY ONLY: `depth` and `full_repacking` live under `engine`. What is
+#: left is one question -- where do trial points come from -- which is
 #: what `sampler.type` selects and therefore the only thing its keys should
 #: describe.
 _CAVITY_KEYS = frozenset({"trials", "trial_density", "trial_box_side"})
-#: Empty, kept as a name so the rows below still read as "geometry + dynamics".
-#: `engine` is its own top-level block: it is not a sampler key, and the two
-#: questions it and `sampler.type` answer are orthogonal -- every dynamics runs
-#: over every sampler that can supply it a pool.
-_ENGINE_KEY: frozenset[str] = frozenset()
-#: The adaptive-gamma pair, and ONLY `rosenbluth` reads it. The exponent is a
-#: property of a level loop over a weighted trial cloud: `metropolis` draws one
-#: trial, the clique samplers score a whole pool by a dynamic program with no
-#: per-level exponent, and `reweight` selects on psi6. Listing the keys against
-#: the one sampler that reads them is what makes the refusal for the others come
-#: out of `_check_sampler` with the axis already named, rather than needing a
-#: separate check further down that says the same thing worse.
-_GAMMA_KEYS = frozenset({"gamma_mode", "pr_target", "gamma_criterion", "gamma_solver"})
 _SAMPLER_KEYS: dict[str, tuple[frozenset[str], str]] = {
     # Standard GCMC: one uniform trial insertion, no cavity, no trial cloud.
-    "metropolis": (_ENGINE_KEY, "it proposes one uniform insertion and no cloud"),
-    "rosenbluth": (
-        _CAVITY_KEYS | _ENGINE_KEY | _GAMMA_KEYS,
-        "its trial region is a cube of side trial_box_side, and it is the only "
-        "sampler with a per-level selection over a cloud for gamma_mode to act "
-        "on",
-    ),
-    # `branch` is the second sampler that can run a ladder engine, and it still
-    # does not read `kmax_margin`. The margin raises kmax above the body's
-    # Steiner packing bound, and for a CUBE that bound already exceeds the pool
-    # size, so `kmax = min(M, bound + margin)` is M for every margin. A knob that
-    # cannot change the chain must not reach the run id.
-    "branch": (
-        _CAVITY_KEYS | _ENGINE_KEY,
-        "its trial region is a cube of side trial_box_side",
-    ),
-    "reweight": (
-        _CAVITY_KEYS | _ENGINE_KEY,
-        "its trial region is a cube of side trial_box_side",
-    ),
+    "metropolis": (frozenset(), "it proposes one uniform insertion and no cloud"),
+    "rosenbluth": (_CAVITY_KEYS, "its trial region is a cube of side trial_box_side"),
+    "branch": (_CAVITY_KEYS, "its trial region is a cube of side trial_box_side"),
+    "reweight": (_CAVITY_KEYS, "its trial region is a cube of side trial_box_side"),
     # The rod: an oriented cuboid, so a cube side means nothing to it.
-    # `kmax_margin` is the Glauber engine's one tunable and only this sampler can run
-    # that engine, so only this sampler reads it.
     "channel": (
-        frozenset({"trials", "trial_density", "channel_length", "channel_width"})
-        | _ENGINE_KEY,
+        frozenset({"trials", "trial_density", "channel_length", "channel_width"}),
         "its trial region is an oriented cuboid of channel_length x channel_width",
     ),
 }
@@ -653,6 +536,233 @@ def _check_engine(eng: dict[str, Any], engine: str) -> None:
         )
 
 
+def ladder_window(
+    *,
+    engine: str,
+    ladder: bool,
+    branch_cavity: bool,
+    n_trials: int,
+    channel_length: float,
+    channel_width: float,
+    trial_box_side: float,
+    trial_density: float,
+    kmax_margin: int,
+    channel_full: bool,
+    dim: int,
+    box: float,
+    uc: float,
+    diameter: float,
+    lj: bool,
+) -> tuple[float, float, int, int]:
+    """The ladder window: (channel_length, channel_width, M, kmax), with refusals.
+
+    `from_params` and the rigid-framework driver both size a ladder window here,
+    so a window the bulk engine would refuse (periodic guard, transfer-matrix
+    frame, cavity cost budget) is refused identically in a framework, and M and
+    kmax are the same derived numbers for the same inputs. Under `sampler=branch`
+    the cube cavity is the cuboid with L == w == trial_box_side, which is why the
+    body dimensions come back out. Off the ladder engines it returns M = kmax = 0
+    and changes nothing.
+    """
+    window_M = 0
+    window_kmax = 0
+    if ladder and branch_cavity:
+        # THE CUBE CAVITY IS A CUBOID WITH L == w. Everything downstream --
+        # `ChannelBody.build`, `volume()`, `members()`, `trial_cloud()`,
+        # `cuboid_packing_bound` -- is written for an oriented cuboid and needs
+        # no cube-specific case, so the whole of `sampler=branch` under a ladder
+        # engine is this one line plus the sweep. `trial_box_side` stays the user
+        # -facing name because it is the name the Metropolis path already uses for
+        # the same length, and a second name for one number is how a sweep ends up
+        # comparing a run against itself.
+        channel_length = channel_width = trial_box_side
+        assert_channel_guard(
+            channel_length, channel_width, dim, box, uc, span_name="box"
+        )
+    if ladder:
+        window_M = int(n_trials)
+        # THE FULL-SPAN ROD SIZES BOTH FROM THE LONGEST CHORD, not from a
+        # configured length it does not have. `window_M` and `window_kmax` are
+        # CEILINGS there rather than the per-move numbers: each move takes its
+        # own body length from the chord and the image guard, draws
+        # `trial_density * V_W` trials for THAT body, and the ladder truncates
+        # itself above the largest clique the body admits. Sizing on the body
+        # diagonal is what makes the ceiling hold for every orientation.
+        _kmax_len = channel_length
+        if channel_full:
+            _kmax_len = box * (float(dim) ** 0.5)
+        _bound = cuboid_packing_bound(_kmax_len, channel_width, dim, diameter)
+        window_kmax = min(window_M, int(math.ceil(_bound)) + kmax_margin)
+        if not (1 <= window_kmax <= window_M):
+            raise ValueError(
+                f"engine={engine} needs 1 <= kmax <= M, derived "
+                f"kmax={window_kmax} and M={window_M} from trial_density="
+                f"{trial_density:g} on a {_kmax_len:g} x {channel_width:g} "
+                f"body (V_W = {_kmax_len * channel_width ** (dim - 1):g}). "
+                "M is round(trial_density * V_W), so raise sampler.trial_density "
+                "until the pool can hold at least one particle."
+            )
+        # WHY THERE IS NO "M IS BELOW THE PACKING BOUND" REFUSAL HERE. The
+        # bound is a rigorous over-estimate and, for a thin body, a loose one
+        # (`cuboid_packing_bound` says by how much), so requiring M above it
+        # would demand a `trial_density` the lambda <= 4 rule below then
+        # refuses -- two rules contradicting each other over a number neither
+        # measures. What matters is whether the chain ever REACHES an occupancy
+        # the pool cannot hold, and that is measured rather than predicted:
+        # `cut_M` and `cut_k` count every such window, and
+        # G3.4 asserts both are identically zero on the hard-core path. A
+        # physical channel occupancy is far below M at any realistic
+        # trial_density, so they are zero -- and if they are not, the counter
+        # says so in the log instead of an estimate saying so at setup.
+        # TRIALS PER EVICTION WINDOW, which is the quantity the DP's cost is
+        # actually a function of. The old rule counted trials per SIGMA, and
+        # sigma is not a length the sweep ever measures anything against: what
+        # sets the state frame is `_window_structure(x, reach)`, and on the LJ
+        # path `reach` is `upper_cutoff`. A rule written in sigma was therefore
+        # a rule about rc with the conversion factor left implicit, which is why
+        # it had to be recalibrated by hand every time rc moved.
+        #
+        # Two separate things are being bounded here and they were one number:
+        #
+        #   THE WALL. `_enumerate` holds the retained set in an int64, so a
+        #   frame wider than `_MAX_FRAME = 62` trials raises `_TooWide` and the
+        #   sweep falls back to the dict DP. That fallback is CORRECT and
+        #   silent, which is the problem: a run that crosses the wall gets
+        #   slower by orders of magnitude and says nothing. The frame occupancy
+        #   is a count of trials in a window of width `reach`, so it fluctuates
+        #   around `lambda_rc`; the refusal uses a tail allowance rather than
+        #   the mean, because one wide frame in a run is enough to trigger the
+        #   fallback for that window.
+        #
+        #   THE COST. Below the wall the state count still grows steeply with
+        #   the frame, so there is a scoping cap as well. It sits where it does
+        #   because of what PRUNING changed: the frame now holds only trials
+        #   that can hold a molecule, so at loading it is a fraction of the
+        #   geometric count, and the old cap was calibrated on a sweep that
+        #   carried every blocked row. Measured after pruning, ESJD per CPU
+        #   second was still rising at twice the old cap (89 -> 101 at mu = -1).
+        #
+        # THE BOUND IS GEOMETRIC, SO IT IS CONSERVATIVE. `window_M` counts every
+        # trial drawn, placeable or not, and pruning can only lower the number
+        # that reaches the frame. A config that passes here cannot be made to
+        # fail by the exterior being crowded.
+        #
+        # LJ path only: the hard-core sweep's eviction window is the contact
+        # distance, so `lambda_rc` is `lambda_sigma` there and never binds.
+        if branch_cavity:
+            # THE CAVITY'S COST RULE, and it is a different quantity from the
+            # rod's lambda. Lambda <= 4 bounds the TRANSFER MATRIX's state count,
+            # which widens with the eviction window; the cavity has no transfer
+            # matrix and no eviction window. What it has is `_wsum`, whose cost
+            # grows with the pool size AND with the cavity side -- the side sets
+            # how large a clique can be, and the top rungs are where the time
+            # goes. The empty rungs above the largest clique are nearly free (the
+            # recursion dies at its first level), which is why `kmax = M` costs
+            # no more than `kmax = the true capacity` and why there is no
+            # truncation knob here.
+            #
+            # MEASURED, one full ladder over k = 0..M, a cube at rc = 3.0,
+            # T* = 1.5, single core (ms):
+            #
+            #     a \ M     10     15     20     25     30     40      50
+            #       1.50    1.1    1.8    4.3     12     15     36     117
+            #       1.75    0.6    2.4     12     40    188    549    1048
+            #       2.00    1.3    7.6     14     65    595   2919    2554
+            #       2.25    1.2    5.3     26    195   1273   3738       -
+            #       2.50    2.2    9.6     65    236   1882  34220       -
+            #
+            # Least squares on those 36 points gives ms ~ M^(2.9 + 1.2a) / 2.3e5
+            # to within a factor of about three either way, which is the accuracy
+            # a refusal needs: it exists to stop a 47-second-per-move launch, not
+            # to tune anything. The run log's `wall_s` is the real number.
+            _ms = float(window_M) ** (2.9 + 1.2 * channel_length) / 2.3e5
+            if _ms > 25.0:
+                raise ValueError(
+                    f"engine={engine} on sampler=branch estimates {_ms:.3g} ms "
+                    f"per window move at M={window_M} in a "
+                    f"{channel_length:g}-cube, against a budget of 25 ms (the "
+                    "fit is good to about 3x either way). The clique ladder "
+                    "costs roughly M^(2.9 + 1.2 * trial_box_side). Lower "
+                    "sampler.trial_density or sampler.trial_box_side -- the side "
+                    "is the harsher of the two, since it sets how large a clique "
+                    "can be. This is a COST bound, not a scoping one: the ladder "
+                    "stays exact at any M and any cavity size."
+                )
+        if lj and not branch_cavity:
+            # Expected trials whose axial coordinate lies within `reach` of a
+            # given one, i.e. the mean occupancy of one DP frame. The full-span
+            # rod has no configured length to divide by, and does not need one:
+            # the quantity is a LINEAR density times a radius, and
+            # `trial_density * w**(dim-1)` is that linear density at any body
+            # length. For a fixed rod the two forms agree up to the rounding of
+            # M, and the fixed one is kept so its refusals do not move.
+            _lambda_rc = (
+                trial_density * channel_width ** (dim - 1) * uc
+                if channel_full
+                else window_M * uc / channel_length
+            )
+            # Poisson-ish fluctuation about that mean; five standard deviations
+            # of headroom before the int64 frame, which is cheap insurance
+            # against a silent fallback that costs orders of magnitude.
+            _frame_hi = _lambda_rc + 5.0 * math.sqrt(max(_lambda_rc, 1.0))
+            _max_density = _LAMBDA_RC_CAP / (uc * channel_width ** (dim - 1))
+            if _frame_hi >= _MAX_DP_FRAME:
+                raise ValueError(
+                    f"engine={engine} would put about {_lambda_rc:.1f} trials in "
+                    f"one eviction window (trial_density={trial_density:g}, "
+                    f"channel_width={channel_width:g}, upper_cutoff={uc:g}), "
+                    f"and allowing for fluctuation that "
+                    f"reaches {_frame_hi:.0f} against the transfer matrix's "
+                    f"{_MAX_DP_FRAME}-trial state frame. Above the frame the "
+                    "sweep silently falls back to the dictionary DP, which is "
+                    "correct and orders of magnitude slower, so this is refused "
+                    "rather than left to be discovered in a timing. Lower "
+                    f"sampler.trial_density to at most {_max_density:.4g} or "
+                    "lengthen the rod."
+                )
+            if _lambda_rc > _LAMBDA_RC_CAP + 1e-9:
+                raise ValueError(
+                    f"engine={engine} refuses {_lambda_rc:.2f} trials per "
+                    f"eviction window (trial_density={trial_density:g}, "
+                    f"channel_width={channel_width:g}, upper_cutoff={uc:g}, "
+                    f"i.e. {_lambda_rc * diameter / uc:.2f} per sigma); the "
+                    f"limit is {_LAMBDA_RC_CAP:g}. With the selection radius "
+                    "forced to run.upper_cutoff (section 1.2) the eviction "
+                    "window is rc wide, and the state count grows steeply in "
+                    "the frame occupancy. Lower sampler.trial_density to at "
+                    f"most {_max_density:.4g} or lengthen the rod. This is a "
+                    "scoping rule, not a tunable: raise it with a measurement "
+                    "of ESJD per CPU second, not with a guess."
+                )
+    return channel_length, channel_width, window_M, window_kmax
+
+
+def assert_channel_width(channel_width: float, diameter: float) -> None:
+    """The rod's cross-section must lie in [sigma, 2 sigma]."""
+    if not (diameter <= channel_width <= 2.0 * diameter + 1e-9):
+        raise ValueError(
+            f"channel_width must lie in [sigma, 2 sigma] = "
+            f"[{diameter}, {2 * diameter}]; got {channel_width}"
+        )
+
+
+def channel_trial_count(
+    trial_density: float, channel_length: float, channel_width: float, dim: int
+) -> int:
+    """Trials in a fixed rod: density per unit measure x the L x w^(dim-1) body."""
+    return int(round(trial_density * channel_length * channel_width ** (dim - 1)))
+
+
+def cavity_trial_count(
+    trial_density: float, trial_box_side: float, dim: int, diameter: float
+) -> int:
+    """Trials in a cube cavity. `trial_density` is REDUCED here: molecules per
+    unit measure in units of one molecule's own measure (disk or sphere)."""
+    radius = 0.5 * diameter
+    unit = math.pi * radius * radius if dim == 2 else (4.0 / 3.0) * math.pi * radius**3
+    return int((trial_density * trial_box_side**dim) / unit)
+
+
 def assert_channel_guard(
     channel_length: float,
     channel_width: float,
@@ -720,9 +830,9 @@ def _check_sampler(smp: dict[str, Any], sampler: str) -> None:
         )
 
 
-#: `channel_length` spellings that used to select the EXACT cyclic rod, whose
-#: two ends meet through the boundary and whose sweep scores that seam. They
-#: stay refused, and they are not aliases of "full": "full" is the same chord
+#: `channel_length` spellings of the EXACT cyclic rod, whose two ends meet
+#: through the boundary and whose sweep scores that seam. They are refused, and
+#: they are not aliases of "full": "full" is the same chord
 #: with a frozen gap in it, which is an open rod and a different move.
 _LEGACY_CYCLIC_SPELLINGS = ("cyclic", "box", "full_box", "span")
 
@@ -896,11 +1006,6 @@ class Config:
     min_g3: float | None
     g3_r_cut: float | None
     g3_reader: str | None
-    gamma_mode: str | None
-    pr_target: float | None
-    gamma_criterion: str | None
-    gamma_solver: str | None
-    esjd: bool
     # derived
     two_dim: bool
     parallel: bool
@@ -940,16 +1045,11 @@ class Config:
     # with its own directory (two seeds are two independent chains, never the
     # same experiment). None means an unseeded (nondeterministic) chain.
     seed: int | None
-    x_spacing: float | None
-    y_spacing: float | None
     sampling_window: int
     target_cycles: float
     burn_in: int
     traj_every: int
     checkpoint_every: int
-    log_flush_interval: float
-    log_columns: tuple[str, ...] | None
-    log_drop: tuple[str, ...] | None
     initial_config: str | None
     # quenched-annealed matrix: frozen obstacle positions the fluid cannot
     # overlap but which are never inserted/deleted/moved/counted. Default empty
@@ -1271,10 +1371,6 @@ def from_params(p: dict[str, Any]) -> Config:
             "trial_box_side",
             "channel_length",
             "channel_width",
-            "gamma_mode",
-            "pr_target",
-            "gamma_criterion",
-            "gamma_solver",
         },
         {"type"},
     )
@@ -1368,24 +1464,22 @@ def from_params(p: dict[str, Any]) -> Config:
     #: `sampler == "branch"` alone is not the question -- the Metropolis branch
     #: path is untouched by every one of them.
     branch_cavity = ladder and sampler == "branch"
-    if branch_cavity:
-        # `depth` and `full_repacking` are refused for every ladder dynamics by
-        # `_check_engine`, so nothing about the group size needs saying here.
-        # `kmax_margin` is refused only on THIS sampler, because it is a real
-        # key of the ladder and inert only on a cube: the margin raises kmax
-        # above the body's Steiner packing bound, and for a cube that bound
-        # already exceeds the pool size, so kmax = min(M, bound + margin) is M
-        # for every margin. The ladder truncates itself instead -- rungs above
-        # the largest clique the cavity admits come back at -inf and cost
-        # almost nothing.
-        if "kmax_margin" in eng:
-            raise ValueError(
-                f"engine.kmax_margin does nothing under sampler={sampler}: a "
-                "cube's Steiner packing bound already exceeds the pool size, "
-                f"so kmax is M ({sampler} sets it from trial_box_side and "
-                "trial_density) whatever the margin. Remove it, or use "
-                "sampler=channel, whose rod has a bound the margin can bite on."
-            )
+    # `depth` and `full_repacking` are refused for every ladder dynamics by
+    # `_check_engine`, so nothing about the group size needs saying here.
+    # `kmax_margin` is refused only on the branch cavity, because it is a real
+    # key of the ladder and inert only on a cube: the margin raises kmax above
+    # the body's Steiner packing bound, and for a cube that bound already
+    # exceeds the pool size, so kmax = min(M, bound + margin) is M for every
+    # margin. The ladder truncates itself instead -- rungs above the largest
+    # clique the cavity admits come back at -inf and cost almost nothing.
+    if branch_cavity and "kmax_margin" in eng:
+        raise ValueError(
+            f"engine.kmax_margin does nothing under sampler={sampler}: a "
+            "cube's Steiner packing bound already exceeds the pool size, "
+            f"so kmax is M ({sampler} sets it from trial_box_side and "
+            "trial_density) whatever the margin. Remove it, or use "
+            "sampler=channel, whose rod has a bound the margin can bite on."
+        )
 
     # Only this sampler's keys, from here on. Every check below is one this
     # sampler can actually fail.
@@ -1403,8 +1497,8 @@ def from_params(p: dict[str, Any]) -> Config:
     full_repacking = _as_bool(eng.get("full_repacking", False), "engine.full_repacking")
     #: THE EXCHANGE GROUP SIZE, bound once. Only `metropolis_dynamics` reads it
     #: -- `_check_engine` has already refused the key under the ladder dynamics,
-    #: so this is 0 there by construction rather than by a guard someone has to
-    #: remember at each of the five sites that used to read `smp["depth"]`.
+    #: so this is 0 there by construction rather than by a guard at each site
+    #: that reads it.
     depth_cfg = int(eng.get("depth", 0))
     if full_repacking and "depth" in eng:
         raise ValueError(
@@ -1439,10 +1533,9 @@ def from_params(p: dict[str, Any]) -> Config:
 
     # ---- ensemble ----
     ens = p["ensemble"]
-    # Ahead of `_check`, so a params file written for the previous stage gets the
-    # replacement named instead of "unknown keys [...]". A retired key is the one
-    # case where the generic message is the wrong one: the reader already knows
-    # the key, and what they need is what it became.
+    # Ahead of `_check`, so a retired key gets its replacement named instead of
+    # "unknown keys [...]": the reader already knows the key, and what they need
+    # is what it became.
     if "fixed_composition" in ens:
         raise ValueError(
             "ensemble.fixed_composition is gone; the ensemble name carries the "
@@ -1457,7 +1550,6 @@ def from_params(p: dict[str, Any]) -> Config:
             "mu",
             "fugacity",
             "z",
-            "sweep",
             "dimension",
             "box",
             "type",
@@ -1641,13 +1733,6 @@ def from_params(p: dict[str, Any]) -> Config:
         # single-species one, where it is the same number for every particle and
         # cancels in the repack. Hence the split below rather than one rule.
         if typed:
-            if "sweep" in ens:
-                raise ValueError(
-                    "ensemble.sweep is the scalar-mu sweep and a typed run has "
-                    "one mu per species; sweep a typed state point by giving a "
-                    "LIST OF MAPS to ensemble.mu/.fugacity/.z and launching with "
-                    "gcmc.run.launcher"
-                )
             if nvt_typed:
                 # CANONICAL: N_A and N_B are both fixed, by the start file, and
                 # nothing in the chain can change them. An activity ratio would
@@ -1713,10 +1798,9 @@ def from_params(p: dict[str, Any]) -> Config:
                 # work here, since N is fixed; the common factor cancels in the
                 # repack exactly as the single-species prefactor does.
                 one_route(ens)
-        elif "mu" in ens or "sweep" in ens:
+        elif "mu" in ens:
             raise ValueError(
-                f"ensemble.type={ens_type!r} takes no 'mu'/'sweep' (N is fixed, "
-                "mu undefined)"
+                f"ensemble.type={ens_type!r} takes no 'mu' (N is fixed, mu undefined)"
             )
         has_n, has_pf = "N" in ens, "packing_fraction" in ens
         if has_n == has_pf:
@@ -1750,7 +1834,7 @@ def from_params(p: dict[str, Any]) -> Config:
         if len(target_keys) > 1:
             raise ValueError(f"give only one target, got {target_keys}")
         targeting = len(target_keys) == 1
-        has_mu, has_sweep = "mu" in ens, "sweep" in ens
+        has_mu = "mu" in ens
 
         if typed:
             # The typed state point is n numbers, one per species, and it is
@@ -1764,17 +1848,9 @@ def from_params(p: dict[str, Any]) -> Config:
                     "the chemical potentials, never an input (M2). Give "
                     "ensemble.mu / .fugacity / .z as a map instead."
                 )
-            if has_sweep:
-                raise ValueError(
-                    "ensemble.sweep is the scalar-mu sweep. Sweep a typed state "
-                    "point by giving a LIST OF MAPS to ensemble.mu/.fugacity/.z "
-                    "and launching with gcmc.run.launcher, which expands it."
-                )
             one_route(ens)  # exactly one route, named error if not
             mu = None  # finalized from the species spec below
         elif targeting:
-            if has_sweep:
-                raise ValueError("a target and a 'sweep' are mutually exclusive")
             for k in ("target_eta", "target_density", "target_N"):
                 if isinstance(ens.get(k), list):
                     raise ValueError(f"ensemble.{k} must be a single value, not a list")
@@ -1784,23 +1860,16 @@ def from_params(p: dict[str, Any]) -> Config:
             _target_spec = target_keys[0], float(ens[target_keys[0]])
             mu = float(ens["mu"]) if has_mu else None  # finalized after volume
         else:
-            if has_mu and has_sweep:
-                raise ValueError("ensemble takes either 'mu' or 'sweep', not both")
-            if not has_mu and not has_sweep:
+            if not has_mu:
                 raise ValueError(
-                    "ensemble needs 'mu', a target "
-                    "(target_eta/target_density/target_N), or 'sweep'"
+                    "ensemble needs 'mu' or a target "
+                    "(target_eta/target_density/target_N)"
                 )
             if isinstance(ens.get("mu"), list):
                 raise ValueError(
                     "ensemble.mu is a list (a sweep) but a single run got it "
                     "unexpanded. Launch sweeps with `python -m gcmc.run.launcher`; if "
                     "you did, gcmc/run/launcher.py on this machine is outdated."
-                )
-            if has_sweep:
-                raise ValueError(
-                    "this config has a 'sweep'; launch it with gcmc.run.launcher, "
-                    "which expands it into one run per mu"
                 )
             mu = float(ens["mu"])
 
@@ -1889,12 +1958,28 @@ def from_params(p: dict[str, Any]) -> Config:
 
     # ---- run ----
     run = p.get("run", {})
+    _retired = {
+        "esjd": "the log always carries translate_sum_dr2, and the number "
+        "change per move is in the move counters",
+        "log_columns": "the log carries a fixed set of raw columns",
+        "log_drop": "the log carries a fixed set of raw columns",
+        "log_flush_interval": "every row is flushed",
+        "n_workers": "cores are implied by run.n_cell",
+        "x_spacing": "it was inert",
+        "y_spacing": "it was inert",
+    }
+    _old = sorted(set(_retired) & set(run))
+    if _old:
+        raise ValueError(
+            "retired run key(s) "
+            + "; ".join(f"{k!r} ({_retired[k]})" for k in _old)
+            + ". Delete them from the params file."
+        )
     _check(
         run,
         {
             "kind",
             "n_cell",
-            "n_workers",
             "n_cores",
             "sampling_window",
             "target_cycles",
@@ -1911,16 +1996,10 @@ def from_params(p: dict[str, Any]) -> Config:
             "no_neigh",
             "cell_length",
             "buffer",
-            "x_spacing",
-            "y_spacing",
             "control_gain",
             "control_gain_tau",
             "control_window",
             "sweep_label",
-            "log_flush_interval",
-            "log_columns",
-            "log_drop",
-            "esjd",
         },
     )
 
@@ -1958,26 +2037,6 @@ def from_params(p: dict[str, Any]) -> Config:
                 "from `run` or drop potential.species_file"
             )
 
-    # Deprecated run keys: accepted and warned for one release, then removed
-    # (parallel_input_plan.md D5). They are IGNORED, not honoured -- keeping them
-    # working would be the "something in between" the two submission modes that
-    # D5 rules out.
-    for _dep, _why in (
-        (
-            "n_workers",
-            "cores are implied by the cell count (one cell is one core); "
-            "set run.n_cell instead",
-        ),
-        ("x_spacing", "it fed only the retired verbatim 2D grid, and is inert"),
-        ("y_spacing", "it fed only the retired verbatim 2D grid, and is inert"),
-    ):
-        if _dep in run:
-            log.warning(
-                "run.%s is deprecated and IGNORED: %s. It will be removed in a "
-                "future release.",
-                _dep,
-                _why,
-            )
     if int(run.get("traj_every", 0)) < 0:
         raise ValueError(
             "run.traj_every must be >= 0 (0 = save only the last "
@@ -1993,6 +2052,13 @@ def from_params(p: dict[str, Any]) -> Config:
         raise ValueError("reweight requires a hard_core main potential")
     if parallel and reweight:
         raise ValueError("parallel does not wire the reweight (psi6) mode")
+    if parallel and lj and sampler in ("branch", "channel") and not pmf:
+        raise ValueError(
+            "parallel does not wire Lennard-Jones with sampler.type="
+            f"'{sampler}': the cell kernel computes LJ energies only for the "
+            "metropolis/rosenbluth potential, so this run would sample hard "
+            "spheres at lower_cutoff. Use run.kind='single'."
+        )
     if parallel and confined:
         raise ValueError(
             "parallel does not wire confined pores: the domain decomposition "
@@ -2173,177 +2239,6 @@ def from_params(p: dict[str, Any]) -> Config:
                 f"nothing while still paying for the table lookup. Use a "
                 f"radius above 1, or drop the auxiliary block."
             )
-    # ---- adaptive gamma support matrix ------------------------------------
-    #
-    # `gamma_mode = "adaptive"` replaces the nine fitted pmf exponents with one
-    # target participation fraction, solved per Rosenbluth level from the trial
-    # weights (`sampling.participation`). It applies to EXACTLY ONE
-    # configuration: rosenbluth + the 3D pmf auxiliary under
-    # metropolis_dynamics, in the serial engine.
-    #
-    # Every rejection below names the AXIS and not just the value, following the
-    # short-range matrix above. The reason is that "adaptive gamma is not
-    # supported here" is useless to someone holding a params file: what they
-    # need to know is which of the five things they wrote is the one that rules
-    # it out, and whether it is a missing feature or a category error.
-    #
-    # Refusing rather than ignoring, and refusing HERE rather than in the
-    # engine, is M15: a combination the validator accepts and the first window
-    # raises on has already made a run directory and opened a log.
-    # ABSENT IS NOT THE SAME IDENTITY AS "fixed", and that is deliberate.
-    #
-    # `identity_dict` drops any physics field whose value is None, so a params
-    # file that never mentions `gamma_mode` hashes exactly as it did before this
-    # key existed and keeps its run directory. Writing "fixed" explicitly means
-    # the same chain under a different run id, which is the convention `min_g3`
-    # already set at stage 1: inheriting a default and pinning it deliberately
-    # are different experiments even when they are the same arithmetic.
-    #
-    # The alternative -- defaulting to the string "fixed" -- would move EVERY
-    # existing run id, the way adding `engine` did. That was accepted then
-    # because there was no honest absent value: a run really does have a
-    # dynamics. A run that never asked for adaptive gamma has no gamma mode at
-    # all, so None is not a dodge, it is the truth.
-    gamma_mode = None if "gamma_mode" not in smp else str(smp["gamma_mode"])
-    if gamma_mode is not None and gamma_mode not in _GAMMA_MODES:
-        raise ValueError(
-            f"unknown sampler.gamma_mode {gamma_mode!r}; allowed "
-            f"{sorted(_GAMMA_MODES)}. 'fixed' reads the fitted per-level "
-            f"exponents; 'adaptive' solves one per level for a target "
-            f"participation fraction (sampler.pr_target)."
-        )
-    adaptive_gamma = gamma_mode == "adaptive"
-    stray_gamma = sorted({"pr_target", "gamma_criterion", "gamma_solver"} & set(smp))
-    if stray_gamma and not adaptive_gamma:
-        raise ValueError(
-            f"sampler.{stray_gamma} are adaptive-gamma keys and gamma_mode is "
-            f"{gamma_mode!r}, which reads the fitted exponents instead. Add "
-            '"gamma_mode": "adaptive", or drop them.'
-        )
-    if gamma_override is not None and adaptive_gamma:
-        # Two sources of truth for one number. The adaptive mode exists to
-        # REPLACE the stated exponents by solving them per level, so a params
-        # file that states both has not decided which experiment it is running,
-        # and whichever one won would be invisible in the log.
-        raise ValueError(
-            "auxiliary.gamma states the exponents and "
-            "sampler.gamma_mode='adaptive' solves them per level from the trial "
-            "weights; a run cannot do both. Drop auxiliary.gamma to solve, or "
-            'drop "gamma_mode": "adaptive" to use the stated values.'
-        )
-    if "pr_target" in smp and not adaptive_gamma:
-        # the same failure the short_range stray-key check prevents: a key that
-        # is read by nothing, in a file whose author believes it is in force
-        raise ValueError(
-            "sampler.pr_target is an adaptive-gamma key and gamma_mode is "
-            f"{gamma_mode!r}, which reads the fitted exponents instead. Add "
-            '"gamma_mode": "adaptive", or drop pr_target.'
-        )
-    if adaptive_gamma:
-        if "pr_target" not in smp:
-            raise ValueError(
-                "sampler.gamma_mode='adaptive' requires sampler.pr_target: the "
-                "target participation fraction PR / k, in (0, 1], e.g. 0.4. "
-                "There is no default, because the whole point of the mode is "
-                "that the exponent follows from a stated target rather than "
-                "from a number nobody chose."
-            )
-        if isinstance(smp["pr_target"], list):
-            raise ValueError(
-                "sampler.pr_target is a list (a sweep), but a single run got it "
-                "unexpanded. Launch sweeps with `python -m gcmc.run.launcher` "
-                "(not `gcmc run`); if you already did, the launcher on this "
-                "machine is an older version that does not expand 'pr_target' "
-                "-- update gcmc/run/launcher.py."
-            )
-        gamma_criterion_val = str(smp.get("gamma_criterion", "participation"))
-        if gamma_criterion_val not in _GAMMA_CRITERIA:
-            raise ValueError(
-                f"unknown sampler.gamma_criterion {gamma_criterion_val!r}; "
-                f"allowed {sorted(_GAMMA_CRITERIA)}. 'participation' measures "
-                f"the spread of the trial weights by PR = (sum w)^2 / sum w^2, "
-                f"'perplexity' by exp(-sum p log p). Both run 1 to k and both "
-                f"read 1 on flat weights, so pr_target means the same kind of "
-                f"thing under either; they differ in how hard one dominant "
-                f"trial pulls them down."
-            )
-        gamma_solver_val = str(smp.get("gamma_solver", "moments"))
-        if gamma_solver_val not in _GAMMA_SOLVERS:
-            raise ValueError(
-                f"unknown sampler.gamma_solver {gamma_solver_val!r}; allowed "
-                f"{sorted(_GAMMA_SOLVERS)}. 'moments' solves the exponent in "
-                f"closed form from two weighted moments of log b; 'grid' "
-                f"evaluates the spread at 17 candidate exponents and takes the "
-                f"closest, which is where the method's cost was. Both answer "
-                f"the same question to within about a percent of pr_target, so "
-                f"'grid' is for the pilot run that shows that, not for "
-                f"production."
-            )
-        pr_target_val = float(smp["pr_target"])
-        if not (0.0 < pr_target_val <= 1.0):
-            raise ValueError(
-                f"sampler.pr_target must satisfy 0 < pr_target <= 1, got "
-                f"{pr_target_val!r}: it is a FRACTION of the trial pool "
-                f"(PR / k), not a gamma. The fitted exponents were 0.0037 to "
-                f"0.2903; a participation fraction of 0.29 is a legal but very "
-                f"aggressive target, and 2.0 is not a fraction at all."
-            )
-        # THE SAMPLER AXIS IS NOT CHECKED HERE. `_check_sampler` already ran
-        # (it is called on every params file, before any of this), and
-        # `_GAMMA_KEYS` is listed against `rosenbluth` alone, so any other
-        # sampler has already been refused by name with its own reason. A second
-        # check would be unreachable, and an unreachable refusal is worse than
-        # none: it reads as the live one and rots without failing.
-        assert sampler == "rosenbluth"
-        if engine != "metropolis_dynamics":
-            raise ValueError(
-                f"sampler.gamma_mode='adaptive' is a property of the "
-                f"Rosenbluth level loop and engine.type is {engine!r}. The "
-                f"ladder dynamics ({', '.join(_LADDER_ENGINES)}) draw the "
-                f"occupancy k from an exact conditional distribution over the "
-                f"whole window and never walk levels, so there is no per-level "
-                f"exponent to solve. This is the dynamics axis."
-            )
-        if not pmf:
-            raise ValueError(
-                "sampler.gamma_mode='adaptive' solves the exponent of the pmf "
-                "selection bias, and no pmf auxiliary is configured"
-                + (
-                    " (auxiliary.type='short_range' is the same potential at a "
-                    "shorter radius: no table, no exponent)."
-                    if short_range
-                    else " (add an `auxiliary` block with type='pmf')."
-                )
-                + " With no bias there is nothing for a participation target "
-                "to tune: the weights are the Boltzmann factors and their "
-                "participation is whatever it is."
-            )
-        if two_dim:
-            raise ValueError(
-                "sampler.gamma_mode='adaptive' is 3D-only. The 2D pmf "
-                "auxiliary is the analytic hard-disk g(r), which is 0 inside "
-                "the core by construction and has neither a table to floor nor "
-                "an interpolated bias to raise to a solved exponent. This is "
-                "the dimension axis: drop ensemble.dimension = 2, or drop "
-                "gamma_mode."
-            )
-        if parallel:
-            # NOT a category error, unlike the refusals above: the parallel
-            # engine runs the same Rosenbluth passes and the solve would mean
-            # exactly what it means serially. Its two `select_forward` /
-            # `select_reverse` call sites in `engine.cell_parallel` are simply
-            # not threaded yet, and an untested path that silently reads the
-            # fitted exponents while the config says otherwise is worse than a
-            # refusal.
-            raise ValueError(
-                "sampler.gamma_mode='adaptive' is not wired for run.kind="
-                "'parallel' yet: `engine.cell_parallel` has its own "
-                "select_forward / select_reverse call sites and they still "
-                "read the fitted exponents. Run it with run.kind='single', or "
-                "wire those two call sites. This is a missing feature on the "
-                "execution axis, not a physics restriction."
-            )
-
     # ---- short-range auxiliary support matrix -----------------------------
     # Deliberately narrow. Every rejection is a combination that is either
     # meaningless or simply untested; each is a separate, cheap relaxation later,
@@ -2363,39 +2258,11 @@ def from_params(p: dict[str, Any]) -> Config:
             raise ValueError(_unsupported)
         # The numeric guard needs lower_cutoff and uc, which are resolved later;
         # it lives immediately after them (search: "short-range auxiliary radius").
-    # The log's column selection. Validated HERE rather than in the runner so a
-    # typo is refused before the run directory exists -- M15, fail at the
-    # earliest layer that can see the problem. `select_columns` owns the rules
-    # (the two keys are mutually exclusive, the forced groups cannot be dropped,
-    # an unknown name raises); this call is what makes them apply at parse time.
-    _log_cols = run.get("log_columns")
-    _log_drop = run.get("log_drop")
-    for _key, _val in (("log_columns", _log_cols), ("log_drop", _log_drop)):
-        if _val is not None and not isinstance(_val, (list, tuple)):
-            raise ValueError(
-                f"run.{_key} is a LIST of column-group names, got {type(_val).__name__}"
-            )
-    from .runner import select_columns as _select_columns
-
-    _select_columns(
-        [],
-        include=None if _log_cols is None else tuple(_log_cols),
-        drop=None if _log_drop is None else tuple(_log_drop),
-    )
-    if float(run.get("log_flush_interval", 0.0)) < 0.0:
-        raise ValueError(
-            f"run.log_flush_interval is a time floor between log flushes in "
-            f"seconds and cannot be negative (got "
-            f"{run['log_flush_interval']}); 0.0 means flush every row"
-        )
     if depth_cfg < 0:
         raise ValueError("engine.depth must be >= 0")
     # WHAT IS LEFT HERE is only a conflict between two keys the sampler DOES
     # read; everything about which keys belong to which sampler is `_SAMPLER_KEYS`
-    # and `_check_sampler` above. The metropolis "takes no depth/trials/..." and
-    # channel "has no trial_box_side" refusals used to live here, one hand-written
-    # message per sampler per key, which is how channel_length/channel_width came
-    # to have no message at all and be silently accepted by three samplers.
+    # and `_check_sampler` above.
     if "trials" in smp and "trial_density" in smp:
         raise ValueError(
             "give either sampler.trials or sampler.trial_density, not both"
@@ -2584,11 +2451,7 @@ def from_params(p: dict[str, Any]) -> Config:
             )
         channel_full = _clen_word in _FULL_SPELLINGS
         channel_width = float(smp.get("channel_width", 0.0))
-        if not (diameter <= channel_width <= 2.0 * diameter + 1e-9):
-            raise ValueError(
-                f"channel_width must lie in [sigma, 2 sigma] = "
-                f"[{diameter}, {2 * diameter}]; got {channel_width}"
-            )
+        assert_channel_width(channel_width, diameter)
         if channel_full:
             # FULL-SPAN WITH A FROZEN GAP. The length is set per move by the
             # orientation, so there is no configured `channel_length` and no
@@ -2651,7 +2514,9 @@ def from_params(p: dict[str, Any]) -> Config:
                 trial_density = round(n_trials / chan_vol, 6)
             else:
                 trial_density = float(smp.get("trial_density", 0.0))
-                n_trials = int(round(trial_density * chan_vol))
+                n_trials = channel_trial_count(
+                    trial_density, channel_length, channel_width, dim
+                )
     else:
         trial_box_side = float(smp.get("trial_box_side", 3.0))
         cav = trial_box_side / 2.0
@@ -2659,18 +2524,13 @@ def from_params(p: dict[str, Any]) -> Config:
         channel_width = float(smp.get("channel_width", 0.0))
         # `trial_density` is a REDUCED density: trial molecules per unit measure
         # of the trial body, in units of one molecule's own measure. Both factors
-        # must therefore be taken in the run's dimension. This used to read
-        # `span = trial_box_side**2` and `disk = pi r^2` in 3D as well, i.e. an
-        # area over an area for a cubic body, so a 3D `trial_density` was not the
-        # density it claimed to be and did not scale with trial_box_side
-        # correctly. 2D is unchanged and bit-identical; 3D counts change, so a 3D
-        # config carried over from before must be restated (pin `trials` outright
-        # if you need to reproduce an earlier trial count exactly).
+        # must therefore be taken in the run's dimension (pin `trials` outright
+        # to reproduce a given trial count exactly).
         span = trial_box_side**dim
         unit = disk if two_dim else (4.0 / 3.0) * math.pi * radius**3
         if "trial_density" in smp:
             trial_density = float(smp["trial_density"])
-            n_trials = int((trial_density * span) / unit)
+            n_trials = cavity_trial_count(trial_density, trial_box_side, dim, diameter)
         else:
             n_trials = int(smp.get("trials", 30))
             trial_density = round((n_trials * unit) / span, 3)
@@ -2743,8 +2603,8 @@ def from_params(p: dict[str, Any]) -> Config:
     # cycles, byte-identical trajectory and two different run ids.
     #
     # Stated-only, like the pore/QA rule below it and for the same reason: the
-    # default is left to derive what it always derived, so no existing run id
-    # moves, while the value that used to split them can no longer be written.
+    # default derives what it always derived, so no existing run id moves, and
+    # no stated value can split two runs of the same chain.
     if lj and nvt and "tail" in pot:
         raise ValueError(
             f"potential.tail does nothing under ensemble.type={ens_type!r}: the "
@@ -2970,187 +2830,33 @@ def from_params(p: dict[str, Any]) -> Config:
     # looking at the configuration -- but NEVER ON OCCUPANCY (section 2B.4).
     # That is asserted rather than asserted-in-a-comment: G1.11 builds the body
     # against configurations with different k_in and requires the same M.
-    window_M = 0
-    window_kmax = 0
-    if ladder and branch_cavity:
-        # THE CUBE CAVITY IS A CUBOID WITH L == w. Everything downstream --
-        # `ChannelBody.build`, `volume()`, `members()`, `trial_cloud()`,
-        # `cuboid_packing_bound` -- is written for an oriented cuboid and needs
-        # no cube-specific case, so the whole of `sampler=branch` under a ladder
-        # engine is this one line plus the sweep. `trial_box_side` stays the user
-        # -facing name because it is the name the Metropolis path already uses for
-        # the same length, and a second name for one number is how a sweep ends up
-        # comparing a run against itself.
-        channel_length = channel_width = trial_box_side
-        assert_channel_guard(
-            channel_length, channel_width, dim, box, uc, span_name="box"
+    channel_length, channel_width, window_M, window_kmax = ladder_window(
+        engine=engine,
+        ladder=ladder,
+        branch_cavity=branch_cavity,
+        n_trials=n_trials,
+        channel_length=channel_length,
+        channel_width=channel_width,
+        trial_box_side=trial_box_side,
+        trial_density=trial_density,
+        kmax_margin=kmax_margin,
+        channel_full=channel_full,
+        dim=dim,
+        box=box,
+        uc=uc,
+        diameter=diameter,
+        lj=lj,
+    )
+    if (channel or branch_cavity) and parallel:
+        # The window move freezes the exterior of the body it draws, which a
+        # domain decomposition cannot guarantee across a cell boundary. True of
+        # the cube cavity for the same reason it is true of the rod, so the
+        # refusal is shared rather than restated.
+        raise ValueError(
+            f"sampler={sampler}"
+            + (f" under engine={engine}" if branch_cavity else "")
+            + " is serial only"
         )
-    if ladder:
-        window_M = int(n_trials)
-        # THE FULL-SPAN ROD SIZES BOTH FROM THE LONGEST CHORD, not from a
-        # configured length it does not have. `window_M` and `window_kmax` are
-        # CEILINGS there rather than the per-move numbers: each move takes its
-        # own body length from the chord and the image guard, draws
-        # `trial_density * V_W` trials for THAT body, and the ladder truncates
-        # itself above the largest clique the body admits. Sizing on the body
-        # diagonal is what makes the ceiling hold for every orientation.
-        _kmax_len = channel_length
-        if channel_full:
-            _kmax_len = box * (float(dim) ** 0.5)
-        _bound = cuboid_packing_bound(_kmax_len, channel_width, dim, diameter)
-        window_kmax = min(window_M, int(math.ceil(_bound)) + kmax_margin)
-        if not (1 <= window_kmax <= window_M):
-            raise ValueError(
-                f"engine={engine} needs 1 <= kmax <= M, derived "
-                f"kmax={window_kmax} and M={window_M} from trial_density="
-                f"{trial_density:g} on a {_kmax_len:g} x {channel_width:g} "
-                f"body (V_W = {_kmax_len * channel_width ** (dim - 1):g}). "
-                "M is round(trial_density * V_W), so raise sampler.trial_density "
-                "until the pool can hold at least one particle."
-            )
-        # WHY THERE IS NO "M IS BELOW THE PACKING BOUND" REFUSAL HERE. The
-        # bound is a rigorous over-estimate and, for a thin body, a loose one
-        # (`cuboid_packing_bound` says by how much), so requiring M above it
-        # would demand a `trial_density` the lambda <= 4 rule below then
-        # refuses -- two rules contradicting each other over a number neither
-        # measures. What matters is whether the chain ever REACHES an occupancy
-        # the pool cannot hold, and that is measured rather than predicted:
-        # `cut_M` and `cut_k` count every such window, and
-        # G3.4 asserts both are identically zero on the hard-core path. A
-        # physical channel occupancy is far below M at any realistic
-        # trial_density, so they are zero -- and if they are not, the counter
-        # says so in the log instead of an estimate saying so at setup.
-        # TRIALS PER EVICTION WINDOW, which is the quantity the DP's cost is
-        # actually a function of. The old rule counted trials per SIGMA, and
-        # sigma is not a length the sweep ever measures anything against: what
-        # sets the state frame is `_window_structure(x, reach)`, and on the LJ
-        # path `reach` is `upper_cutoff`. A rule written in sigma was therefore
-        # a rule about rc with the conversion factor left implicit, which is why
-        # it had to be recalibrated by hand every time rc moved.
-        #
-        # Two separate things are being bounded here and they were one number:
-        #
-        #   THE WALL. `_enumerate` holds the retained set in an int64, so a
-        #   frame wider than `_MAX_FRAME = 62` trials raises `_TooWide` and the
-        #   sweep falls back to the dict DP. That fallback is CORRECT and
-        #   silent, which is the problem: a run that crosses the wall gets
-        #   slower by orders of magnitude and says nothing. The frame occupancy
-        #   is a count of trials in a window of width `reach`, so it fluctuates
-        #   around `lambda_rc`; the refusal uses a tail allowance rather than
-        #   the mean, because one wide frame in a run is enough to trigger the
-        #   fallback for that window.
-        #
-        #   THE COST. Below the wall the state count still grows steeply with
-        #   the frame, so there is a scoping cap as well. It sits where it does
-        #   because of what PRUNING changed: the frame now holds only trials
-        #   that can hold a molecule, so at loading it is a fraction of the
-        #   geometric count, and the old cap was calibrated on a sweep that
-        #   carried every blocked row. Measured after pruning, ESJD per CPU
-        #   second was still rising at twice the old cap (89 -> 101 at mu = -1).
-        #
-        # THE BOUND IS GEOMETRIC, SO IT IS CONSERVATIVE. `window_M` counts every
-        # trial drawn, placeable or not, and pruning can only lower the number
-        # that reaches the frame. A config that passes here cannot be made to
-        # fail by the exterior being crowded.
-        #
-        # LJ path only: the hard-core sweep's eviction window is the contact
-        # distance, so `lambda_rc` is `lambda_sigma` there and never binds.
-        if branch_cavity:
-            # THE CAVITY'S COST RULE, and it is a different quantity from the
-            # rod's lambda. Lambda <= 4 bounds the TRANSFER MATRIX's state count,
-            # which widens with the eviction window; the cavity has no transfer
-            # matrix and no eviction window. What it has is `_wsum`, whose cost
-            # grows with the pool size AND with the cavity side -- the side sets
-            # how large a clique can be, and the top rungs are where the time
-            # goes. The empty rungs above the largest clique are nearly free (the
-            # recursion dies at its first level), which is why `kmax = M` costs
-            # no more than `kmax = the true capacity` and why there is no
-            # truncation knob here.
-            #
-            # MEASURED, one full ladder over k = 0..M, a cube at rc = 3.0,
-            # T* = 1.5, single core (ms):
-            #
-            #     a \ M     10     15     20     25     30     40      50
-            #       1.50    1.1    1.8    4.3     12     15     36     117
-            #       1.75    0.6    2.4     12     40    188    549    1048
-            #       2.00    1.3    7.6     14     65    595   2919    2554
-            #       2.25    1.2    5.3     26    195   1273   3738       -
-            #       2.50    2.2    9.6     65    236   1882  34220       -
-            #
-            # Least squares on those 36 points gives ms ~ M^(2.9 + 1.2a) / 2.3e5
-            # to within a factor of about three either way, which is the accuracy
-            # a refusal needs: it exists to stop a 47-second-per-move launch, not
-            # to tune anything. The run log's `wall_s` is the real number.
-            _ms = float(window_M) ** (2.9 + 1.2 * channel_length) / 2.3e5
-            if _ms > 25.0:
-                raise ValueError(
-                    f"engine={engine} on sampler=branch estimates {_ms:.3g} ms "
-                    f"per window move at M={window_M} in a "
-                    f"{channel_length:g}-cube, against a budget of 25 ms (the "
-                    "fit is good to about 3x either way). The clique ladder "
-                    "costs roughly M^(2.9 + 1.2 * trial_box_side). Lower "
-                    "sampler.trial_density or sampler.trial_box_side -- the side "
-                    "is the harsher of the two, since it sets how large a clique "
-                    "can be. This is a COST bound, not a scoping one: the ladder "
-                    "stays exact at any M and any cavity size."
-                )
-        if lj and not branch_cavity:
-            # Expected trials whose axial coordinate lies within `reach` of a
-            # given one, i.e. the mean occupancy of one DP frame. The full-span
-            # rod has no configured length to divide by, and does not need one:
-            # the quantity is a LINEAR density times a radius, and
-            # `trial_density * w**(dim-1)` is that linear density at any body
-            # length. For a fixed rod the two forms agree up to the rounding of
-            # M, and the fixed one is kept so its refusals do not move.
-            _lambda_rc = (
-                trial_density * channel_width ** (dim - 1) * uc
-                if channel_full
-                else window_M * uc / channel_length
-            )
-            # Poisson-ish fluctuation about that mean; five standard deviations
-            # of headroom before the int64 frame, which is cheap insurance
-            # against a silent fallback that costs orders of magnitude.
-            _frame_hi = _lambda_rc + 5.0 * math.sqrt(max(_lambda_rc, 1.0))
-            _max_density = _LAMBDA_RC_CAP / (uc * channel_width ** (dim - 1))
-            if _frame_hi >= _MAX_DP_FRAME:
-                raise ValueError(
-                    f"engine={engine} would put about {_lambda_rc:.1f} trials in "
-                    f"one eviction window (trial_density={trial_density:g}, "
-                    f"channel_width={channel_width:g}, upper_cutoff={uc:g}), "
-                    f"and allowing for fluctuation that "
-                    f"reaches {_frame_hi:.0f} against the transfer matrix's "
-                    f"{_MAX_DP_FRAME}-trial state frame. Above the frame the "
-                    "sweep silently falls back to the dictionary DP, which is "
-                    "correct and orders of magnitude slower, so this is refused "
-                    "rather than left to be discovered in a timing. Lower "
-                    f"sampler.trial_density to at most {_max_density:.4g} or "
-                    "lengthen the rod."
-                )
-            if _lambda_rc > _LAMBDA_RC_CAP + 1e-9:
-                raise ValueError(
-                    f"engine={engine} refuses {_lambda_rc:.2f} trials per "
-                    f"eviction window (trial_density={trial_density:g}, "
-                    f"channel_width={channel_width:g}, upper_cutoff={uc:g}, "
-                    f"i.e. {_lambda_rc * diameter / uc:.2f} per sigma); the "
-                    f"limit is {_LAMBDA_RC_CAP:g}. With the selection radius "
-                    "forced to run.upper_cutoff (section 1.2) the eviction "
-                    "window is rc wide, and the state count grows steeply in "
-                    "the frame occupancy. Lower sampler.trial_density to at "
-                    f"most {_max_density:.4g} or lengthen the rod. This is a "
-                    "scoping rule, not a tunable: raise it with a measurement "
-                    "of ESJD per CPU second, not with a guess."
-                )
-    if channel or branch_cavity:
-        if parallel:
-            # The window move freezes the exterior of the body it draws, which a
-            # domain decomposition cannot guarantee across a cell boundary. True
-            # of the cube cavity for the same reason it is true of the rod, so
-            # the refusal is shared rather than restated.
-            raise ValueError(
-                f"sampler={sampler}"
-                + (f" under engine={engine}" if branch_cavity else "")
-                + " is serial only"
-            )
     if channel:
         if metro_dyn and not full_repacking and depth_cfg < 1:
             # The channel sampler's own precondition, and now stated only where
@@ -3231,7 +2937,7 @@ def from_params(p: dict[str, Any]) -> Config:
     #
     # Refused only when STATED, so no existing run id moves: the default still
     # derives whatever it derived, and it is the same number for every run of
-    # this kind, so it can no longer split anything.
+    # this kind, so it cannot split anything.
     if nvt and not canonical and "move_factor" in run:
         raise ValueError(
             f"run.move_factor does nothing under ensemble.type={ens_type!r}: its "
@@ -3307,7 +3013,7 @@ def from_params(p: dict[str, Any]) -> Config:
     #        are then REQUIRED: the historical defaults (30 and 2) are unusable
     #        for any box <= 32 and were the landmine behind two broken examples.
     # Nothing in between: mixing the two is an error, not a merge.
-    _MANUAL_GEOM = ("cell_length", "buffer", "x_spacing", "y_spacing")
+    _MANUAL_GEOM = ("cell_length", "buffer")
     cell_counts: tuple[int, ...] | None = None
     cell_length_sides: tuple[float, ...] | None = None
     n_cell_submitted: int | list[int] | None = None
@@ -3315,17 +3021,9 @@ def from_params(p: dict[str, Any]) -> Config:
     buffer_v = 2.0
 
     if parallel:
-        # the interaction reach a border ring has to contain; `radius` is a RUN
-        # key, so reading it off `ens` (as this guard used to) always yielded the
-        # 0.5 default and left the guard under-strict above it.
         # The reach a border ring must contain. For LJ that is the truncation
         # radius actually in force (`uc`, i.e. run.upper_cutoff or its default);
-        # for hard core it is the exclusion diameter. Both of the old lookups
-        # here were dead: `pot["rc"]` can never fire because "rc" is not in the
-        # potential allowlist, and `ens.get("radius", 0.5)` always returned the
-        # default because `radius` is a RUN key -- so the guard checked a fixed
-        # LJ reach of 2.5 and a fixed hard-core reach of 1.0 whatever the config
-        # said (recorded in cell_unify_plan.md's schema audit).
+        # for hard core it is the exclusion diameter (`radius` is a RUN key).
         _reach = float(uc) if lj else 2.0 * radius
         _sides_for_cells = list(box_sides) if box_sides is not None else [box] * dim
 
@@ -3477,10 +3175,6 @@ def from_params(p: dict[str, Any]) -> Config:
         g3_r_cut=g3_r_cut_val,
         g3_reader=(auxiliary.G3_READER if pmf and not two_dim else None),
         aux_cutoff=aux_cutoff,
-        gamma_mode=gamma_mode,
-        pr_target=(pr_target_val if adaptive_gamma else None),
-        gamma_criterion=(gamma_criterion_val if adaptive_gamma else None),
-        gamma_solver=(gamma_solver_val if adaptive_gamma else None),
         two_dim=two_dim,
         parallel=parallel,
         beta=beta,
@@ -3508,20 +3202,14 @@ def from_params(p: dict[str, Any]) -> Config:
         cell_length_sides=cell_length_sides,
         buffer=buffer_v,
         seed=seed_val,
-        x_spacing=(float(run["x_spacing"]) if "x_spacing" in run else None),
-        y_spacing=(float(run["y_spacing"]) if "y_spacing" in run else None),
         sampling_window=sampling_window,
         target_cycles=float(run.get("target_cycles", 1.0025e9)),
         burn_in=int(run.get("burn_in", 0)),
         traj_every=int(run.get("traj_every", 0)),
-        checkpoint_every=int(run.get("checkpoint_every", 1)),
-        log_flush_interval=float(run.get("log_flush_interval", 0.0)),
-        log_columns=None if _log_cols is None else tuple(_log_cols),
-        log_drop=None if _log_drop is None else tuple(_log_drop),
+        checkpoint_every=int(run.get("checkpoint_every", 10)),
         initial_config=run.get("initial_config"),
         matrix_config=run.get("matrix_config"),
         sweep_label=run.get("sweep_label"),
-        esjd=_as_bool(run.get("esjd", False), "run.esjd"),
         pore_geometry=_pore_geometry,
         pore_H=_pore_H,
         pore_R=_pore_R,
@@ -3550,7 +3238,7 @@ def describe_parallel(cfg: Config) -> str:
     file and must stay machine-parsable.
 
     Everything derived is shown next to the constraint that shaped it, because
-    the whole point of submitting `n_cell` is that the cell geometry is no longer
+    the whole point of submitting `n_cell` is that the cell geometry is not
     something the operator typed and can read back from their own params file.
     Per-axis quantities are printed per axis: the gap is `pitch - cell_length`
     and equals the buffer exactly in n_cell mode, but in manual mode it is

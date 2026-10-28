@@ -5,18 +5,20 @@ GCMC plotter for the new runs/<group>/<hash>__<mu>/ layout.
 Everything is driven by each run's params.json, never by folder or file names.
 The only knobs you normally touch are in the CONFIG block below.
 
-run.log columns (11-col, current):
-    0 MC_cycle(M)  1 pckng_frctn  2 N  3 add_acc  4 add_att  5 add_stp
-    6 rm_acc  7 rm_stp  8 mv_acc  9 mv_stp  10 wall_s
-Older 10-col logs (no wall_s) are still read; wall-time plots are skipped for them.
+run.log columns are read by name through scripts/runlog.py, so logs from before
+the raw-column format read too. A log without wall_s skips the wall-time plots.
 """
 
 import json
+import sys
 import warnings
 from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts import runlog  # noqa: E402
 
 # ============================================================================
 # CONFIG
@@ -27,7 +29,7 @@ RUN_GROUPS = [
 ]
 MODE = "run"                  # "run"  -> raw curves + reference overlay
                               # "compare" -> efficiency as a multiple of std-Metropolis GCMC
-BURN_IN_M = 0.0               # discard rows with MC_cycle(M) < this (in millions)
+BURN_IN_M = 0.0               # discard rows with MC_cycle < this (in millions)
 MIN_MU = -np.inf
 MAX_MU = np.inf
 N_BLOCKS = 10                 # blocks for density stderr
@@ -195,18 +197,18 @@ def read_params(leaf):
 def read_run(leaf, burn_in_M, n_blocks):
     """Parse one leaf dir into a record of scalars, or None if unusable."""
     par = read_params(leaf)
-    data = np.loadtxt(leaf / "run.log", comments="#", ndmin=2)
-    if data.size == 0:
-        return None
-    data = data[data[:, 0] >= burn_in_M]
-    if data.shape[0] < 2:
+    data = runlog.load(leaf)
+    data = data[data["MC_cycle"] >= burn_in_M]
+    if len(data) < 2:
         return None
 
-    eta = data[:, 1]
-    add_acc, add_att, add_stp = data[:, 3], data[:, 4], data[:, 5]
-    rm_acc, rm_stp = data[:, 6], data[:, 7]
-    mv_acc, mv_stp = data[:, 8], data[:, 9]
-    has_wall = data.shape[1] >= 11
+    eta = runlog.packing_fraction(data, json.loads((leaf / "params.json").read_text()))
+    add_acc, add_stp = data["insert_accepted"], data["insert_tried"]
+    add_att = data.get("insert_evaluated", add_stp)
+    rm_acc, rm_stp = data["delete_accepted"], data["delete_tried"]
+    mv_acc, mv_stp = data["translate_accepted"], data["translate_tried"]
+    has_wall = "wall_s" in data
+    cycle = data["MC_cycle"].to_numpy()
 
     eta_mean, eta_err = block_average(eta, n_blocks)
     safe = lambda a, b: a.sum() / b.sum() if b.sum() > 0 else np.nan
@@ -219,12 +221,12 @@ def read_run(leaf, burn_in_M, n_blocks):
         "rem_ratio": safe(rm_acc, rm_stp),
         "mv_ratio": safe(mv_acc, mv_stp),
         "add_per_attempt": safe(add_acc, add_att),
-        "total_cycles": float((data[-1, 0] - data[0, 0]) * 1e6),
+        "total_cycles": float((cycle[-1] - cycle[0]) * 1e6),
         "wall_per_window": np.nan,
         "total_wall": np.nan,
     })
     if has_wall:
-        w = data[:, 10]
+        w = data["wall_s"].to_numpy()
         rec["total_wall"] = float(w[-1] - w[0]) if WALL_S_IS_CUMULATIVE else float(w.sum())
         rec["wall_per_window"] = (rec["total_wall"] / (len(w) - 1)) if WALL_S_IS_CUMULATIVE \
             else float(w.mean())

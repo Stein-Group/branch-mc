@@ -5,10 +5,11 @@
 
   "sampler": {
     "type": "branch",                    
-    "depth": 8,                              
     "trial_density": 100,                          
     "trial_box_side": 1.75                     
   },
+
+  "engine": {"depth": 8},
 
   "ensemble": {
     "type": "muVT",

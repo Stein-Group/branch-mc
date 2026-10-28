@@ -19,7 +19,6 @@ import math
 import os
 import socket
 import time
-from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -35,7 +34,6 @@ if TYPE_CHECKING:
 from .. import config_specs
 from ..analysis.energy import configuration_energy
 from ..engine import metropolis_dynamics
-from ..engine.glauber_dynamics import LADDER_ENGINES
 from ..forcefield.lj_table import LennardJonesTable
 from ..space import geometry
 from ..system.state import ChainState
@@ -44,412 +42,6 @@ from . import hash_fingerprint, io, sim_setup
 # Module logger is `logger`, not `log`: run() binds `log` to the io.Log run-log
 # writer, so the getLogger idiom's usual `log` name is already taken here.
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------- the run log
-#
-# THE COLUMN SET IS A FUNCTION OF THE RUN, and it has to be, because the
-# alternative shipped for a long time and was measured on a cluster job: an NVT
-# multi-species run wrote 27 columns of which TWELVE were structurally zero --
-# add, remove, translate and the whole A/R clique block -- while the counters
-# that carry everything that run actually did (repack, and the `P_*` clique
-# triple the engine has always accumulated) had no column at all. The log said
-# a mixture was doing nothing for 810 windows while its composition went from
-# 50:50 to 4:96.
-#
-# So a column is written when the run CAN put a nonzero value in it. That is the
-# same rule the per-species columns already follow, and it is the lesson
-# pointed at output instead of at gates: a column that cannot vary tells the
-# reader nothing and costs them the width to find out.
-#
-# GROUPS, which is what a user selects. Two are forced and four are optional:
-#
-#   core        the cycle, N and the wall clock. Cannot be dropped: without them
-#               a row cannot be placed in time or compared with another run.
-#   species     N_<name>, one per species, on a typed run. Cannot be dropped --
-#               composition IS the output of a mixture run, and a typed log
-#               without it is the defect this whole stage was about.
-#   state       packing fraction, n_cav, mu, running means, energy (LJ only)
-#   moves       the move counters, whichever moves the ensemble proposes:
-#               add/remove/translate (+ swap when typed) in muVT, repack in NVT
-#   clique      per-move clique tallies; P (repack) in the fixed-N ensembles
-#   clique_acc  the accepted-only repeats of the clique positions
-#
-# Selection is `run.log_columns` (an explicit list) XOR `run.log_drop` (subtract
-# from the default). Both at once raises: two ways to say one thing is how a
-# params file ends up meaning something its author did not intend.
-#
-# The default set for a single-species muVT run is byte-identical to the layout
-# every log in this project has ever had, so existing files stay comparable and
-# `scripts/sweetspot_plot.py` -- which reads by NAME, not by position -- keeps
-# working on old and new alike.
-
-_FORCED_GROUPS = ("core", "species")
-# `esjd` is here rather than forced because `run.esjd` already gates whether
-# the columns exist at all; being a group as well means a run that asked for
-# them can still drop them from the log while keeping them in the summary, the
-# same way `clique` works.
-_OPTIONAL_GROUPS = ("state", "moves", "clique", "clique_acc", "glauber", "esjd")
-LOG_GROUPS = _FORCED_GROUPS + _OPTIONAL_GROUPS
-
-
-def _glauber_cols(*, suwa_todo: bool = False) -> list[tuple[str, int, str, str]]:
-    """The Glauber engine's diagnostics, which REPLACE the acceptance ratio.
-
-    Section 3.6 of the design plan: this engine has no acceptance test,
-    so `add_acc / add_att` say nothing about it and the questions a reader needs
-    answered are different ones -- how often the occupancy actually moved, how
-    much of the ladder the window explores, and whether the truncation is being
-    hit.
-
-    RAW PER-WINDOW SUMS, never means, for the reason the clique columns state:
-    a statistic over any span of rows is then exact rather than a mean of means
-    as soon as the reporting interval changes. So `n_hat` is reported as the SUM
-    and the COUNT, and the reader divides.
-
-      glb_step       window moves proposed
-      glb_same       of those, ones that returned the incoming occupancy
-      glb_dN         sum |k_new - k_in|, the exchange flux this engine achieves
-      glb_dN_sq      sum (k_new - k_in)^2, the EXPECTED SQUARED JUMP in N. The
-                     one column here that cannot be reconstructed from the
-                     others: this engine moves N by more than one in a single
-                     move, so the mean square and the mean modulus are
-                     different numbers. Divided by glb_step it is E[dN^2] per
-                     move; divided by wall_s it is E[dN^2] per second, which is
-                     the only quantity an accept/reject engine and a
-                     rejection-free one can be raced on directly.
-      glb_cut_M      k_in > M: the body held more guests than the pool has
-                     rows. Raise sampler.trial_density.
-      glb_cut_k      k_in > kmax: the ladder truncated below the occupancy.
-                     With a rigorous packing bound this can only appear
-                     TOGETHER with glb_cut_M, so it firing alone means the
-                     bound is wrong -- it is a self-check on
-                     `cuboid_packing_bound`, not a request for a larger
-                     kmax_margin. Counted independently of glb_cut_M, or the
-                     sequential test would have made glb_cut_M dead.
-      glb_infeas     no rung feasible at all (the pool admitted no placement)
-      glb_kmax       largest k ever drawn
-      glb_p_kmax     sum of P(k = kmax): the measured truncation weight, which
-                     is what G6.3 requires a high-N discrepancy to be explained
-                     by
-      glb_entropy    sum of the ladder's Shannon entropy: how many occupancies
-                     the window is genuinely choosing between
-      glb_nhat_sum   sum of N_hat = N_out + sum_k k P(k), the Rao-Blackwellised
-      glb_nhat_sq    sum of N_hat^2, so the BETWEEN-window variance of N_hat is
-                     recoverable from any span of rows. The other half of the
-                     law of total variance
-      glb_nhat_wthn  sum of the within-pool variance of k. HALF of the law of
-                     total variance: the compressibility gate needs this PLUS
-                     the between-window variance of N_hat, and the naive
-                     variance of N_hat alone reads as a false failure.
-      glb_nhat_n     how many windows contributed to the two sums above
-
-    THREE MORE UNDER `suwa_todo_dynamics` ONLY, and they are what decides
-    whether that dynamics was worth running:
-
-      glb_st_hb      sum over windows of sum_k P(k)^2 -- the rate at which the
-                     HEAT BATH would have returned the incoming occupancy. The
-                     counterfactual, computed on the same ladder the allocation
-                     used, so the comparison needs no second run
-      glb_st_rej     sum over windows of max(0, 2 P_max - 1) -- the rate the
-                     allocation attains, which is the minimum any pi-invariant
-                     kernel can. Both are EXACT per window rather than sampled,
-                     so (glb_step - glb_st_rej) / (glb_step - glb_st_hb) is the
-                     gain in the rate at which k changes, with no Monte Carlo
-                     error of its own. The theorem caps that ratio at 2; a run
-                     where it sits near 1 has a ladder concentrated on one rung
-                     and this sampler is doing nothing for it
-      glb_st_fb      windows where the incoming rung had zero weight under the
-                     bias, so the allocation had nothing to reallocate and fell
-                     back to the heat bath. Nonzero only on a flat-histogram run
-
-    THE NAMES SAY WHAT THEY COUNT, which the first version did not: `wnd_id`
-    read as an identifier and meant identity moves, and `wnd_ovf` / `wnd_ovk`
-    were indistinguishable at a glance from each other. No chain reads the log,
-    so renaming a column cannot move a counter digest -- which is why this was
-    cheap to fix and would not have been later.
-    """
-    cols: list[tuple[str, int, str, str]] = [
-        ("glb_step", 9, "glauber", "glauber.step"),
-        ("glb_same", 9, "glauber", "glauber.same"),
-        ("glb_dN", 10, "glauber", "glauber.dN_abs"),
-        ("glb_dN_sq", 11, "glauber", "glauber.dN_sq"),
-        ("glb_cut_k", 10, "glauber", "glauber.cut_k"),
-        ("glb_cut_M", 10, "glauber", "glauber.cut_M"),
-        ("glb_infeas", 11, "glauber", "glauber.infeasible"),
-        ("glb_kmax", 9, "glauber", "glauber.max_k"),
-        ("glb_p_kmax", 12, "glauber", "glauber.p_at_kmax"),
-        ("glb_entropy", 13, "glauber", "glauber.entropy"),
-        ("glb_nhat_sum", 14, "glauber", "glauber.n_hat_sum"),
-        ("glb_nhat_sq", 16, "glauber", "glauber.n_hat_sumsq"),
-        ("glb_nhat_wthn", 15, "glauber", "glauber.n_hat_within"),
-        ("glb_nhat_n", 11, "glauber", "glauber.n_hat_count"),
-        # THE BODY, SUMMED OVER WINDOW MOVES. Constants on a fixed body, and
-        # the config already states them; on `channel_length = "full"` the
-        # length and the pool are drawn per move and nothing else records them.
-        # Without these a reader cannot turn that run's cost or flux into a
-        # per-trial or per-sigma number, and `pool_M` cannot be recovered from
-        # params.json at all -- `channel_length` is the string "full" there.
-        # Raw sums, like every column above, so a ratio over any span of rows is
-        # exact rather than a mean of means.
-        ("glb_bodylen", 13, "glauber", "glauber.body_len_sum"),
-        ("glb_poolM", 11, "glauber", "glauber.pool_M_sum"),
-    ]
-    if suwa_todo:
-        cols += [
-            ("glb_st_hb", 12, "glauber", "glauber.st_hb_rej"),
-            ("glb_st_rej", 13, "glauber", "glauber.st_rej"),
-            ("glb_st_fb", 10, "glauber", "glauber.st_fallback"),
-        ]
-    return cols
-
-
-def _column_table(
-    *,
-    nvt: bool,
-    typed: bool,
-    canonical: bool = False,
-    glauber: bool = False,
-    suwa_todo: bool = False,
-    esjd: bool = False,
-    single_particle: bool = False,
-    energy: bool = False,
-) -> list[tuple[str, int, str, str]]:
-    """(name, width, group, value key) for every column this run can fill.
-
-    Order is fixed here and nowhere else: the header and every row are built
-    from this one list, so the two cannot drift apart -- which is the failure
-    the length check in `_log_row` exists to catch and this arrangement makes
-    unreachable.
-
-    The `moves` and `clique` groups are ensemble-dependent because the engine's
-    move set is: muVT draws move/add/remove (+ swap when typed) and NVT forces
-    the repack, so each ensemble's counters are the other's zeros.
-    """
-    cols: list[tuple[str, int, str, str]] = [
-        ("MC_cycle(M)", 13, "core", "cycle"),
-        ("pckng_frctn", 13, "state", "packing"),
-        ("N", 7, "core", "N"),
-        # cavity occupancy at the window's last exchange, sampled like N
-        ("n_cav", 7, "state", "n_cav"),
-    ]
-    if nvt and canonical:
-        # A fixed-composition window proposes translations and pair identity
-        # exchanges and nothing else, so the repack columns would be as empty
-        # here as add/remove are in any NVT run. `swp_*` counts the PAIR exchange
-        # -- it shares the counter with the single-particle swap because the two
-        # moves are mutually exclusive by ensemble (that one is muVT-only), and a
-        # separate counter would add two permanently-zero integers to every
-        # summary in the project, moving all 52 matrix digests to record nothing.
-        cols += [
-            ("mv_acc", 9, "moves", "move_accept"),
-            ("mv_stp", 9, "moves", "move_step"),
-            ("swp_acc", 9, "moves", "swap_accept"),
-            ("swp_stp", 9, "moves", "swap_step"),
-        ]
-    elif nvt:
-        cols += [
-            ("rpk_acc", 9, "moves", "repack_accept"),
-            ("rpk_att", 9, "moves", "repack_attempt"),
-            ("rpk_stp", 9, "moves", "repack_step"),
-        ]
-    else:
-        cols += [
-            ("add_acc", 9, "moves", "add_accept"),
-            ("add_att", 9, "moves", "add_attempt"),
-            ("add_stp", 9, "moves", "add_step"),
-            ("rm_acc", 9, "moves", "remove_accept"),
-            ("rm_stp", 9, "moves", "remove_step"),
-            ("mv_acc", 9, "moves", "move_accept"),
-            ("mv_stp", 9, "moves", "move_step"),
-        ]
-        if typed:
-            # The identity swap is proposed only when there is more than one
-            # species, and only in muVT -- NVT never reaches `draw_move`.
-            cols += [
-                ("swp_acc", 9, "moves", "swap_accept"),
-                ("swp_stp", 9, "moves", "swap_step"),
-            ]
-    cols += [
-        ("wall_s", 11, "core", "wall"),
-        ("mu", 12, "state", "mu"),
-        ("avgN", 11, "state", "avg_n"),
-        # mean cavity occupancy over every exchange in this window only
-        ("avg_n_cav", 12, "state", "avg_ncav"),
-    ]
-    # Total U of the end-of-window configuration (analysis.energy). A hard-core
-    # run's is identically zero, so it gets no column.
-    if energy:
-        cols += [("energy", 16, "state", "energy")]
-    # CLIQUE COMPOSITION (metropolis_dynamics._clq): raw per-window integer
-    # SUMS. A = add, R = remove, P = repack. clq*_n counts scored moves,
-    # clq*_pos sums the clique sizes, clq*_new sums the positions in those
-    # cliques that were NOT a
-    # removed member put back. Never log a ratio here: summing these columns over
-    # any span of rows and dividing at the end is exact, whereas a per-window
-    # fraction would become a mean of means as soon as the reporting interval
-    # changed. (Contrast avg_n_cav above, which IS a per-window mean -- do not
-    # copy it.)
-    # A canonical window scores no cliques -- the clique tallies are counted
-    # where an exchange is scored, and it proposes none. The muVT A/R tallies
-    # are still accumulated by the engine but are no longer written to the log.
-    _clique_tags: tuple[str, ...] = ("P",) if (nvt and not canonical) else ()
-    for tag in _clique_tags:
-        cols += [
-            (f"clq{tag}_n", 9, "clique", f"clique.{tag}_n"),
-            (f"clq{tag}_pos", 10, "clique", f"clique.{tag}_pos"),
-            (f"clq{tag}_new", 10, "clique", f"clique.{tag}_new"),
-        ]
-    # ACCEPTED-only repeats of pos/new. The plain columns above are counted where
-    # the acceptance is computed and so include rejections; these are incremented
-    # at the commit. Turnover per ACCEPTED move -- clqA_new_a / clqA_pos_a -- is
-    # the quantity that says how much of the configuration a successful move
-    # actually replaced, and clq*_new_a / wall_s is the throughput in positions
-    # rather than in moves.
-    for tag in _clique_tags:
-        cols += [
-            (f"clq{tag}_pos_a", 11, "clique_acc", f"clique.{tag}_pos_acc"),
-            (f"clq{tag}_new_a", 11, "clique_acc", f"clique.{tag}_new_acc"),
-        ]
-    # PRESENT ONLY UNDER A LADDER DYNAMICS, so a `metropolis_dynamics` header
-    # is byte-identical to every log this project has written and the columns
-    # below are never a block of permanently-zero integers. `suwa_todo` gates
-    # three more inside that block by the same rule and for the same reason: a
-    # `glauber_dynamics` log stays byte-identical to the ones already written,
-    # and the three columns appear exactly where they can vary.
-    if glauber:
-        cols += _glauber_cols(suwa_todo=suwa_todo)
-    # PRESENT ONLY UNDER `run.esjd`, by the same rule as the Glauber block: a
-    # log that did not ask for them stays byte-identical to every log this
-    # project has written.
-    #
-    #   esjd_dNsq  sum (n_add - n_remove)^2 over ATTEMPTED moves. Divided by
-    #              wall_s it is E[dN^2] per second, the quantity this engine and
-    #              a rejection-free one can be raced on directly -- glb_dN_sq is
-    #              the same column on the other side. On THIS engine an exchange
-    #              moves N by exactly +/-1 at every depth, so it equals the
-    #              accepted exchange count.
-    #   esjd_drsq  sum of squared translation displacement, minimum imaged: the
-    #              classic ESJD, the one move_factor tunes, and the control arm
-    #              for a selection-bias change, which cannot touch it.
-    #   esjd_mov / esjd_trn  the two denominators, so per-MOVE forms are exact
-    #              over any span of rows rather than a mean of means.
-    #
-    # DECLARED ONLY WHERE A WINDOW FILLS THEM, and the condition is the exact
-    # set of paths that build `stats["esjd"]`: the cavity/channel branch of
-    # `metropolis_dynamics.advance`, and nothing else. The ladder engines do
-    # not build it, and neither does `_advance_single_particle` -- the plain
-    # `metropolis` sampler returns `{N, packing_fraction, counters, n_cav}` and
-    # stops. Declaring the columns there declared four a window could never
-    # fill, and `_log_row` raised a KeyError on the FIRST row of the run. That
-    # is the right failure for a declared column with no value, so the fix is
-    # not to soften the guard but to stop declaring them.
-    #
-    # Nothing is lost on either path. The ladder's `glb_dN_sq` is the same
-    # quantity under another name and is always on. On the single-particle path
-    # an accepted exchange moves N by exactly one, so the sum of dN^2 IS
-    # `add_acc + rm_acc`, which is already logged -- the column would be a
-    # third name for a number the log already carries twice.
-    #
-    # What a sweep gets from this: `run.esjd` can be written ONCE and run
-    # against every dynamics, which is how an engine comparison is actually set
-    # up. Refusing the key on the paths that ignore it would force a different
-    # `run` block per arm, and an asymmetric `run` block is the thing such a
-    # comparison is trying to avoid.
-    if esjd and not glauber and not single_particle:
-        cols += [
-            ("esjd_dNsq", 11, "esjd", "esjd.dN_sq"),
-            ("esjd_drsq", 11, "esjd", "esjd.dr_sq"),
-            ("esjd_mov", 10, "esjd", "esjd.moves"),
-            ("esjd_trn", 10, "esjd", "esjd.translations"),
-        ]
-    return cols
-
-
-def _species_cols(names: Sequence[str] | None) -> list[tuple[str, int, str, str]]:
-    """The per-species occupancy columns, one `N_<name>` per species, or none at
-    all on a single-species run.
-
-    APPENDED after the fixed columns rather than placed next to `N`, where they
-    belong by meaning: it keeps a single-species header byte-identical to every
-    log this project has written, and makes the typed one a strict extension.
-
-    The width is the species name plus padding rather than a constant, because
-    the name comes from the species file and nothing bounds its length.
-    """
-    if names is None:
-        return []
-    return [(f"N_{n}", max(9, len(n) + 4), "species", f"species.{n}") for n in names]
-
-
-def select_columns(
-    cols: list[tuple[str, int, str, str]],
-    include: Sequence[str] | None = None,
-    drop: Sequence[str] | None = None,
-) -> list[tuple[str, int, str, str]]:
-    """Apply a user's group selection, keeping the forced groups whatever it says.
-
-    `include` and `drop` are mutually exclusive. An unknown group name raises and
-    lists the real ones rather than being ignored: a typo in `log_columns` that
-    silently kept the default would be a setting that appears to work and does
-    nothing, which is the failure mode this codebase refuses.
-    """
-    if include is not None and drop is not None:
-        raise ValueError(
-            "run.log_columns and run.log_drop are two ways to say one thing; "
-            "give the list you want (log_columns) or the groups you do not "
-            "(log_drop), not both"
-        )
-    for label, given in (("log_columns", include), ("log_drop", drop)):
-        unknown = sorted(set(given or ()) - set(LOG_GROUPS))
-        if unknown:
-            raise ValueError(
-                f"run.{label} names unknown column group(s) {unknown}; the "
-                f"groups are {list(LOG_GROUPS)}"
-            )
-    if include is not None:
-        keep = set(_FORCED_GROUPS) | set(include)
-    elif drop is not None:
-        forced = set(_FORCED_GROUPS) & set(drop)
-        if forced:
-            raise ValueError(
-                f"run.log_drop asks to drop {sorted(forced)}, which cannot be "
-                "dropped: 'core' places a row in time and 'species' is the "
-                "entire output of a multi-species run"
-            )
-        keep = set(LOG_GROUPS) - set(drop)
-    else:
-        keep = set(LOG_GROUPS)
-    return [c for c in cols if c[2] in keep]
-
-
-def _log_header(cols: Sequence[tuple[str, int, str, str]]) -> str:
-    """Fixed-width column header for the run log, prefixed with '#' without
-    disturbing the column alignment (so numpy.loadtxt-style readers skip it)."""
-    h = "".join(name.rjust(w) for name, w, _g, _k in cols)
-    return "#" + h[1:]  # mark as a comment without shifting the columns
-
-
-def _log_row(cols: Sequence[tuple[str, int, str, str]], values: dict[str, Any]) -> str:
-    """One fixed-width row, built from the same column list as the header.
-
-    Values are looked up BY KEY, so a column and its number cannot come apart --
-    the earlier arrangement passed a positional list of cells alongside a
-    positional list of widths, where a column inserted in one and not the other
-    silently shifted every value after it. A key with no value raises, because a
-    column the run declared and cannot fill is a defect rather than a blank.
-    """
-    out = []
-    for name, width, _group, key in cols:
-        if key not in values:
-            raise KeyError(
-                f"the log declares column {name!r} (key {key!r}) and this window "
-                f"produced no value for it; available: {sorted(values)}"
-            )
-        out.append(str(values[key]).rjust(width))
-    return "".join(out)
-
-
-LOG_HEADER = _log_header(_column_table(nvt=False, typed=False))
 
 
 def _save_pore_geometry(cfg: Config, directory: str | Path) -> None:
@@ -1017,7 +609,6 @@ def _save(
         positions=state.positions,
         step=state.step,
         rng=io.rng_state(state.rng),
-        counters=state.counters,
         params=params,
         mu=state.mu,
         n_history=state.n_history,
@@ -1044,6 +635,27 @@ def _find_matrix_snapshot(
     return None
 
 
+#: Largest allowed difference between the running U and a full recompute, in
+#: units of max(1, |U|). Roundoff over millions of moves stays far below it.
+ENERGY_DRIFT_TOL = 1e-6
+
+
+def _check_energy(state: ChainState, full: float, paths: RunPaths) -> None:
+    """Compare the running U against a full recompute and resynchronise it.
+
+    A difference beyond roundoff means an accepted move's energy change was
+    booked wrongly, which is a defect, so it raises with both numbers.
+    """
+    assert state.energy is not None
+    if abs(state.energy - full) > ENERGY_DRIFT_TOL * max(1.0, abs(full)):
+        raise RuntimeError(
+            f"{paths.directory}: running U = {state.energy!r} but a full "
+            f"recompute gives {full!r} at step {state.step}. An engine booked "
+            "a wrong energy change; the run is stopped rather than logging it."
+        )
+    state.energy = full
+
+
 def run(
     params: dict[str, Any] | str, root: str = "runs"
 ) -> tuple[ChainState, RunPaths]:
@@ -1063,6 +675,11 @@ def run(
     else:
         params_dict = params
     params = params_dict  # keep the historical local name below
+    if "framework" in params_dict:
+        raise ValueError(
+            "a params file with a `framework` block is a MOF run: run it with "
+            "`python -m gcmc run` or gcmc.framework.driver.run_framework"
+        )
 
     cfg = sim_setup.from_params(params_dict)
     # Sub-configs. Projected HERE, straight after the Config is built, and
@@ -1165,7 +782,6 @@ def run(
                 positions=ckpt["positions"],
                 step=int(ckpt["step"]),
                 rng=gen,
-                counters=dict(ckpt["counters"]),
                 mu=ckpt.get("mu"),
                 n_history=list(ckpt.get("n_history", [])),
                 species=(
@@ -1226,176 +842,95 @@ def run(
             advance = suwa_todo_dynamics.advance
         else:
             advance = metropolis_dynamics.advance
-        # Per-species occupancy columns (absent on a single-species run, where
-        # the header stays byte-identical to every log ever written here). The
-        # names come from the species file, so the header says which column is
-        # which species rather than leaving the reader to guess an id order.
+        # The species column names (None on a single-species run, which logs N).
         _species_names = (
             None if kern.species is None or kern.n_species <= 1 else kern.species.names
         )
-        # The energy column's inputs, resolved once. Typed runs use the table
-        # potential the engine itself reads (see metropolis_dynamics.advance);
-        # untyped runs use the frozen LJ shape directly, which is also what an
-        # ljaux run's energy is, whatever its auxiliary weigher is.
+        # U is tracked for Lennard-Jones runs; a hard core has U = 0.
         _pot_spec = config_specs.potential_spec(cfg)
         _lj_run = _pot_spec.potential == "lennard_jones"
         _e_table = potential if isinstance(potential, LennardJonesTable) else None
-        _cols = select_columns(
-            _column_table(
-                nvt=ens.ensemble_type in ("NVT", "semigrand"),
-                typed=_species_names is not None,
-                canonical=(ens.ensemble_type == "NVT" and _species_names is not None),
-                glauber=samp.engine in LADDER_ENGINES,
-                suwa_todo=samp.engine == "suwa_todo_dynamics",
-                esjd=io_.esjd,
-                # the plain `metropolis` sampler runs `_advance_single_particle`,
-                # which builds no esjd block: see the note in `_column_table`
-                single_particle=(samp.sampler == "metropolis"),
-                energy=_lj_run,
+
+        def _full_energy() -> float:
+            return configuration_energy(
+                state.positions,
+                kern.box_dims,
+                ens.dimension,
+                kern.upper_cutoff,
+                species=state.species if _e_table is not None else None,
+                matrix=ens.matrix_positions,
+                table=_e_table,
+                tail_pref=_pot_spec.lj_tail_pref,
             )
-            + _species_cols(_species_names),
-            include=io_.log_columns,
-            drop=io_.log_drop,
-        )
-        # flush_every is a memory cap; min_interval is the real control, and at
-        # its default of 0.0 every row is flushed exactly as before.
-        log = io.Log(
-            paths.log,
-            _log_header(_cols),
-            flush_every=1000,
-            min_interval=io_.log_flush_interval,
-        )
+
+        if _lj_run:
+            state.energy = _full_energy()
+        log = io.RunLog(paths.log)
         info = {
             "step": state.step,
             "mu": ens.chem_pot,
             "potential": kern.potential_type,
             "box": ens.box,
         }
-        # Per-type element symbols for the trajectory, or None on a
-        # single-species run, where `write_frame` keeps writing "H" and the frozen
-        # trajectory references stay valid. The species FILE owns these names --
-        # they are validated against the periodic table and checked for
-        # duplicates when it loads -- so a frame is readable back into types by
-        # exactly the mapping that wrote it.
+        # per-type element symbols for the trajectory (None writes "H")
         _traj_symbols = None if kern.species is None else kern.species.symbol
 
         # target-mu control (muVT only): drive mu so the running-mean N hits
-        # ens.target_count. state.mu carries the live mu (init from cfg on a
-        # fresh run; preserved across resume). state.n_history is the rolling
-        # window of N feeding the running mean the controller steers.
+        # ens.target_count; state.mu and state.n_history are checkpointed.
         targeting = ens.target_count is not None
         if targeting and state.mu is None:
             state.mu = ens.chem_pot
 
         win = 0
+        t_prev = time.perf_counter()
         while state.step < io_.target_cycles:
-            _t = time.perf_counter()
             stats = advance(state, cfg, potential, weigher)
-            win_wall = time.perf_counter() - _t
-            for k, v in stats["counters"].items():
-                state.counters[k] += v
-
-            # running mean of N over the control window
-            state.n_history.append(stats["N"])
-            if len(state.n_history) > ens.control_window:
-                state.n_history = state.n_history[-ens.control_window :]
-            avg_n = sum(state.n_history) / len(state.n_history)
-
-            # cavity occupancy: the last exchange's count and this window's mean.
-            # No exchange (or an engine with no cavity) leaves nothing to report.
-            _ncav_last = stats.get("n_cav_last")
-            if _ncav_last is None:
-                ncav_now, avg_ncav = "nan", "nan"
-            else:
-                ncav_now, avg_ncav = str(_ncav_last), f"{stats['n_cav']:.4f}"
+            if _lj_run:
+                assert state.energy is not None and stats["dU"] is not None
+                state.energy += stats["dU"]
 
             if targeting:
-                # Robbins-Monro update on log-N: mu += gamma * (lnN_target - lnN).
-                # Gain decays as gamma0/(1+win/tau) so mu converges and settles.
+                state.n_history.append(stats["N"])
+                if len(state.n_history) > ens.control_window:
+                    state.n_history = state.n_history[-ens.control_window :]
+                avg_n = sum(state.n_history) / len(state.n_history)
+                # Robbins-Monro on log N: mu += gamma (ln N_target - ln <N>), with
+                # gain gamma0 / (1 + win / tau) so mu settles
                 assert ens.target_count is not None and state.mu is not None
                 gamma = ens.control_gain / (1.0 + win / ens.control_gain_tau)
-                avg_safe = max(avg_n, 0.5)  # guard log at near-empty
-                state.mu += gamma * (math.log(ens.target_count) - math.log(avg_safe))
-
-            cur_mu = state.mu if state.mu is not None else ens.chem_pot
-
-            if state.step >= io_.burn_in:
-                # ONE VALUE MAP, looked up by key by `_log_row`. Every quantity a
-                # column can name is put here whether or not this run declares
-                # that column, so the row can never be shorter than the header
-                # and a column can never take its neighbour's number.
-                cc = stats["counters"]
-                # `advance_parallel` carries no clique accumulators; a missing
-                # block reads as zeros rather than raising, which keeps a
-                # parallel run's layout the same as a serial one's.
-                clq = stats.get("clique") or {}
-                values: dict[str, Any] = {
-                    "cycle": f"{state.step / 1e6:.6f}",
-                    "N": stats["N"],
-                    "wall": f"{win_wall:.4f}",
-                    "packing": f"{stats['packing_fraction']:.8f}",
-                    "mu": f"{cur_mu:.6f}",
-                    "avg_n": f"{avg_n:.4f}",
-                    "avg_ncav": avg_ncav,
-                    "n_cav": ncav_now,
-                }
-                if _lj_run:
-                    _u = configuration_energy(
-                        state.positions,
-                        kern.box_dims,
-                        ens.dimension,
-                        kern.upper_cutoff,
-                        species=state.species if _e_table is not None else None,
-                        matrix=ens.matrix_positions,
-                        table=_e_table,
-                        tail_pref=_pot_spec.lj_tail_pref,
-                    )
-                    values["energy"] = f"{_u:.6f}"
-                for _k, _v in cc.items():
-                    values[_k] = _v
-                for _tag in ("A", "R", "P"):
-                    for _suffix in ("n", "pos", "new", "pos_acc", "new_acc"):
-                        values[f"clique.{_tag}_{_suffix}"] = clq.get(
-                            f"{_tag}_{_suffix}", 0
-                        )
-                # The Glauber engine's diagnostics, absent on every other
-                # engine (where the block is missing and the columns are not
-                # declared either, so nothing is looked up).
-                for _k, _v in (stats.get("glauber") or {}).items():
-                    values[f"glauber.{_k}"] = (
-                        f"{_v:.6g}" if isinstance(_v, float) else _v
-                    )
-                # ESJD, absent unless `run.esjd` asked for it -- in which case
-                # the columns are declared too, so the two either both appear or
-                # neither does. Formatted like the Glauber block: `dN_sq`,
-                # `moves` and `translations` are counts that happen to be
-                # carried as floats, and `%.6g` prints them as the integers they
-                # are while leaving `dr_sq` readable.
-                for _k, _v in (stats.get("esjd") or {}).items():
-                    values[f"esjd.{_k}"] = f"{_v:.6g}" if isinstance(_v, float) else _v
-                if _species_names is not None:
-                    # Indexed BY NAME rather than `.get`-ed: on a typed run the
-                    # engine always emits the composition, so a missing key is a
-                    # defect and a KeyError names the window it happened in.
-                    # Defaulting to zeros here would write a composition of
-                    # (0, 0) into a file that otherwise looks complete.
-                    _n_s = [stats["n_by_species"][n] for n in _species_names]
-                    if sum(_n_s) != stats["N"]:
-                        raise AssertionError(
-                            f"composition {_n_s} sums to {sum(_n_s)} against N = "
-                            f"{stats['N']}: the species column and the positions "
-                            "have come apart"
-                        )
-                    for _name, _count in zip(_species_names, _n_s):
-                        values[f"species.{_name}"] = _count
-                log.write(_log_row(_cols, values))
+                state.mu += gamma * (
+                    math.log(ens.target_count) - math.log(max(avg_n, 0.5))
+                )
 
             win += 1
-            if win % io_.checkpoint_every == 0:
+            checkpoint_now = win % io_.checkpoint_every == 0
+            if checkpoint_now and _lj_run:
+                _check_energy(state, _full_energy(), paths)
+            if state.step >= io_.burn_in:
+                row: dict[str, Any] = {io.LOG_CYCLE: state.step / 1e6}
+                if _species_names is None:
+                    row["N"] = stats["N"]
+                else:
+                    counts = stats["n_by_species"]
+                    for name in _species_names:
+                        row[f"N_{name}"] = counts[name]
+                if _lj_run:
+                    row["U"] = state.energy
+                if targeting:
+                    row["mu"] = state.mu
+                row.update(stats["columns"])
+                now = time.perf_counter()
+                row["wall_s"] = now - t_prev
+                t_prev = now
+                log.write(row)
+            else:
+                t_prev = time.perf_counter()
+            if checkpoint_now:
+                log.flush()
                 _save(paths, cfg, state, params)
             if io_.traj_every >= 1 and win % io_.traj_every == 0:
                 info["step"] = state.step
-                info["mu"] = cur_mu
+                info["mu"] = state.mu if state.mu is not None else ens.chem_pot
                 io.write_frame(
                     paths,
                     state.positions,

@@ -174,7 +174,7 @@ n_windows = MC // cfg.sampling_window
 mine_eta = []
 t0 = time.time()
 for _ in range(n_windows):
-    mine_eta.append(engine.advance(st, cfg, pot, w)["packing_fraction"])
+    mine_eta.append(cfg.packing_fraction(engine.advance(st, cfg, pot, w)["N"]))
 t_mine = time.time() - t0
 mine_eta = np.array(mine_eta)
 

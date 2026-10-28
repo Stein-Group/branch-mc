@@ -13,7 +13,7 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
 from gcmc.run import hash_fingerprint as identity
-from gcmc.run import runner
+from gcmc.run import io, runner
 from gcmc.run import sim_setup as config
 
 
@@ -55,11 +55,11 @@ with tempfile.TemporaryDirectory() as tmp:
 
     # 3. RNG continuity: one-shot to 1200 vs 600-then-1200 restart -> identical
     one = os.path.join(tmp, "one")
-    s_one, _ = runner.run(base(1200), root=one)
+    s_one, p_one = runner.run(base(1200), root=one)
 
     two = os.path.join(tmp, "two")
     runner.run(base(600), root=two)  # first leg, checkpoints at 600
-    s_two, _ = runner.run(base(1200), root=two)  # resume to 1200
+    s_two, p_two = runner.run(base(1200), root=two)  # resume to 1200
 
     assert s_one.step == s_two.step == 1200, (s_one.step, s_two.step)
     assert s_one.positions.shape == s_two.positions.shape, (
@@ -70,12 +70,13 @@ with tempfile.TemporaryDirectory() as tmp:
     )
     print("  ok  restart reproduces one-shot exactly (N =", len(s_one.positions), ")")
 
-    # 4. counters survive the restart (cumulative, non-zero)
-    assert (
-        s_two.counters["add_step"] > 0
-        and s_two.counters["add_step"] == s_one.counters["add_step"]
-    ), "counters not continuous across restart"
-    print("  ok  counters continuous across restart")
+    # 4. the restarted log matches the one-shot log row for row
+    log_one, log_two = io.read_log(p_one.log), io.read_log(p_two.log)
+    assert log_one.keys() == log_two.keys()
+    for k in log_one:
+        if k != "wall_s":
+            assert np.array_equal(log_one[k], log_two[k]), f"{k} differs after restart"
+    print("  ok  log continuous across restart")
 
     # 5. lock refuses a second holder
     root5 = os.path.join(tmp, "r5")

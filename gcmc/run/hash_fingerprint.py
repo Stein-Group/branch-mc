@@ -86,6 +86,9 @@ def identity_dict(cfg: Config) -> dict[str, object]:
     out: dict[str, Any] = {}
     for spec in config_specs.physics_specs(cfg):
         for field in dataclasses.fields(spec):
+            # the frozen matrix enters as `_matrix_digest`, not as coordinates
+            if field.name == "matrix_positions":
+                continue
             value = getattr(spec, field.name)
             if value is not None:
                 out[field.name] = _canon(value)

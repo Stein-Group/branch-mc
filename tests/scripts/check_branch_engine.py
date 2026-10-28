@@ -40,7 +40,7 @@ def run(branch, nwin=NW):
     w = engine.make_weigher(config_specs.kernel_spec(cfg), pot)
     st = ChainState.fresh(3, seed=1)
     st.positions = np.random.default_rng(2).uniform(1, 19, size=(40, 3))
-    return [engine.advance(st, cfg, pot, w)["packing_fraction"] for _ in range(nwin)]
+    return [cfg.packing_fraction(engine.advance(st, cfg, pot, w)["N"]) for _ in range(nwin)]
 
 
 eb = run(True)

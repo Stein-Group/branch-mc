@@ -10,10 +10,12 @@ framework:
                               overlap test is the framework's, whose pair energy
                               is per-pair typed, and whose one-body term is the
                               host, then hands it to the shared loop
-  advance_metropolis_mof      the single-species convenience wrapper
-  channel_repack_move_ms      the whole-window heat-bath repack and the
-                              two energy helpers that serve only it
-  mof_energy_decomposition    the per-term energy report the isotherm CSV streams
+  framework_ladder_move       the bulk engine's ladder window move
+  ladder_window_moves_ms      (glauber_dynamics.LadderMove) configured for and
+                              applied to a framework: branch or channel body,
+                              Suwa-Todo or heat-bath kernel
+  mof_energy                  host-guest and guest-guest energy from scratch, the
+                              oracle the running energy is checked against
   MofResult                   what a framework window returns
 
 Everything here runs in the engine's reduced units: the caller reduces positions,
@@ -32,27 +34,15 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
 from .._types import RNG, FloatArray, IntArray
 from ..forcefield.lj_table import FrameworkField, LennardJonesTable
-from ..forcefield.overlap import OVERLAP_TOL as _TOL
-from ..forcefield.pair_table import PairTable, table_pair_energy_sq
-from ..proposals import moves
-from ..proposals.channel_move import (
-    assign_species,
-    frozen_neighbours_from_array,
-    pool_one_body_logweights,
-    window_guard_ok,
-)
-from ..sampling.channel import (
-    ChannelSweepLJ,
-    ladder_probs,
-    window_ladder_logw,
-)
-from ..space.body import cuboid_members, local_from_box, oriented_cuboid_trials
-from ..system.state import zero_counters
+from ..forcefield.pair_table import PairTable
+from ..space import neighbors
+from .glauber_dynamics import LADDER_ENGINES, LadderMove, SlotTable, new_window_stats
 from .metropolis_dynamics import MetropolisModel, metropolis_window
 
 
@@ -66,77 +56,16 @@ class MofResult:
 
     n: int
     positions: FloatArray  # reduced units, (N, dim)
-    counters: dict[str, int]
+    counters: dict[str, Any]  # the window's log columns (raw counts and sums)
     loading: float  # guests per unit cell, a reporting convenience
     species: IntArray | None = None  # per-particle type id, aligned to positions
     n_by_type: dict[int, int] | None = None  # per-species counts N_s (A4.2)
     n_evals: int = 0  # guest-guest pair distances evaluated (efficiency metric)
+    du_guest: float = 0.0  # guest-guest energy change of the accepted moves
+    du_host: float = 0.0  # host-guest energy change of the accepted moves
 
 
-def advance_metropolis_mof(
-    positions: FloatArray,
-    rng: np.random.Generator,
-    *,
-    field: FrameworkField,
-    table: PairTable,
-    guest_type: int,
-    beta: float,
-    z_star: float,
-    box: FloatArray,
-    volume: float,
-    n_cells: float,
-    upper_cutoff: float,
-    move_factor: float,
-    n_neigh: int,
-    window: int,
-) -> MofResult:
-    """One sampling window of single-species GCMC in the framework.
-
-    A thin wrapper over `advance_metropolis_mof_ms` with a one-entry activity
-    map: at a single species the ms loop takes the same three-way move choice
-    and draws no species or swap randomness, so the trajectory is the original
-    Phase 3 single-species one, pinned bit-for-bit by the golden fixed-seed test.
-    The result is stripped back to the single-species shape (no species column,
-    no swap counters) so existing callers see exactly what they always did.
-
-    `z_star` is the reduced activity z* = f sigma_ref^3 / (kB T) (P0.4), so the
-    insertion acceptance is z* V / (N+1) * exp(-beta dU) with dU the FULL energy
-    change including the framework. Deletion is the exact reverse. `volume` and
-    `box` are reduced; `n_cells` is only for the loading report.
-    """
-    spc = np.full(len(positions), guest_type, dtype=np.int64)
-    res = advance_metropolis_mof_ms(
-        positions,
-        spc,
-        rng,
-        field=field,
-        table=table,
-        z_star={guest_type: z_star},
-        beta=beta,
-        box=box,
-        volume=volume,
-        n_cells=n_cells,
-        upper_cutoff=upper_cutoff,
-        move_factor=move_factor,
-        n_neigh=n_neigh,
-        window=window,
-    )
-    counters = {k: v for k, v in res.counters.items() if not k.startswith("swap")}
-    return MofResult(
-        n=res.n, positions=res.positions, counters=counters, loading=res.loading
-    )
-
-
-# The move split now lives in gcmc/proposals/moves.py, so the main engine and this
-# loop cannot drift apart on it. Re-exported under the old private names because
-# tests and the golden pin refer to them, and because the reason they are what
-# they are -- swap carved out of the translate budget so P(add) == P(remove) --
-# is documented there rather than twice.
-_MS_MOVES = moves.MS_MOVES
-_MS_PROBS = moves.MS_PROBS
-
-
-def mof_energy_decomposition(
+def mof_energy(
     positions: FloatArray,
     species: IntArray,
     *,
@@ -144,54 +73,36 @@ def mof_energy_decomposition(
     table: PairTable,
     beta: float,
     upper_cutoff: float,
-) -> dict[str, float]:
-    """Full reduced-unit energy decomposition of a configuration, computed from
-    scratch (O(N^2), off the sampling hot path). Returns host-guest per species
-    (`u_hg_<name>`), guest-guest per unordered species pair (`u_gg_<a>_<b>`), and
-    `u_total`. Used by the record-run stream (R2.4b) so fluctuation-formula
-    enthalpies and partial-molar properties are recoverable at any truncation;
-    it also doubles as the drift oracle for an incremental-U tracker."""
+) -> tuple[float, float]:
+    """(host-guest, guest-guest) energy of a configuration, from scratch.
+
+    The oracle the running energy is checked against at each checkpoint.
+    """
     pos = np.ascontiguousarray(positions, float)
     spc = np.ascontiguousarray(species, np.int64).reshape(-1)
-    types = sorted({int(t) for t in spc.tolist()})
-    names = {t: table.types[t] for t in types}
     pots = {
         t: LennardJonesTable(
             beta=beta, table=table, trial_type=t, upper_cutoff=upper_cutoff
         )
-        for t in types
+        for t in {int(t) for t in spc.tolist()}
     }
     box = field.box
-    out: dict[str, float] = {}
-    u_hg: dict[int, float] = dict.fromkeys(types, 0.0)
-    for i in range(len(pos)):
-        s = int(spc[i])
-        u_hg[s] += float(field.energy(pos[i], s))
-    u_gg: dict[tuple[int, int], float] = {}
-    for i in range(len(pos)):
-        si = int(spc[i])
-        for j in range(i + 1, len(pos)):
-            sj = int(spc[j])
-            dr = pos[i] - pos[j]
-            dr -= box * np.round(dr / box)
-            r = float(np.sqrt(dr @ dr))
-            if 0.0 < r < upper_cutoff:
-                key = (si, sj) if si <= sj else (sj, si)
-                u_gg[key] = u_gg.get(key, 0.0) + float(
-                    pots[si].total_energy(np.array([r]), neighbour_types=np.array([sj]))
+    u_host = 0.0
+    for t in np.unique(spc).tolist():
+        u_host += float(np.sum(field.energy_many(pos[spc == t], int(t))))
+    u_guest = 0.0
+    for i in range(len(pos) - 1):
+        dr = pos[i] - pos[i + 1 :]
+        dr -= box * np.round(dr / box)
+        r = np.sqrt(np.einsum("ij,ij->i", dr, dr))
+        live = (r > 0.0) & (r < upper_cutoff)
+        if live.any():
+            u_guest += float(
+                pots[int(spc[i])].total_energy(
+                    r[live], neighbour_types=spc[i + 1 :][live]
                 )
-    total = 0.0
-    for t in types:
-        label = names[t]
-        out[f"u_hg_{label}"] = u_hg[t]
-        total += u_hg[t]
-    for (a, b), v in sorted(u_gg.items()):
-        la = names.get(a, str(a))
-        lb = names.get(b, str(b))
-        out[f"u_gg_{la}_{lb}"] = v
-        total += v
-    out["u_total"] = total
-    return out
+            )
+    return u_host, u_guest
 
 
 def advance_metropolis_mof_ms(
@@ -211,8 +122,19 @@ def advance_metropolis_mof_ms(
     n_neigh: int,
     window: int,
     species_probs: dict[int, float] | None = None,
+    exchange: bool = True,
+    move_probs: tuple[float, float, float] | None = None,
+    count_every_move: bool = False,
 ) -> MofResult:
     """One sampling window of multi-species GCMC in the framework.
+
+    `move_probs` / `count_every_move`: a framework params file's stated
+    (translation, exchange, identity swap) probabilities, and a window that
+    counts every proposal; both default to the historical behaviour.
+
+    `exchange=False` drops the single-particle insert/delete from the window
+    (translation and, for a mixture, identity swap remain at their 2:1 ratio),
+    for a run whose number changes come from `ladder_window_moves_ms` alone.
 
     A FRAMEWORK ADAPTER over `metropolis_dynamics.metropolis_window`. What is
     framework-specific is three answers a `MetropolisModel` gives -- a framework
@@ -278,150 +200,44 @@ def advance_metropolis_mof_ms(
         field=field,
         table=table,
         pots=pots,
+        exchange=exchange,
+        move_probs=move_probs,
+        count_every_move=count_every_move,
     )
 
-    counters = zero_counters()
-    pos, out_spc, n_evals = metropolis_window(pos, spc, rng, model, window, counters)
+    counters: dict[str, Any] = {
+        "translate_tried": 0,
+        "translate_accepted": 0,
+        "translate_sum_dr2": 0.0,
+    }
+    if exchange:
+        counters.update(
+            insert_tried=0, insert_accepted=0, delete_tried=0, delete_accepted=0
+        )
+    if n_species > 1:
+        counters.update(swap_tried=0, swap_accepted=0)
+    energy: dict[str, float] = {}
+    pos, out_spc, n_evals = metropolis_window(
+        pos, spc, rng, model, window, counters, energy
+    )
     assert out_spc is not None
     spc = out_spc
 
-    # The eight counters this result has always carried. `zero_counters` holds a
-    # superset (the cavity samplers' repack keys, and `add_attempt`); projecting
-    # here rather than teaching the shared loop two counter schemas is what keeps
-    # the golden pin's dict exactly the shape it was.
-    c = {
-        k: counters[k]
-        for k in (
-            "move_step",
-            "move_accept",
-            "add_step",
-            "add_accept",
-            "remove_step",
-            "remove_accept",
-            "swap_step",
-            "swap_accept",
-        )
-    }
     n_by_type = {t: int(np.count_nonzero(spc == t)) for t in guest_types}
     return MofResult(
         n=len(pos),
         positions=pos,
-        counters=c,
+        counters=counters,
         loading=len(pos) / n_cells,
         species=spc,
         n_by_type=n_by_type,
         n_evals=n_evals,
+        du_guest=energy["guest"],
+        du_host=energy["host"],
     )
 
 
-def _exterior_logweights(
-    pool_P: FloatArray,
-    pool_s: IntArray,
-    ext_P: FloatArray,
-    ext_s: IntArray,
-    field: FrameworkField,
-    table: PairTable,
-    box: FloatArray,
-    beta: float,
-    rc: float,
-    z_star: dict[int, float],
-) -> tuple[FloatArray, IntArray]:
-    """One-body log-weight of each pool member: log z*_s - beta*(u_framework +
-    u_exterior), where u_exterior is the LJ interaction with the FROZEN guests
-    outside the window (within rc, minimum image). A member overlapping the
-    framework or any exterior guest for its species is inadmissible."""
-    n = len(pool_P)
-    logw = np.full(n, -np.inf)
-    adm = np.zeros(n, dtype=bool)
-    floor = table.core_floor
-    for i in range(n):
-        s = int(pool_s[i])
-        p = pool_P[i]
-        if field.overlaps(p, s):
-            continue
-        u = field.energy(p, s)
-        if len(ext_P):
-            dr = ext_P - p
-            dr -= box * np.round(dr / box)
-            d2 = np.einsum("ij,ij->i", dr, dr)
-            fl = floor[s, ext_s]
-            if (d2 <= (fl - _TOL) ** 2).any():
-                continue  # overlaps a frozen exterior guest
-            within = d2 < rc * rc
-            if within.any():
-                for sj in np.unique(ext_s[within]):
-                    g = within & (ext_s == sj)
-                    u += float(np.sum(table_pair_energy_sq(d2[g], s, int(sj), table)))
-        logw[i] = np.log(z_star[s]) - beta * u
-        adm[i] = True
-    return logw, adm
-
-
-def _guest_guest_split(
-    P: FloatArray,
-    sp: IntArray,
-    ext_P: FloatArray,
-    ext_s: IntArray,
-    table: PairTable,
-    box: FloatArray,
-    rc_short: float,
-    rc_full: float,
-) -> tuple[float, float]:
-    """(U_short, U_full) guest-guest energy of the group `P`: against the frozen
-    exterior guests plus pairs inside the group, at two radii from one distance
-    computation.
-
-    THE FRAMEWORK TERM IS ABSENT ON PURPOSE, and that is the whole design decision
-    for the MOF half. The dual-cutoff correction is a difference between the
-    proposal potential and the target potential; the framework field is evaluated
-    EXACTLY in both, so it cancels identically and must not appear here. Shortening
-    it would have bought nothing anyway -- it enters the sweep as a one-body scalar
-    per trial, so a shorter framework cutoff does not shrink the DP at all, while
-    it would add correction variance for free.
-
-    Type-dependent throughout: every pair uses table_pair_energy_sq for its own
-    (species_i, species_j), so a mixture is handled by construction rather than by
-    an effective single-component sigma.
-    """
-    box = np.asarray(box, float)
-    us = uf = 0.0
-    r2s, r2f = rc_short * rc_short, rc_full * rc_full
-    if len(ext_P):
-        for i in range(len(P)):
-            dr = ext_P - P[i]
-            dr -= box * np.round(dr / box)
-            d2 = np.einsum("ij,ij->i", dr, dr)
-            si = int(sp[i])
-            for sj in np.unique(ext_s):
-                g = ext_s == sj
-                d2g = d2[g]
-                for r2, acc in ((r2f, "f"), (r2s, "s")):
-                    m = d2g < r2
-                    if m.any():
-                        e = float(
-                            np.sum(table_pair_energy_sq(d2g[m], si, int(sj), table))
-                        )
-                        if acc == "f":
-                            uf += e
-                        else:
-                            us += e
-    for i in range(len(P)):
-        for j in range(i + 1, len(P)):
-            dr = P[i] - P[j]
-            dr -= box * np.round(dr / box)
-            d2 = float(dr @ dr)
-            si, sj = int(sp[i]), int(sp[j])
-            if d2 < r2f:
-                uf += float(table_pair_energy_sq(np.array([d2]), si, sj, table)[0])
-            if d2 < r2s:
-                us += float(table_pair_energy_sq(np.array([d2]), si, sj, table)[0])
-    return us, uf
-
-
-def channel_repack_move_ms(
-    pos: FloatArray,
-    spc: IntArray,
-    rng: RNG,
+def framework_ladder_move(
     *,
     field: FrameworkField,
     table: PairTable,
@@ -429,336 +245,115 @@ def channel_repack_move_ms(
     beta: float,
     box: FloatArray,
     rc: float,
-    guest_types: list[int],
-    L_long: float,
-    w: float,
-    n_trials: int,
-    species_probs: FloatArray | None = None,
-    rc_aux: float | None = None,
-    stats: dict[str, float] | None = None,
-) -> tuple[FloatArray, IntArray, bool]:
-    """One whole-window heat-bath repack (A5.6 wiring).
-
-    Place a random oriented cuboid, take its current occupants as the block to
-    resample (count k), build a pool of those occupants plus n_trials fresh
-    candidates (each carrying its one-body weight = z* * exp(-beta*(framework +
-    frozen-exterior))), run the multi-species LJ sweep, and draw a fresh k-clique
-    in proportion to its weight. Because the pool contains the current occupants
-    and the block count k is conserved, this is a heat-bath move: forward and
-    reverse share the pool and the k_trials factors cancel, so it is accepted
-    with probability 1 (pore convention: no tail). It resamples the window's
-    positions AND its composition at fixed local count; conventional insert /
-    delete / swap moves carry the number changes.
-
-    Returns (pos, spc, moved). `moved` is False when the window is empty or the
-    guard fails (nothing to do), leaving the state untouched.
-    """
-    box = np.asarray(box, float)
-    gt = list(guest_types)
-    if species_probs is None:
-        species_probs = np.full(len(gt), 1.0 / len(gt))
-    if stats is not None:
-        stats["attempts"] = stats.get("attempts", 0.0) + 1.0
-    cutoff = float(rc)
-    if not window_guard_ok(L_long, w, box, cutoff):
-        return pos, spc, False
-
-    center = rng.uniform(0.0, 1.0, size=3) * box
-    # a fixed orientation for this window (per-axis box: non-cubic safe)
-    _, R = oriented_cuboid_trials(rng, center, 1, L_long, w, box)
-    half_long, half_w = 0.5 * L_long, 0.5 * w
-    inside = cuboid_members(pos, center, R, half_long, half_w, box)
-    k = len(inside)
-    if stats is not None:
-        # k is the whole ballgame for V5: the DP only beats single-particle moves
-        # when one window holds several guests. k == 1 means the sweep is doing
-        # single-particle work while paying transfer-matrix overhead.
-        stats["k_sum"] = stats.get("k_sum", 0.0) + float(k)
-        stats["k_max"] = max(stats.get("k_max", 0.0), float(k))
-    if k == 0:
-        return pos, spc, False
-
-    # fresh trial cloud in the same cuboid, species assigned
-    a, b = half_long, half_w
-    Uf = np.column_stack(
-        [
-            rng.uniform(-a, a, n_trials),
-            rng.uniform(-b, b, n_trials),
-            rng.uniform(-b, b, n_trials),
-        ]
-    )
-    Pf = np.mod(center + Uf @ R.T, box)
-    sf = assign_species(n_trials, gt, species_probs, rng)
-
-    occ_P = pos[inside]
-    occ_s = spc[inside].astype(np.int64)
-    outside = np.ones(len(pos), dtype=bool)
-    outside[inside] = False
-    ext_P = pos[outside]
-    ext_s = spc[outside].astype(np.int64)
-
-    pool_P = np.vstack([occ_P, Pf])
-    pool_s = np.concatenate([occ_s, sf])
-    # PROPOSAL radius. With no auxiliary this is `rc` and every expression below
-    # is what it was, heat-bath and all. With one, the guest-guest terms -- the
-    # exterior one-body sum here and the intra-pool window in the sweep -- are
-    # evaluated at the shorter radius, and the mismatch is divided back out in an
-    # acceptance test that this move did not previously need.
-    rc_sel = rc if rc_aux is None else float(rc_aux)
-    logw, adm = _exterior_logweights(
-        pool_P, pool_s, ext_P, ext_s, field, table, box, beta, rc_sel, z_star
-    )
-    # Rosenbluth correction: a fresh trial's species is drawn with probability
-    # p_s, so its Boltzmann weight is divided by p_s to unbias the generation.
-    # For the shipped uniform default this is a global constant over a fixed-k
-    # clique and cancels; for non-uniform species_probs it keeps the composition
-    # exactly balanced.
-    p_map = {int(t): float(species_probs[i]) for i, t in enumerate(gt)}
-    logp = np.array([np.log(p_map[int(s)]) for s in pool_s])
-    logw = logw - logp
-    member_weights = np.where(adm, np.exp(np.clip(logw, -700, 700)), 0.0)
-    U = local_from_box(pool_P, center, R, box)
-
-    sweep = ChannelSweepLJ(
-        U,
-        member_weights,
-        float("nan"),
-        rc_sel,
-        beta,
-        k,
-        species=pool_s,
-        floor=table.core_floor,
-        table=table,
-    )
-    if not np.isfinite(sweep.log_weight(k)):
-        return pos, spc, False
-    idx = sweep.sample(k, rng)
-    if idx is None:
-        return pos, spc, False
-
-    new_P = pool_P[list(idx)]
-    new_s = pool_s[list(idx)]
-
-    # ACCEPTANCE. Without an auxiliary this move is a heat bath and is accepted
-    # unconditionally: the pool contains the current occupants, k is conserved, so
-    # the Rosenbluth sums and the k_trials factors cancel between the forward and
-    # reverse legs and nothing survives.
-    #
-    # A shorter PROPOSAL radius breaks exactly that cancellation, and only that
-    # one. What survives is the same term as in the bulk engine:
-    #
-    #   Delta_corr = beta * [ (U_new^rc - U_new^aux) - (U_old^rc - U_old^aux) ]
-    #
-    # over guest-guest energy only -- group against the frozen exterior plus pairs
-    # within the group. The framework field is evaluated exactly at both radii and
-    # cancels identically, which is why it is absent from _guest_guest_split.
-    #
-    # So the move stops being a heat bath the moment rc_aux is set. That is a real
-    # cost, not a technicality: it needs a reject path, and this one restores
-    # nothing because `pos`/`spc` are only rebuilt on the accept branch.
-    #
-    # THE CONDITION IS "AN AUXILIARY IS CONFIGURED", not "it is shorter than rc".
-    # It read `rc_aux is not None and rc_sel < rc`, which made the no-op control
-    # arm -- `sweep_rc_aux == rc`, the spec `test_run_mof_stream_integrity` calls
-    # `noop` -- skip the correction entirely. Same defect as the bulk engine's
-    # `aux_on = ljbranch and rc_sel < uc` and the typed `aux: {control: true}`,
-    # in a third place: the arm whose whole job is to check where the correction
-    # is inserted never reached it, and passed.
-    #
-    # At rc_sel == rc the two splits are the same sum over the same pairs, so
-    # `delta_corr` is exactly 0.0, `delta_corr > 0.0` is False, no RNG value is
-    # drawn and nothing is rejected. The chain is therefore bit-identical to the
-    # auxiliary-off chain -- which is now a measured claim rather than a
-    # structural one, and the reject path below is what it is measuring.
-    if rc_aux is not None:
-        us_new, uf_new = _guest_guest_split(
-            new_P, new_s, ext_P, ext_s, table, box, rc_sel, rc
-        )
-        us_old, uf_old = _guest_guest_split(
-            occ_P, occ_s, ext_P, ext_s, table, box, rc_sel, rc
-        )
-        delta_corr = beta * ((uf_new - us_new) - (uf_old - us_old))
-        if stats is not None:
-            # running moments of the auxiliary correction: sd(Delta_corr) is THE
-            # diagnostic for a proposal radius that is too short (the README's
-            # aux_corr_sd, which the MOF path did not report). Kept as sums so it
-            # survives an arbitrary walltime truncation like every other counter.
-            stats["corr_n"] = stats.get("corr_n", 0.0) + 1.0
-            stats["corr_sum"] = stats.get("corr_sum", 0.0) + float(delta_corr)
-            stats["corr_sumsq"] = stats.get("corr_sumsq", 0.0) + float(delta_corr) ** 2
-        if delta_corr > 0.0 and np.log(rng.random()) >= -delta_corr:
-            return pos, spc, False
-
-    pos = np.vstack([ext_P, new_P])
-    spc = np.concatenate([ext_s, new_s])
-    if stats is not None:
-        stats["accepts"] = stats.get("accepts", 0.0) + 1.0
-    return pos, spc, True
-
-
-def glauber_window_move_ms(
-    pos: FloatArray,
-    spc: IntArray,
-    rng: RNG,
-    *,
-    field: FrameworkField,
-    table: PairTable,
-    z_star: dict[int, float],
-    beta: float,
-    box: FloatArray,
-    rc: float,
-    guest_types: list[int],
-    L_long: float,
-    w: float,
-    n_pool: int,
+    engine: str,
+    sampler: str,
+    channel_length: float,
+    channel_width: float,
+    trial_density: float,
+    M: int,
     kmax: int,
-    species_probs: FloatArray | None = None,
-    stats: dict[str, float] | None = None,
-) -> tuple[FloatArray, IntArray, int]:
-    """G8: ONE rejection-free Glauber engine inside a rigid framework.
+    kmax_margin: int = 0,
+    species_probs: dict[int, float] | None = None,
+) -> LadderMove:
+    """The bulk engine's ladder window move, configured for a rigid host.
 
-    The number-changing sibling of `channel_repack_move_ms`, and the difference
-    is exactly the ladder. That move resamples a window's content at FIXED k, so
-    the combinatorial and activity factors cancel between the forward and
-    reverse legs and it is accepted unconditionally by cancellation. This one
-    draws k from the exact conditional
+    NOT A SECOND IMPLEMENTATION. `glauber_dynamics.LadderMove` is the one window
+    move -- body, pool, one-body weights, ladder, kernel, commit -- and this only
+    states the framework's state point to it: the host `field` (which enters the
+    one-body weight and nowhere else), the per-pair table, the guests' activities
+    and draw probabilities. `sampler` is "channel" (the rod, transfer matrix) or
+    "branch" (the cube cavity, clique algebra); `engine` is "suwa_todo_dynamics"
+    or "glauber_dynamics". M and kmax come from `sim_setup.ladder_window`, the
+    same derivation and the same refusals as a bulk params file.
 
-        P(k)  prop  (M - k)! * W_k * exp(...)      (window_ladder_logw)
-
-    and is accepted unconditionally by CONSTRUCTION: dN = k_new - k_in takes any
-    sign and any magnitude up to kmax, so insertion and deletion cease to be
-    separate moves in the pore as well as in the bulk.
-
-    THE POOL IS ALWAYS EXACTLY `n_pool` POINTS -- the window's current occupants
-    first, then `n_pool - k_in` fresh trials -- with inadmissible rows kept at
-    weight zero rather than dropped, because the (M-k)! counts orderings of an
-    M-element pool (section 2B.5). The one-body weight of each row carries the
-    activity, the window volume, the species-draw probability and the framework
-    plus frozen-exterior energy, once each, through the same
-    `pool_one_body_logweights` the bulk engine uses.
-
-    THE GUARD RAISES HERE, and that is G8.5. `channel_repack_move_ms` treats a
-    guard failure as a silent runtime no-op -- it returns the state untouched
-    with a `stats["attempts"]` bump -- and copying that would be the worst
-    available choice for this engine: under the Glauber engine it means the chain never
-    exchanges and produces a plausible-looking wrong isotherm with nothing in the
-    log to say so. A geometry that does not fit is a configuration error, so it
-    is an exception.
-
-    Returns (positions, species, k_new - k_in).
+    Always typed, even for one guest: guest type ids are the force field's, so a
+    pure-Kr run is type 1, and the untyped path's all-zero species column would
+    silently make it Xe.
     """
-    box = np.asarray(box, float)
-    gt = list(guest_types)
-    if species_probs is None:
-        species_probs = np.full(len(gt), 1.0 / len(gt))
-    if kmax < 1 or kmax > n_pool:
-        raise ValueError(
-            f"the Glauber engine needs 1 <= kmax <= M, got kmax={kmax} and M={n_pool}"
-        )
-    if not window_guard_ok(L_long, w, box, float(rc)):
-        raise ValueError(
-            f"channel window violates the periodic guard: "
-            f"sqrt(L_long^2 + 2 w^2) must be <= min(box) - rc ({float(rc):.3f}). "
-            "Under the Glauber engine this cannot be a runtime no-op: the chain would "
-            "never exchange and would produce a plausible-looking wrong "
-            "isotherm with nothing in the log to say so."
-        )
-    if stats is not None:
-        stats["attempts"] = stats.get("attempts", 0.0) + 1.0
-
-    center = rng.uniform(0.0, 1.0, size=3) * box
-    _, R = oriented_cuboid_trials(rng, center, 1, L_long, w, box)
-    half_long, half_w = 0.5 * L_long, 0.5 * w
-    inside = cuboid_members(pos, center, R, half_long, half_w, box)
-    k_in = len(inside)
-    if stats is not None:
-        stats["k_sum"] = stats.get("k_sum", 0.0) + float(k_in)
-        stats["k_max"] = max(stats.get("k_max", 0.0), float(k_in))
-    if k_in > min(kmax, n_pool):
-        # section 3.7: the construction is defined only for
-        # k_in <= min(kmax, M), and the kernel is the identity elsewhere -- a
-        # legal kernel, provided the identity is COUNTED
-        if stats is not None:
-            stats["truncated"] = stats.get("truncated", 0.0) + 1.0
-        return pos, spc, 0
-
-    v_w = float(L_long) * float(w) ** 2
-    a, b = half_long, half_w
-    n_new = n_pool - k_in
-    Uf = np.column_stack(
+    if engine not in LADDER_ENGINES:
+        raise ValueError(f"engine={engine!r} is not a ladder dynamics {LADDER_ENGINES}")
+    if sampler not in ("channel", "branch"):
+        raise ValueError(f"sampler={sampler!r}: the ladder needs 'channel' or 'branch'")
+    guest_ids = sorted(int(t) for t in z_star)
+    probs = np.array(
         [
-            rng.uniform(-a, a, n_new),
-            rng.uniform(-b, b, n_new),
-            rng.uniform(-b, b, n_new),
-        ]
+            1.0 / len(guest_ids) if species_probs is None else species_probs[t]
+            for t in guest_ids
+        ],
+        dtype=float,
     )
-    Pf = np.mod(center + Uf @ R.T, box)
-    sf = assign_species(n_new, gt, species_probs, rng)
-
-    outside = np.ones(len(pos), dtype=bool)
-    outside[inside] = False
-    ext_P, ext_s = pos[outside], spc[outside].astype(np.int64)
-    pool_P = np.vstack([pos[inside], Pf]) if k_in else Pf
-    pool_s = np.concatenate([spc[inside].astype(np.int64), sf])
-    assert len(pool_P) == n_pool, (
-        f"pool has {len(pool_P)} rows for M = {n_pool}: inadmissible trials must "
-        "be kept at weight zero, never dropped"
-    )
-
+    n_t = 1 + max(guest_ids)
+    log_z_arr = np.zeros(n_t)
+    log_p_arr = np.zeros(n_t)
+    for t, p in zip(guest_ids, probs):
+        log_z_arr[t] = math.log(z_star[t])
+        log_p_arr[t] = math.log(p)
+    box = np.asarray(box, float)
     floor = table.core_floor
-    logw, adm = pool_one_body_logweights(
-        pool_P,
-        pool_s,
-        beta=beta,
-        log_z={t: math.log(z_star[t]) for t in gt},
-        log_volume=math.log(v_w),
-        log_p={int(t): float(np.log(species_probs[i])) for i, t in enumerate(gt)},
-        neighbours=frozen_neighbours_from_array(
-            ext_P, ext_s, box, max(float(rc), float(np.max(floor)))
-        ),
-        floor=floor,
-        field=field,
-        table=table,
+    return LadderMove(
+        dim=int(box.shape[0]),
+        side=box,
+        box=box,
+        beta=float(beta),
+        uc=float(rc),
+        lower=float(np.min(floor[np.ix_(guest_ids, guest_ids)])),
         lj=True,
-    )
-    member_weights = np.where(adm, np.exp(np.clip(logw, -700, 700)), 0.0)
-    U = local_from_box(pool_P, center, R, box)
-    sweep = ChannelSweepLJ(
-        U,
-        member_weights,
-        float("nan"),
-        float(rc),
-        beta,
-        kmax,
-        species=pool_s,
+        M=int(M),
+        kmax=int(kmax),
+        full_span=False,
+        w_chan=float(channel_width),
+        sigma_chan=float(max(table.sigma[t, t] for t in guest_ids)),
+        channel_length=float(channel_length),
+        channel_width=float(channel_width),
+        trial_density=float(trial_density),
+        kmax_margin=int(kmax_margin),
+        cavity=sampler == "branch",
+        typed=True,
+        guest_ids=guest_ids,
+        p_trial_guest=probs,
+        log_z={t: math.log(z_star[t]) for t in guest_ids},
+        log_z_arr=log_z_arr,
+        log_p_arr=log_p_arr,
         floor=floor,
         table=table,
+        ext_radius=float(rc),
+        fixed_n=False,
+        tail=None,  # pore convention: no tail, on either side
+        suwa_todo=engine == "suwa_todo_dynamics",
+        field=field,
     )
-    # NO TAIL, on either side: a pore's uniform space-filling assumption does
-    # not hold and the species file forbids the correction outright, so the
-    # ladder term is the (M-k)! alone.
-    logw_ladder = window_ladder_logw(sweep, kmax)
-    p_k = ladder_probs(logw_ladder)
-    if not p_k.any():
-        if stats is not None:
-            stats["infeasible"] = stats.get("infeasible", 0.0) + 1.0
-        return pos, spc, 0
-    if stats is not None:
-        ks = np.arange(kmax + 1, dtype=float)
-        stats["n_hat"] = (
-            stats.get("n_hat", 0.0) + float(len(ext_P)) + float((ks * p_k).sum())
-        )
-        stats["n_hat_n"] = stats.get("n_hat_n", 0.0) + 1.0
-    k_new = int(rng.choice(kmax + 1, p=p_k))
-    idx = sweep.sample(k_new, rng) if k_new else ()
-    assert idx is not None and len(idx) == k_new
 
-    chosen = list(idx)
-    new_P = pool_P[chosen] if chosen else np.empty((0, 3))
-    new_s = pool_s[chosen] if chosen else np.empty(0, dtype=np.int64)
-    out_pos = np.vstack([ext_P, new_P]) if len(new_P) else ext_P
-    out_spc = np.concatenate([ext_s, new_s])
+
+def ladder_window_moves_ms(
+    move: LadderMove,
+    positions: FloatArray,
+    species: IntArray,
+    rng: RNG,
+    n_moves: int,
+    stats: dict[str, float] | None = None,
+) -> tuple[FloatArray, IntArray]:
+    """Apply `n_moves` ladder window moves to a framework configuration.
+
+    The guests go into one cell list for the batch, exactly as the bulk engine
+    holds them for a sampling window; the framework stays outside it, as a field.
+    `stats` accumulates `glauber_dynamics.new_window_stats` sums (max for
+    `max_k`).
+    """
+    pos = np.ascontiguousarray(positions, float)
+    spc = np.ascontiguousarray(species, np.int64).reshape(-1)
+    cl = neighbors.CellList.from_positions(
+        pos, move.box, move.dim, move.uc, species=spc
+    )
+    slots = SlotTable(cl, first=0, n=len(pos))
+    w = new_window_stats()
+    for _ in range(int(n_moves)):
+        move.step(cl, slots, rng, w)
+    n = slots.N
+    out_pos = np.array(cl.coords[slots.alive[:n]], dtype=float)
+    out_spc = np.array(cl.species[slots.alive[:n]], dtype=np.int64)
     if stats is not None:
-        stats["accepts"] = stats.get("accepts", 0.0) + 1.0
-        stats["dN_abs"] = stats.get("dN_abs", 0.0) + abs(float(k_new - k_in))
-    return out_pos, out_spc, k_new - k_in
+        for k, v in w.items():
+            stats[k] = (
+                max(stats.get(k, 0.0), v) if k == "max_k" else stats.get(k, 0.0) + v
+            )
+    return out_pos, out_spc

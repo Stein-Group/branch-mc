@@ -67,11 +67,11 @@
     // -- muVT (default): exactly one of `mu` or ONE target_* key --
     "mu": float,                             // chemical potential
     "target_eta": float,                     // OPTIONAL: the controller drives mu toward this instead.
-    "target_density": float,                 //   At most one target_*; mutually exclusive with `sweep`.
+    "target_density": float,                 //   At most one target_*.
     "target_N": int,                         //   `mu`, if also given, seeds the controller; otherwise
                                              //   it cold-starts from the ideal-gas guess.
 
-    // -- NVT: exactly one of N | packing_fraction; mu/sweep forbidden --
+    // -- NVT: exactly one of N | packing_fraction; mu forbidden --
     "N": int,
     "packing_fraction": float,               // converted to the nearest integer N, held exactly after
 
@@ -85,14 +85,7 @@
 
     "box": float,                            // OPTIONAL, default by (dimension, run.kind):
                                              //   2D single 75 | 2D parallel 200 | 3D single 20 | 3D parallel 50
-                                             //   (the 3D-parallel default now matters: see the matrix below)
-
-    "sweep": [float, ...]                    // LEGACY, DO NOT USE -- accepted by the key check, then
-                                             //   unusable. The launcher does not expand `sweep` (it is not
-                                             //   a sweep axis), so it reaches from_params unexpanded and
-                                             //   raises "launch it with gcmc.launcher" -- which you did.
-                                             //   Sweep by giving a LIST to a sweep axis instead (below).
-                                             //   This is open finding 1 (the check_cli xfail).
+                                             //   (the 3D-parallel default matters: see the matrix below)
   },
 
   "run": {                                   // OPTIONAL block; omit for all defaults
@@ -103,12 +96,9 @@
                                              //   across the axes into the most cubic cells possible; a
                                              //   list [nx, ny, nz] is honoured verbatim. Per-axis cell
                                              //   lengths and the buffer are DERIVED, so cell_length,
-                                             //   buffer, x_spacing and y_spacing must NOT appear with it.
+                                             //   buffer must NOT appear with it.
                                              //   A count the box cannot take is an error listing the
                                              //   nearest usable counts, never a silent reduction.
-    "n_workers": int,                        // DEPRECATED, accepted + warned, then removed. Cores are
-                                             //   implied by the cell count and cannot be set apart from
-                                             //   it. Use n_cell.
     "n_cores": int,                          // Launcher only: the TOTAL core budget for a sweep (same as
                                              //   --cores N). REJECTED on a parallel base, where cores per
                                              //   run are the cell count and cannot be restated.
@@ -119,17 +109,8 @@
     "matrix_config": str,                    // OPTIONAL, QA only (required by it). File, or a FOLDER:
                                              //   a folder pairs one realization per swept run, by index.
                                              //   Cannot be combined with a pore.
-    "checkpoint_every": int,                 // OPTIONAL, default 1. NOTE: 1 means a state save every
-                                             //   window, which MEASURED costs ~10% of runtime once rows
-                                             //   arrive every few ms. Raise it before reaching for
-                                             //   log_flush_interval — the log is not the bottleneck.
-    "log_flush_interval": float,             // OPTIONAL, default 0.0 = flush the log on every row
-                                             //   (unchanged). Seconds: a TIME FLOOR between flushes, so
-                                             //   the log batches only when rows arrive faster than this.
-                                             //   Bounds the loss window in TIME (a kill costs at most this
-                                             //   many seconds of log) rather than in rows. Measured, the
-                                             //   log is 0.02% of runtime at the default cadence, so this
-                                             //   only earns its keep for a tiny sampling_window.
+    "checkpoint_every": int,                 // OPTIONAL, default 10 windows between state saves. Each
+                                             //   save also checks the running U against a recompute.
     "traj_every": int,                       // OPTIONAL, default 0  (0 = off; was 1 in the old schema)
     "burn_in": int,                          // OPTIONAL, default 0
     "radius": float,                         // OPTIONAL, default 0.5. Sphere radius / LJ sigma-half;
@@ -157,12 +138,6 @@
     "control_gain": float,                   // OPTIONAL, default 0.5   } muVT target controller;
     "control_gain_tau": float,               // OPTIONAL, default 20.0  } inert unless a target_* key
     "control_window": int,                   // OPTIONAL, default 20    } is set
-
-    "x_spacing": float,                      // DEPRECATED and INERT, accepted + warned, then removed. They
-    "y_spacing": float,                      //   fed only the verbatim 2D grid_up_the_system, which the
-                                             //   engine no longer calls (it uses grid_up_nd, which takes
-                                             //   no spacing). Setting them changes no run, and they may
-                                             //   not appear alongside n_cell.
     "sweep_label": str                       // Written BY the launcher into each expanded run; you do not
                                              //   normally set it by hand.
   }

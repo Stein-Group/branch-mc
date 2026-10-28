@@ -1,10 +1,8 @@
 """The live chain state.
 
-TLDR: Holds the live chain (positions, N, counters, step, and the single RNG that io checkpoints)
-
 Holds the configuration the chain evolves (positions), the cumulative step
-counter, the move counters, and the single random generator that everything
-draws from and that io checkpoints. Keeping one generator here is what makes a
+counter, the running potential energy, and the single random generator that
+everything draws from and that io checkpoints. Keeping one generator here is what makes a
 restart reproducible: its state is saved and restored, so the Markov chain is
 continuous across a walltime kill.
 """
@@ -12,35 +10,8 @@ continuous across a walltime kill.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 import numpy as np
-
-
-def zero_counters() -> dict[str, int]:
-    """Fresh per-move-type attempt/accept counters. `*_step` counts proposals
-    of that move type, `*_attempt` the ones that reached the acceptance test,
-    `*_accept` the accepted ones; acceptance ratios in the logs come from
-    these. A dict (not a dataclass) so io can serialise it as-is."""
-    return {
-        "add_step": 0,
-        "add_attempt": 0,
-        "add_accept": 0,
-        "remove_step": 0,
-        "remove_accept": 0,
-        "move_step": 0,
-        "move_accept": 0,
-        "repack_step": 0,
-        "repack_attempt": 0,
-        "repack_accept": 0,
-        # IDENTITY SWAP. Proposed only when there is more than one
-        # species; on a single-species run these stay at 0, which is what makes
-        # them safe to add without moving any existing counter stream. `swap_step`
-        # counts proposals that reached the acceptance test -- a swap has no
-        # geometric way to fail before it, so there is no separate `*_attempt`.
-        "swap_step": 0,
-        "swap_accept": 0,
-    }
 
 
 @dataclass
@@ -61,7 +32,6 @@ class ChainState:
     positions: np.ndarray
     step: int
     rng: np.random.Generator
-    counters: dict[str, int] = field(default_factory=zero_counters)
     # D2 (Phase 4): a per-particle integer TYPE id parallel to `positions`, drawn
     # from the same type table framework atoms use, so molecules later reuse it as
     # a per-site type id without a second mechanism. `None` means single-species:
@@ -76,27 +46,9 @@ class ChainState:
     # the search rather than restarting it.
     mu: float | None = None
     n_history: list[float] = field(default_factory=list)
-    # FLAT-HISTOGRAM BIASING IN N, or None. A `sampling.flat_histogram
-    # .FlatHistogram`: the bias eta[N] the exchange path adds to its weights,
-    # plus the collection matrix filled with UNBIASED transition probabilities.
-    # Declared here rather than passed per call because it accumulates ACROSS
-    # window boundaries -- a matrix reset each window would estimate nothing --
-    # and because the engines read it exactly where they read the rest of the
-    # chain's state.
-    #
-    # NOT CHECKPOINTED, and that is a stated limitation rather than an
-    # oversight. `io.save_checkpoint` serialises a fixed set of arrays, so
-    # persisting a (n_states x n_states) matrix and its visit histogram is its
-    # own piece of work with its own schema bump; until then a resumed run
-    # restarts its bias from flat, which is correct but slower. What must NOT be
-    # done in the meantime is to reset the matrix at a bias REFRESH: its rows
-    # are unbiased transition probabilities, so rows collected under the old
-    # eta and the new one estimate the same matrix and merging them is exact.
-    # That property is the whole reason the scheme is cheap.
-    #
-    # Typed `Any` to keep layer 3 from importing layer 5; the object is only
-    # ever passed through.
-    flat_histogram: Any = None
+    # running potential energy U of `positions`, updated by each window's
+    # energy change; None until the runner computes it (LJ runs only)
+    energy: float | None = None
 
     @classmethod
     def fresh(cls, dimension: int, seed: int | None = None) -> ChainState:

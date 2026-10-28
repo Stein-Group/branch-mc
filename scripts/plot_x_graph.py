@@ -1,7 +1,10 @@
 import matplotlib.pyplot as plt
 import matplotlib.lines as mlines
-import json, re
+import json, re, sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts import runlog  # noqa: E402
 #import matplotlib.ticker as ticker
 
 # Modern layout:
@@ -68,10 +71,6 @@ lw_map    = {1: 1.6, 2: 1.1}
 LEAF_RE = re.compile(r"seed(\d+)_startmu_(-?\d+)p(\d+)")
 
 # ── Readers (same conventions as gcmc_plot_glauber.py) ───────────────────────
-LEGACY_POSITIONS = ["MC_cycle(M)", "pckng_frctn", "N", "add_acc", "add_att",
-                    "add_stp", "rm_acc", "rm_stp", "mv_acc", "mv_stp", "wall_s"]
-
-
 def resolve_engine(p):
     eng = p.get("engine")
     if isinstance(eng, dict):
@@ -93,33 +92,14 @@ def read_params(leaf):
             "engine": resolve_engine(p)}
 
 
-def read_trace(path):
-    """(cycles, eta) read BY COLUMN NAME from the run.log header; the old
-    positional layout is used only for headerless logs."""
-    names, x, y = None, [], []
-    with open(path) as f:
-        for line in f:
-            if line.startswith("#"):
-                if names is None:
-                    names = line.lstrip("#").split()
-                continue
-            if not line.strip():
-                continue
-            if names is None:
-                names = LEGACY_POSITIONS
-            if "MC_cycle(M)" not in names or "pckng_frctn" not in names:
-                raise ValueError(f"{path}: header has no MC_cycle(M)/pckng_frctn column")
-            i_c, i_e = names.index("MC_cycle(M)"), names.index("pckng_frctn")
-            cols = line.split()
-            try:
-                step = float(cols[i_c]) * 1e6
-                if step > MAX_STEPS:
-                    break
-                x.append(step)
-                y.append(float(cols[i_e]))
-            except (ValueError, IndexError):
-                continue
-    return x, y
+def read_trace(leaf):
+    """(cycles, eta) of one run, read by column name (scripts/runlog.py)."""
+    df = runlog.load(leaf)
+    cyc = df["MC_cycle"].to_numpy() * 1e6
+    keep = cyc <= MAX_STEPS
+    params = json.loads((Path(leaf) / "params.json").read_text())
+    eta = runlog.packing_fraction(df[keep], params)
+    return list(cyc[keep]), list(eta)
 
 
 def find_leaves(path):
@@ -180,7 +160,7 @@ for group, method in GROUPS.items():
             continue
         if ENGINE_SELECT is not None and par["engine"] not in ENGINE_SELECT:
             continue
-        x, y = read_trace(leaf / "run.log")
+        x, y = read_trace(leaf)
         if not x:
             print(f"  ! {leaf.name}: empty run.log -- skipped")
             continue

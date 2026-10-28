@@ -54,7 +54,7 @@ for path, val in [
     ("ensemble.box", 25.0),
     ("sampler.trial_density", 500),
     ("sampler.trial_box_side", 4.0),
-    ("sampler.depth", 1),
+    ("engine.depth", 1),
     ("sampler.type", "branch"),
     ("run.move_factor", 0.3),
 ]:

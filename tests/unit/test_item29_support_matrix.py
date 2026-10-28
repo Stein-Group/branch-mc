@@ -145,7 +145,6 @@ def _parallel_run(dim):
     # cell_length + buffer must fit the box; 8 + 2 <= 30 grids into 27/9 cells.
     return {
         "kind": "parallel",
-        "n_workers": 1,
         "sampling_window": 50,
         "cell_length": 8.0,
         "buffer": 2.0,

@@ -42,14 +42,13 @@ because there is no kB scale to convert a pressure with (use the `z` or
 
 Lives under gcmc/ rather than scripts/ because gcmc.run.sim_setup validates a
 species file at from_params time and the engine package must not depend on
-scripts/, which is not installed. scripts/mof/units.py re-exports every name
-here, so the MOF pipeline and its CLI are unchanged.
+scripts/, which is not installed.
 
 Run it for a look at the tables, or to measure the core floor:
 
     python -m gcmc.forcefield.species_file ff/forcefield_A.yaml --T 298 --provisional
-    python -m scripts.mof.units ff/forcefield_A.yaml --T 298 --core-floor --provisional
-    python -m scripts.mof.units ff/species_three_reduced.yaml --T 1.2
+    python -m gcmc.forcefield.species_file ff/forcefield_A.yaml --T 298 --core-floor --provisional
+    python -m gcmc.forcefield.species_file ff/species_three_reduced.yaml --T 1.2
 """
 
 from __future__ import annotations
@@ -78,8 +77,7 @@ UNIT_SYSTEMS = ("reduced", "angstrom-kelvin")
 
 # Below this multiple of sigma_ij the auxiliary proposal radius sits inside the
 # LJ first shell, sd(Delta_corr) explodes and acceptance collapses while the run
-# still completes at a plausible density. Same number as the warning in
-# scripts/mof/submit_mof.py, kept as one constant so the two cannot drift.
+# still completes at a plausible density.
 AUX_FIRST_SHELL = 1.4
 
 # Sum tolerance for p_trial. Absolute, because the quantity is a probability.
@@ -134,6 +132,7 @@ class ForceField:
     status: dict[str, str]  # block name -> provisional | confirmed
     sha256: str
     raw: dict[str, Any]
+    shifted: bool = False  # u(r) - u(rc) inside rc (schema-1 MOF files only)
 
     @property
     def guests(self) -> tuple[str, ...]:
@@ -191,13 +190,9 @@ class ForceField:
         One dimensionless multiplier, so the proposal radius tracks the pair it
         proposes into and is automatically shorter for the smaller pairs.
 
-        THE CONTROL ARM RETURNS `rc` FOR EVERY PAIR, and this is the correction
-        of a real defect rather than a refinement. It used to return None -- the
-        same value as `aux: none` -- so `aux: {control: true}` produced a run with
-        no auxiliary machinery in it at all. A control arm that IS the thing it
-        controls against cannot fail, and the docstring calling it "the exact
-        no-op arm the tuning sweep uses as its own reference" is what made it look
-        like a gate.
+        THE CONTROL ARM RETURNS `rc` FOR EVERY PAIR, not None: None is the value
+        of `aux: none`, and a control arm with no auxiliary machinery in it IS the
+        thing it controls against, so it cannot fail.
 
         Returning `rc` instead turns the machinery ON at a radius where the
         correction's value is identically zero: the two shell energies are the
@@ -443,9 +438,18 @@ def load_forcefield(path: str | Path, *, allow_provisional: bool = False) -> For
     form = doc["interaction"]["form"]
     if form != "lennard-jones-12-6":
         raise ValueError(f"{path}: unsupported interaction form {form!r}")
-    if doc["interaction"]["shifted"]:
+    shifted = doc["interaction"]["shifted"]
+    if not isinstance(shifted, bool):
+        raise ValueError(f"{path}: interaction.shifted must be true or false")
+    # Truncated-and-SHIFTED (u(r) - u(rc) inside rc) is what the Kancharlapalli
+    # 2019 anchor ran: with it our Widom Henry constants land on their Table S4
+    # for six of seven MFM-300(M) metals to 1-2 %, without it they sit ~60 % high.
+    # Supported on the MOF driver path only (schema 1); the bulk species-file
+    # engine keeps the unshifted convention its pinned trajectories were made with.
+    if shifted and schema >= 2:
         raise ValueError(
-            f"{path}: shifted potentials are out of scope (truncated, unshifted)"
+            f"{path}: interaction.shifted is supported for schema-1 MOF force "
+            "fields only; a schema-2 species file is truncated, unshifted"
         )
     if doc["interaction"]["tail_correction"]:
         raise ValueError(
@@ -612,6 +616,7 @@ def load_forcefield(path: str | Path, *, allow_provisional: bool = False) -> For
         status=status,
         sha256=hashlib.sha256(text).hexdigest(),
         raw=doc,
+        shifted=bool(shifted),
     )
 
 
@@ -643,6 +648,7 @@ class ReducedTables:
     k_ij: np.ndarray  # (n_types, n_types)
     aux_cutoff_star: np.ndarray | None  # (n_types, n_types) or None when off
     aux_control: bool
+    shifted: bool = False  # pair energies are u(r) - u(rc_star) inside rc_star
 
     def z_star(self, fugacity_pa: float) -> float:
         """Reduced activity from a fugacity in Pa: z* = f sigma_ref^3 / (kB T)."""
@@ -690,6 +696,9 @@ class ReducedTables:
                 None if self.aux_cutoff_star is None else self.aux_cutoff_star.tolist()
             ),
             "aux_control": self.aux_control,
+            # present only when on, so every unshifted record (and every run id
+            # hashed from one) stays byte-identical to before the key existed
+            **({"shifted": True} if self.shifted else {}),
         }
 
 
@@ -754,6 +763,7 @@ def reduce_tables(
         k_ij=ff.k_ij,
         aux_cutoff_star=None if aux is None else aux / sigma_ref,
         aux_control=ff.aux_control,
+        shifted=ff.shifted,
     )
 
 

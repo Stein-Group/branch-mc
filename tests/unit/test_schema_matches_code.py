@@ -152,15 +152,6 @@ def test_docstring_schema_documents_every_key():
         "metropolis_dynamics",
         "glauber_dynamics",
         "suwa_todo_dynamics",
-        # sampler.gamma_mode
-        "fixed",
-        "adaptive",
-        # sampler.gamma_criterion
-        "participation",
-        "perplexity",
-        # sampler.gamma_solver ("grid" is listed below, under
-        # run.initial_config, and is the same string)
-        "moments",
         # auxiliary.g3_lookup
         "linear",
         "nearest",

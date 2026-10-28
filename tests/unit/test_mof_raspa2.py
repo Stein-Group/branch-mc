@@ -24,14 +24,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from scripts.mof.raspa2_input import (
+from gcmc.forcefield.species_file import load_forcefield, peng_robinson
+from gcmc.framework.raspa2 import (
     force_field_mixing_rules_def,
     molecule_def,
     pseudo_atoms_def,
     simulation_input,
     write_raspa2_cif,
 )
-from scripts.mof.units import load_forcefield, peng_robinson
 
 ROOT = Path(__file__).resolve().parents[2]
 FF_A = ROOT / "ff" / "forcefield_A.yaml"

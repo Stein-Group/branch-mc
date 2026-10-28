@@ -5,10 +5,11 @@
 
   "sampler": {
     "type": "branch",
-    "depth": 3,
     "trial_density": 700,
     "trial_box_side": 2
   },
+
+  "engine": {"depth": 3},
 
   "ensemble": {
     "type": "QA",

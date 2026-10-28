@@ -1,4 +1,4 @@
-"""P0.4/P0.6: every formula in scripts/mof/units.py against a hand calculation.
+"""P0.4/P0.6: every formula in gcmc/forcefield/species_file.py against a hand calculation.
 
 The plan asks for one hand calculation per formula, written where a reader can
 check it without running anything. Each test docstring below carries the
@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from scripts.mof.units import (
+from gcmc.forcefield.species_file import (
     ANGSTROM_M,
     KB_J_PER_K,
     core_floor_scan,

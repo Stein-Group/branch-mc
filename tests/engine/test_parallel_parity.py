@@ -25,7 +25,7 @@ from gcmc import config_specs
 from gcmc.engine import cell_parallel
 from gcmc.engine import metropolis_dynamics as engine
 from gcmc.run.sim_setup import from_params
-from gcmc.system.state import ChainState, zero_counters
+from gcmc.system.state import ChainState
 
 # One cell is one core, so cfg.n_workers is the cell count; without this
 # hook a 9- or 27-cell case would spawn that many processes inside a test.
@@ -62,7 +62,6 @@ def _state(n, dim, hi, seed=0):
         positions=np.random.default_rng(seed).uniform(1.0, hi, size=(n, dim)),
         step=0,
         rng=np.random.default_rng(7),
-        counters=zero_counters(),
     )
 
 
@@ -79,7 +78,7 @@ def _equilibrium_eta(advance, cfg, st, n_win, n_tail):
     etas = []
     for _ in range(n_win):
         out = advance(st, cfg, pot, w)
-        etas.append(out["packing_fraction"])
+        etas.append(out["N"] * cfg.volume_of_molecule / cfg.total_volume)
     tail = np.asarray(etas[-n_tail:])
     return float(tail.mean()), float(tail.std(ddof=1) / np.sqrt(len(tail)))
 

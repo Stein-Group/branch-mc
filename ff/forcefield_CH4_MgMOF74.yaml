@@ -1,0 +1,69 @@
+# FF-CH4-MgMOF74: methane in Mg-MOF-74, the CFCMC benchmark system
+# (Torres-Knoop, Balaji, Vlugt, Dubbeldam, J. Chem. Theory Comput. 2014, 10,
+# 942-952, Fig. 2a and SI Fig. S5, 313 K).
+#
+# Every number below is copied from RASPA2's own ExampleMOFsForceField
+# (forcefield/ExampleMOFsForceField/force_field_mixing_rules.def, RASPA2 2.0.41
+# source tree) and molecules/ExampleDefinitions/methane.def. That file is the
+# Dubbeldam group's generic MOF set (DREIDING for C, O, H; UFF for the metal;
+# united-atom CH4), it is what RASPA runs when a MOF input names no other force
+# field, and its rules line up with what the benchmark needs: LJ truncated AND
+# shifted at the cutoff, no tail correction, Lorentz-Berthelot mixing. The
+# paper's isotherm is plotted against fugacity, so the eos block below only
+# makes the RASPA2 .def self-describing; no run converts pressure with it.
+#
+# Units: sigma in angstrom, epsilon as epsilon/kB in kelvin.
+
+schema: 1
+name: FF-CH4-MgMOF74
+
+mixing: lorentz-berthelot
+
+interaction:
+  form: lennard-jones-12-6
+  rc: 12.0
+  shifted: true
+  tail_correction: false
+
+core_floor:
+  c: 0.7114        # P0.6 at 313 K, binding pair CH4-H (exp(-u/T) = 9.9e-11)
+  measured_at_T: 313.0
+
+eos:
+  form: peng-robinson
+  mixing: van-der-waals
+  binary_interaction_parameter: 0.0
+  CH4:
+    critical_temperature: 190.564
+    critical_pressure: 4599200.0
+    acentric_factor: 0.01142
+    source: RASPA2 molecules/ExampleDefinitions/methane.def.
+
+guests:
+  status: confirmed
+  CH4:
+    symbol: Ne       # trajectory label only (C is taken by the framework); parameters are united-atom CH4
+    sigma: 3.72
+    epsilon: 158.5
+    source: >-
+      RASPA2 ExampleMOFsForceField, united-atom CH4 (cited there as Martin et
+      al., J. Chem. Phys. 2001, 114, 7174).
+
+framework:
+  status: confirmed
+  Mg:
+    sigma: 2.69141
+    epsilon: 55.8574
+    source: RASPA2 ExampleMOFsForceField (UFF, Rappe 1992).
+  C:
+    sigma: 3.47299
+    epsilon: 47.8562
+    source: RASPA2 ExampleMOFsForceField (DREIDING C_, Mayo 1990).
+  O:
+    sigma: 3.03315
+    epsilon: 48.1581
+    source: RASPA2 ExampleMOFsForceField (DREIDING O_, Mayo 1990).
+  H:
+    sigma: 2.84642
+    epsilon: 7.64893
+    source: RASPA2 ExampleMOFsForceField (DREIDING H_, Mayo 1990).

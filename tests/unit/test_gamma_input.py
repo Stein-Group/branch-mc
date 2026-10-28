@@ -146,19 +146,6 @@ def test_the_key_is_refused_on_the_short_range_auxiliary() -> None:
         sim_setup.from_params(_params({"gamma": 0.1}, aux_type="short_range"))
 
 
-def test_the_key_is_refused_together_with_adaptive_gamma() -> None:
-    """Two sources of truth for one number: the adaptive mode exists to replace
-    the stated exponents, so a file that states both has not decided which
-    experiment it is running."""
-    with pytest.raises(ValueError, match="cannot do both"):
-        sim_setup.from_params(
-            _params(
-                {"gamma": 0.1},
-                sampler_extra={"gamma_mode": "adaptive", "pr_target": 0.5},
-            )
-        )
-
-
 # ---- identity ----------------------------------------------------------------
 
 
@@ -272,33 +259,6 @@ def test_a_long_array_gets_a_digest_tail_rather_than_a_ninety_character_name() -
     assert "-" not in lbl and "-" not in _gamma_label([0.29, 0.103])
 
 
-def test_the_shipped_heatmap_jobs_expand_to_eighty_distinct_runs() -> None:
-    """The two job files are the deliverable, so they are tested rather than
-    eyeballed: 10 exponents x 8 trial box sides, every arm surviving the
-    validator, every cell its own run directory, and the fitted schedule present
-    as one arm so the sweep carries its own incumbent."""
-    import json
-    from pathlib import Path
-
-    for name, fitted in (
-        ("examples/aux_gamma_heatmap_2d.json", [0.193548, 0.049948]),
-        ("examples/aux_gamma_heatmap_3d.json", [0.2903, 0.103]),
-    ):
-        base = json.loads(Path(name).read_text())
-        combos, labels = expand_sweep(base)
-        assert len(combos) == 80, name
-        assert len(set(labels)) == 80, name
-        ids = {run_id(sim_setup.from_params(c)) for c in combos}
-        assert len(ids) == 80, name
-        arms = base["auxiliary"]["gamma"]
-        assert len(arms) == 10, name
-        assert arms[0] == 0.0, name  # the bias-off control
-        assert arms[-1][:2] == fitted, name  # the fitted schedule as an arm
-        assert base["run"]["esjd"] is True, name
-        assert base["sampler"]["type"] == "rosenbluth", name  # pmf refuses branch
-        assert isinstance(base["sampler"]["trials"], int), name  # fixed, not swept
-
-
 # --------------------------------------------------------------------------
 # auxiliary.g3_r_cut: dropping the neighbours that carry no ranking.
 #
@@ -315,27 +275,6 @@ def test_the_cutoff_reaches_the_potential_and_defaults_to_absent() -> None:
     assert cut.g3_r_cut == 1.8
     assert absent.build_potential().r_cut is None
     assert cut.build_potential().r_cut == 1.8
-
-
-def test_a_cut_neighbour_contributes_exactly_one() -> None:
-    """The identity of the product and of the sum of logs alike, so neither
-    caller needs a branch: `weight_bulk` multiplies by 1 and
-    `weight_bulk_split` adds log 1 = 0."""
-    import numpy as np
-
-    pot_all = sim_setup.from_params(_params({"gamma": 0.2})).build_potential()
-    pot_cut = sim_setup.from_params(
-        _params({"gamma": 0.2, "g3_r_cut": 1.5})
-    ).build_potential()
-    rng = np.random.default_rng(4)
-    r = rng.uniform(1.0, 2.0, 200)
-    cos_t = rng.uniform(-0.9, 0.9, 200)
-    g_all = pot_all._interp.at(r, cos_t)
-    np.maximum(g_all, pot_all.min_g3, out=g_all)
-    g_cut = np.where(r < 1.5, g_all, 1.0)
-    # inside the cut the two agree exactly; outside it the cut one is unbiased
-    assert np.array_equal(g_cut[r < 1.5], g_all[r < 1.5])
-    assert np.all(g_cut[r >= 1.5] == 1.0)
 
 
 def test_the_cutoff_is_part_of_the_run_identity() -> None:

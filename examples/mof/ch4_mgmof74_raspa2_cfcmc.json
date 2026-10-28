@@ -1,0 +1,77 @@
+{
+  "potential": {
+    "main": "lennard_jones",
+    "T": 313.0,
+    "species_file": "ff/forcefield_CH4_MgMOF74.yaml"
+  },
+  "framework": {
+    "cif": "structures/MgMOF-74.cif"
+  },
+  "engine": {
+    "type": "raspa2_cfcmc",
+    "wang_landau_cycles": 500000,
+    "lambda_bins": 20
+  },
+  "ensemble": {
+    "type": "muVT",
+    "dimension": 3,
+    "fugacity": [
+      {
+        "CH4": 1000.0
+      },
+      {
+        "CH4": 1850.0
+      },
+      {
+        "CH4": 3410.0
+      },
+      {
+        "CH4": 6310.0
+      },
+      {
+        "CH4": 11700.0
+      },
+      {
+        "CH4": 21500.0
+      },
+      {
+        "CH4": 39800.0
+      },
+      {
+        "CH4": 73600.0
+      },
+      {
+        "CH4": 136000.0
+      },
+      {
+        "CH4": 251000.0
+      },
+      {
+        "CH4": 464000.0
+      },
+      {
+        "CH4": 858000.0
+      },
+      {
+        "CH4": 1580000.0
+      },
+      {
+        "CH4": 2930000.0
+      },
+      {
+        "CH4": 5410000.0
+      },
+      {
+        "CH4": 10000000.0
+      }
+    ]
+  },
+  "run": {
+    "kind": "single",
+    "n_cores": 16,
+    "seed": 575845,
+    "sampling_window": 50,
+    "target_cycles": 500000.0,
+    "burn_in": 10000
+  }
+}

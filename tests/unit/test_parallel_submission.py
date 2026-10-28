@@ -103,7 +103,7 @@ def test_anisotropic_box_gets_per_axis_cell_lengths():
 # ------------------------------------------------- either/or, nothing in between
 
 
-@pytest.mark.parametrize("clash", ["cell_length", "buffer", "x_spacing", "y_spacing"])
+@pytest.mark.parametrize("clash", ["cell_length", "buffer"])
 def test_n_cell_refuses_manual_geometry_alongside_it(clash):
     with pytest.raises(ValueError, match="cannot be given alongside"):
         from_params(_p({"n_cell": 8, clash: 2.0}))
@@ -212,26 +212,6 @@ def test_the_lj_reach_follows_upper_cutoff():
         }
     )
     assert cfg.buffer == pytest.approx(3.2)
-
-
-# ---------------------------------------------------------------- deprecations
-
-
-@pytest.mark.parametrize("dep", ["n_workers", "x_spacing", "y_spacing"])
-def test_deprecated_keys_warn_and_are_ignored(dep, caplog):
-    """D5: accepted and warned for one release. Ignored, not honoured -- keeping
-    them working would be the 'something in between' the modes that D5 rules
-    out."""
-    with caplog.at_level("WARNING"):
-        cfg = from_params(_p({"cell_length": 8.0, "buffer": 2.0, dep: 4}))
-    assert any(dep in r.getMessage() for r in caplog.records), caplog.text
-    assert cfg.n_workers == 27  # the cell count, not the submitted 4
-
-
-def test_a_deprecated_key_does_not_survive_into_the_config():
-    cfg = from_params(_p({"cell_length": 8.0, "buffer": 2.0, "x_spacing": 4.0}))
-    assert cfg.x_spacing is None or cfg.x_spacing == 4.0  # stored, never consumed
-    assert cfg.cell_counts == (3, 3, 3)
 
 
 # --------------------------------------------------- identity must not move (rule 4)

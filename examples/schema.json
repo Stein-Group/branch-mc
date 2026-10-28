@@ -116,7 +116,7 @@
               "minItems": 1
             }
           ],
-          "description": "pmf only; OPTIONAL. The selection-bias exponent per Rosenbluth level, in place of the fitted schedule in _GAMMA_AUX_2D / _GAMMA_AUX_3D. A SCALAR applies at every level (0.1 is the nine-vector of 0.1); an ARRAY of 1 to 9 values gives the first levels and leaves the rest at 0, so [0.29, 0.10, 0.03] biases the first three placements of a move and leaves deeper ones unbiased. Padding with zero rather than repeating the last value follows the fitted table, whose levels 7 to 9 are already 0, and is the safe direction: a missing entry costs efficiency while an extrapolated one applies a bias nobody chose at a depth nobody measured. Both dimensions read it, the 2D analytic hard-disk g(r) and the 3D tabulated g3 alike. Identity-bearing, since two exponents select differently; absent means the fitted schedule and keeps every pre-existing run id. Refused together with sampler.gamma_mode='adaptive', which solves the same number per level instead, and on auxiliary.type='short_range', which has no exponent. SWEEPABLE: to the launcher the outer list is always the sweep and each element is one arm, a scalar or an array, so [0.0, 0.05, 0.1] is three arms and [[0.29,0.10,0.03]] is one arm holding that array. A bare flat list is therefore a sweep of scalars; wrap an array to pin it. A nested list reaching a single run is refused by name, because it means the sweep was never expanded."
+          "description": "pmf only; OPTIONAL. The selection-bias exponent per Rosenbluth level, in place of the fitted schedule in _GAMMA_AUX_2D / _GAMMA_AUX_3D. A SCALAR applies at every level (0.1 is the nine-vector of 0.1); an ARRAY of 1 to 9 values gives the first levels and leaves the rest at 0, so [0.29, 0.10, 0.03] biases the first three placements of a move and leaves deeper ones unbiased. Padding with zero rather than repeating the last value follows the fitted table, whose levels 7 to 9 are already 0, and is the safe direction: a missing entry costs efficiency while an extrapolated one applies a bias nobody chose at a depth nobody measured. Both dimensions read it, the 2D analytic hard-disk g(r) and the 3D tabulated g3 alike. Identity-bearing, since two exponents select differently; absent means the fitted schedule and keeps every pre-existing run id. Refused on auxiliary.type='short_range', which has no exponent. SWEEPABLE: to the launcher the outer list is always the sweep and each element is one arm, a scalar or an array, so [0.0, 0.05, 0.1] is three arms and [[0.29,0.10,0.03]] is one arm holding that array. A bare flat list is therefore a sweep of scalars; wrap an array to pin it. A nested list reaching a single run is refused by name, because it means the sweep was never expanded."
         },
         "g3_r_cut": {
           "type": "number",
@@ -202,33 +202,6 @@
               "minItems": 1
             }
           ]
-        },
-        "gamma_mode": {
-          "enum": [
-            "fixed",
-            "adaptive"
-          ],
-          "description": "How the pmf selection-bias exponent is chosen. \"fixed\" (the default) reads the nine hand-fitted per-level numbers. \"adaptive\" replaces all nine with one target: it solves an exponent per Rosenbluth level, from the trial weights already in memory, so that the participation fraction PR / k of the level pool lands near sampler.pr_target. The level cap of 9 that the fitted schedule imposes disappears with it -- there is no ninth number to run out of, so a move inserting ten or more molecules gets a solved exponent instead of silently reusing level 9's. Requires sampler.type=\"rosenbluth\", a 3D auxiliary.type=\"pmf\", engine.type=\"metropolis_dynamics\" and run.kind=\"single\"; every other combination is refused by name on the axis that rules it out."
-        },
-        "pr_target": {
-          "type": "number",
-          "exclusiveMinimum": 0,
-          "maximum": 1,
-          "description": "Required by gamma_mode=\"adaptive\" and forbidden without it. The target participation fraction PR / k of a level's trial pool, where PR = (sum w)^2 / sum w^2 is the participation ratio (Kong's effective sample size, renamed because this project already reports a chain ESS from autocorrelation). 1.0 means flat weights and no effective bias; small values mean one trial takes nearly every pick. A VARIANCE KNOB ONLY: the bias is divided back out of the acceptance, so no value can move an equilibrium average, only the variance and the acceptance rate. An unreachable target leaves the level at gamma = 0, counted in the window summary's gamma_adaptive.clamped."
-        },
-        "gamma_criterion": {
-          "enum": [
-            "participation",
-            "perplexity"
-          ],
-          "description": "Adaptive gamma only; OPTIONAL, default \"participation\". Which spread of the level's trial weights sampler.pr_target is measured against: \"participation\" uses the participation ratio PR = (sum w)^2 / sum w^2, a second moment, which one dominant trial pulls almost to 1 whatever the rest look like; \"perplexity\" uses exp(-sum p log p), an entropy, which keeps reading the shape of the tail and carries less small-k bias. Both run from 1 to k and both read k on flat weights, so pr_target means the same kind of thing under either. The criterion applies at EVERY Rosenbluth level, depth included: it is a property of the run, not of the level."
-        },
-        "gamma_solver": {
-          "enum": [
-            "moments",
-            "grid"
-          ],
-          "description": "Adaptive gamma only; OPTIONAL, default \"moments\". How the exponent is obtained from the level's trial weights. \"moments\" solves a closed form: log(spread(gamma)/spread(0)) expanded to second order is a quadratic in gamma whose coefficients are two weighted moments of log b, so the answer costs two reductions and one square root and no exponentials. \"grid\" evaluates the spread at 17 candidate exponents and returns the closest, which is where the method's cost was: at k=200 with full_repacking that is about 1450 exponentials per move and 13% of move time, and ESJD per second has that in its denominator. The two land within about a percent of pr_target of each other and the expansion is often closer, because the grid can only return a grid point. Neither can move an equilibrium average. Identity-bearing all the same: a percent in gamma is a different trial selected, so the two arms are two proposal distributions and cannot share a run directory."
         }
       },
       "description": "Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side; channel takes those minus trial_box_side plus channel_length and channel_width. A CANONICAL run (ensemble.type='NVT' with a species file) proposes translations and pair identity exchanges and runs no trial cloud, so its whole sampler block is {\"type\": \"metropolis\"}."
@@ -243,7 +216,7 @@
             "glauber_dynamics",
             "suwa_todo_dynamics"
           ],
-          "description": "The DYNAMICS axis, which is not the same axis as sampler.type. `sampler.type` says how a trial cloud is PROPOSED; `engine` says what is then done with it. metropolis_dynamics (the default, and what an absent key means -- that is the backward-compatibility contract) is accept/reject dynamics: everything shipped before this key existed. glauber_dynamics computes the exact conditional distribution of a window's whole guest content and draws from it, so its exchange path has no acceptance test: dN = k_new - k_in may take any sign and any magnitude, and add/remove/repack cease to be separate move types. Same muVT ensemble, same z, same U -- a different transition kernel. Both ladder dynamics REQUIRE sampler.type='channel' with depth >= 1; refused with metropolis, rosenbluth, branch, reweight. Refuses the pmf and short-range auxiliaries: both are selection biases divided back out in an acceptance ratio, and this engine has none. Caps the trial density at 20 trials per eviction window (rc) of channel length on the LJ path. Adding this key moves every run id, by decision: resuming a pre-engine run directory is not supported. Serial only. Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type and engine; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side and engine; channel takes those minus trial_box_side plus channel_length, channel_width and kmax_margin. suwa_todo_dynamics is the THIRD dynamics and the sibling of glauber_dynamics, not a variant of it: it builds the same window, the same pool and the same exact occupancy ladder, and then draws k from that ladder by the Suwa-Todo geometric allocation (PRL 105, 120603 (2010)) conditioned on the incoming occupancy, rather than categorically. glauber_dynamics is a heat bath and returns the incoming occupancy with probability P(k_in); the allocation is the pi-invariant kernel that MINIMISES that rate, and it achieves it by giving up detailed balance and keeping only global balance. Same muVT ensemble, same z, same U, same stationary distribution, so every physics gate written for glauber_dynamics applies verbatim. It takes exactly the keys glauber_dynamics takes, has the same refusals (sampler.type='channel', depth >= 1, no pmf or short-range auxiliary, serial only, the trials-per-eviction-window cap on the LJ path), and adds none of its own. The gain is bounded: the rate at which k changes improves by at most a factor 2 over the heat bath and by much less for a ladder concentrated on one rung, so a run logs glb_st_hb and glb_st_rej and the ratio is measured rather than assumed."
+          "description": "The DYNAMICS axis, which is not the same axis as sampler.type. `sampler.type` says how a trial cloud is PROPOSED; `engine` says what is then done with it. metropolis_dynamics (the default, and what an absent key means -- that is the backward-compatibility contract) is accept/reject dynamics: everything shipped before this key existed. glauber_dynamics computes the exact conditional distribution of a window's whole guest content and draws from it, so its exchange path has no acceptance test: dN = k_new - k_in may take any sign and any magnitude, and add/remove/repack cease to be separate move types. Same muVT ensemble, same z, same U -- a different transition kernel. Both ladder dynamics REQUIRE sampler.type='channel' with depth >= 1; refused with metropolis, rosenbluth, branch, reweight. Refuses the pmf and short-range auxiliaries: both are selection biases divided back out in an acceptance ratio, and this engine has none. Caps the trial density at 20 trials per eviction window (rc) of channel length on the LJ path. Adding this key moves every run id, by decision: resuming a pre-engine run directory is not supported. Serial only. Only the samplers that READ a key may state it; any other sampler refuses it by name rather than ignoring it. Readers: metropolis takes no key but type and engine; rosenbluth/branch/reweight take depth, full_repacking, trials, trial_density, trial_box_side and engine; channel takes those minus trial_box_side plus channel_length, channel_width and kmax_margin. suwa_todo_dynamics is the THIRD dynamics and the sibling of glauber_dynamics, not a variant of it: it builds the same window, the same pool and the same exact occupancy ladder, and then draws k from that ladder by the Suwa-Todo geometric allocation (PRL 105, 120603 (2010)) conditioned on the incoming occupancy, rather than categorically. glauber_dynamics is a heat bath and returns the incoming occupancy with probability P(k_in); the allocation is the pi-invariant kernel that MINIMISES that rate, and it achieves it by giving up detailed balance and keeping only global balance. Same muVT ensemble, same z, same U, same stationary distribution, so every physics gate written for glauber_dynamics applies verbatim. It takes exactly the keys glauber_dynamics takes, has the same refusals (sampler.type='channel', depth >= 1, no pmf or short-range auxiliary, serial only, the trials-per-eviction-window cap on the LJ path), and adds none of its own. The gain is bounded: the rate at which k changes improves by at most a factor 2 over the heat bath and by much less for a ladder concentrated on one rung, so the ratio is read off the log's ladder_unchanged column rather than assumed."
         },
         "depth": {
           "type": "integer",
@@ -284,13 +257,6 @@
               "minItems": 1
             }
           ]
-        },
-        "sweep": {
-          "type": "array",
-          "items": {
-            "type": "number"
-          },
-          "description": "Legacy mu sweep list; prefer a list under ensemble.mu."
         },
         "dimension": {
           "enum": [
@@ -495,11 +461,6 @@
           "minimum": 1,
           "description": "Launcher only: the TOTAL core budget for a sweep (= --cores N). The launcher refuses to start if (sweep combinations) x (cores per run) exceeds it, where cores-per-run is the cell count for a parallel run and 1 for a serial one. Not accepted on a parallel base, where the per-run core count is the cell count and cannot be restated."
         },
-        "n_workers": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "DEPRECATED, accepted and warned for one release, then removed. Cores are implied, never stated: one cell is one core, so the worker count is the cell count. Use run.n_cell."
-        },
         "cell_length": {
           "oneOf": [
             {
@@ -545,39 +506,6 @@
           "type": "integer",
           "minimum": 1
         },
-        "log_flush_interval": {
-          "type": "number",
-          "minimum": 0,
-          "description": "Seconds; default 0.0, which flushes the log on every row (unchanged). A TIME FLOOR between log flushes: the log batches only when rows arrive faster than this, so a slow producer still flushes every row and a fast one batches by however much the observed row rate implies. What is bounded is the window of loss IN TIME -- a kill costs at most this many seconds of log at any row rate -- rather than a row count, which bounds memory and lets the loss window grow. Rarely needed: measured, the log is 0.02% of runtime at the default sampling_window, where the write amplification is checkpoint_every=1 (~10%) and traj_every=1 (+100%)."
-        },
-        "log_columns": {
-          "type": "array",
-          "items": {
-            "enum": [
-              "core",
-              "species",
-              "state",
-              "moves",
-              "clique",
-              "clique_acc"
-            ]
-          },
-          "description": "The optional groups to KEEP. Column GROUPS for the run log. The set written is already a function of the run -- a column appears when the run CAN put a nonzero value in it, so an NVT run gets the repack counters and not add/remove/translate, and a typed run gets one N_<species> column each -- and these two keys narrow it further. Groups: core, species, state, moves, clique, clique_acc. 'core' (the cycle, N, the wall clock) and 'species' (the composition, which is the entire output of a mixture run) are FORCED and cannot be dropped. log_columns and log_drop are mutually exclusive; giving both raises, as does an unknown group name."
-        },
-        "log_drop": {
-          "type": "array",
-          "items": {
-            "enum": [
-              "core",
-              "species",
-              "state",
-              "moves",
-              "clique",
-              "clique_acc"
-            ]
-          },
-          "description": "The optional groups to REMOVE from the default. Column GROUPS for the run log. The set written is already a function of the run -- a column appears when the run CAN put a nonzero value in it, so an NVT run gets the repack counters and not add/remove/translate, and a typed run gets one N_<species> column each -- and these two keys narrow it further. Groups: core, species, state, moves, clique, clique_acc. 'core' (the cycle, N, the wall clock) and 'species' (the composition, which is the entire output of a mixture run) are FORCED and cannot be dropped. log_columns and log_drop are mutually exclusive; giving both raises, as does an unknown group name."
-        },
         "seed": {
           "type": "integer"
         },
@@ -612,14 +540,6 @@
         "no_neigh": {
           "type": "integer"
         },
-        "x_spacing": {
-          "type": "number",
-          "description": "DEPRECATED and INERT, accepted and warned for one release. Fed only the verbatim 2D grid_up_the_system, which the engine no longer calls. Must not be given alongside run.n_cell."
-        },
-        "y_spacing": {
-          "type": "number",
-          "description": "DEPRECATED and INERT, accepted and warned for one release. Fed only the verbatim 2D grid_up_the_system, which the engine no longer calls. Must not be given alongside run.n_cell."
-        },
         "matrix_config": {
           "type": "string",
           "description": "REQUIRED iff ensemble.type='QA'; forbidden otherwise. Absolute path to the frozen matrix configuration (an NVT checkpoint.npz, an extended-XYZ .xyz/.extxyz, or a plain 'x y z' file). The fluid cannot overlap these obstacles, which are never inserted/deleted/moved/counted. The matrix content is folded into the run-id hash (distinct realizations -> distinct dirs) and snapshotted into the run directory as matrix.npz, so a resume is self-contained even if the source file moves. QA supports hard_core or LJ+branch, sampler rosenbluth/branch, and run.kind='single' only. May also be a FOLDER of realizations (subdirs each with trajectory.extxyz or checkpoint.npz, or a flat folder of *.xyz/*.extxyz/*.npz): then a list target sweep pairs each swept value with one matrix by sorted index (16 targets -> 16 matrices -> 16 runs). The last frame of each trajectory is used. A folder is only valid via gcmc.launcher, not a single `gcmc run`."
@@ -643,10 +563,6 @@
         "sweep_label": {
           "type": "string",
           "description": "Written BY gcmc.launcher into each expanded run, naming the swept axes and their values (e.g. 'mu2.0_seed3'); it names the run directory and is not normally set by hand. It is declared here because run.additionalProperties is false, so without it every launcher-expanded config would fail validation against this schema."
-        },
-        "esjd": {
-          "type": "boolean",
-          "description": "Default false. Record the expected squared jump distance in every window summary and in the run log: esjd_dNsq is the sum of (n_add - n_remove)^2 over ATTEMPTED moves, and esjd_drsq the sum of squared translation displacement, minimum imaged. Raw sums, never rates, so a statistic over any span of log rows is exact; divide by wall_s for ESJD per second, which is the form an accept/reject engine and a rejection-free one can be raced on directly (same convention as glb_dN_sq). Note that an exchange moves N by exactly +/-1 at every depth, so esjd_dNsq equals the accepted exchange count and is blind to the configuration turnover depth buys -- for that, clq*_new_a / wall_s in the log is throughput in positions. MEASUREMENT only: it changes nothing the chain does and never reaches the run fingerprint."
         }
       }
     },

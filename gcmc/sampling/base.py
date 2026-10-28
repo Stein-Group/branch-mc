@@ -8,16 +8,6 @@ mode.
   selection(pool) -> (sum_weight, probability)
   recompute(pool, chosen_coord, sq_filtered, gamma) -> None   (mutates pool)
 
-EnergyWeigher additionally answers the same question with gamma factored out:
-
-  recompute_split(pool, chosen_coord, sq_filtered) -> (base, log_bias)
-  apply_increment(pool, increment) -> None                    (mutates pool)
-
-which is what a gamma that is solved per level rather than read from a schedule
-needs -- it has to see the pool before choosing. Only EnergyWeigher has these,
-and only for a potential whose weight separates into Boltzmann factor and
-tabulated bias; the fixed-gamma path never touches them.
-
 EnergyWeigher covers LJ and both aux flavours (the potential supplies the
 pairwise refresh; 3D-aux uses the carried reference neighbour). UniformWeigher
 covers plain hard spheres, where every survivor is equally likely and there is
@@ -26,7 +16,7 @@ no refresh. The reweighting (psi6/q6) policy lives with that sampler.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -83,55 +73,6 @@ class EnergyWeigher:
             chosen_coord=chosen_coord,
         )
         pool.energy_weight = pool.energy_weight * g
-
-    # ---- split view: the bias apart from the weight -------------------------
-    #
-    # Everything above commits `w_i * b_i**gamma` in a single step, which is all
-    # a gamma that is a constant of the run ever needs. A SOLVED gamma cannot
-    # work that way: the solver has to see the level pool's `w_i` and `log b_i`
-    # as two arrays BEFORE any gamma exists, pick one, and only then commit. So
-    # the methods below return the increment and commit nothing, and a separate
-    # `apply_increment` does the committing once the caller has its gamma.
-    #
-    # These are ADDITIONS. `recompute`, `recompute_trial` and `recompute_cav`
-    # above are the frozen path and are untouched; `gamma_mode = "fixed"` never
-    # reaches a line of this block, which is what makes gate G1 a statement about
-    # code that did not change rather than about code that changed compatibly.
-
-    def bulk_split(
-        self, pool_dists: FloatArray, **kw: Any
-    ) -> tuple[FloatArray, FloatArray, FloatArray]:
-        """(base, log_bias, ref_coords) for the first level: the potential's
-        `weight_bulk_split`, reached through the weigher so the samplers keep
-        talking to one object. Refuses for any potential whose weight has no
-        separable bias (see `Potential.weight_bulk_split`)."""
-        return self.pot.weight_bulk_split(pool_dists, **kw)
-
-    def recompute_split(
-        self,
-        pool: TrialSet,
-        chosen_coord: FloatArray,
-        sq_filtered: FloatArray,
-    ) -> tuple[FloatArray, FloatArray]:
-        """The increment `recompute` would have folded in, as its two factors
-        and WITHOUT folding it in. No `gamma` argument, deliberately: at the
-        moment this is called gamma is not yet known, and an argument that has
-        to be passed as a placeholder is an invitation to pass the wrong one."""
-        return self.pot.pairwise_split(
-            sq_filtered,
-            trial_coords=pool.coords,
-            ref_coords=pool.ref_neighbor_coord,
-            chosen_coord=chosen_coord,
-        )
-
-    @staticmethod
-    def apply_increment(pool: TrialSet, increment: FloatArray) -> None:
-        """Commit an increment the caller has already composed at its solved
-        gamma. Rebinds `energy_weight` rather than multiplying in place, exactly
-        as `recompute` does -- the forward pool is a copy the reverse pass does
-        not share, and the two directions must not differ in whether they write
-        through a view."""
-        pool.energy_weight = pool.energy_weight * increment
 
     # ---- reverse direction (deletion) ----
     # The reverse pass reconstructs the Rosenbluth weight the CURRENT
@@ -205,62 +146,6 @@ class EnergyWeigher:
             chosen_coord=chosen,
         )
         mol_in_cav.energy_weight[i + 1 :] *= g
-
-    # ---- split view, reverse direction --------------------------------------
-    #
-    # Two split methods here, not one, because a reverse level's pool is a UNION
-    # of two sets -- the members not yet re-selected (`mol_in_cav[i+1:]`) and the
-    # surviving trial cloud -- whose increments are computed by different
-    # geometry. The caller must concatenate the two pairs and solve ONE gamma
-    # over the union, then apply that same gamma to both halves. Solving them
-    # separately yields two gammas at one level, which is not a variant of the
-    # method, it is a different and wrong method.
-
-    def recompute_trial_split(
-        self,
-        trial_set: TrialSet,
-        chosen: FloatArray,
-        sq_filtered: FloatArray,
-    ) -> tuple[FloatArray, FloatArray]:
-        """`recompute_trial`'s increment as (base, log_bias), uncommitted."""
-        return self.pot.pairwise_split(
-            sq_filtered,
-            trial_coords=trial_set.coords,
-            ref_coords=trial_set.ref_neighbor_coord,
-            chosen_coord=chosen,
-        )
-
-    def recompute_cav_split(
-        self,
-        mol_in_cav: TrialSet,
-        i: int,
-        chosen: FloatArray,
-        side: float | FloatArray,
-    ) -> tuple[FloatArray, FloatArray]:
-        """`recompute_cav`'s increment as (base, log_bias), uncommitted. The
-        minimum-imaged separations are formed by the same three lines as
-        `recompute_cav`, so the two paths cannot disagree about which image of
-        member i the later members see."""
-        coords = mol_in_cav.coords[i + 1 :]
-        diff = coords - chosen
-        diff -= side * np.round(diff / side)
-        sq = np.sum(diff**2, axis=1)
-        return self.pot.pairwise_split(
-            sq,
-            trial_coords=coords,
-            ref_coords=mol_in_cav.ref_neighbor_coord[i + 1 :],
-            chosen_coord=chosen,
-        )
-
-    @staticmethod
-    def apply_increment_cav(
-        mol_in_cav: TrialSet, i: int, increment: FloatArray
-    ) -> None:
-        """Commit a cavity increment onto rows i+1.. IN PLACE, which is what
-        `recompute_cav` does and what the reverse pass depends on: the caller
-        holds `mol_in_cav` across levels and reads the updated weights back out
-        of it at the next one."""
-        mol_in_cav.energy_weight[i + 1 :] *= increment
 
 
 class UniformWeigher:

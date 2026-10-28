@@ -34,14 +34,22 @@ import numpy as np
 import pytest
 
 from gcmc.engine.rigid_framework import (
-    advance_metropolis_mof,
     advance_metropolis_mof_ms,
 )
 from gcmc.forcefield.lj_table import FrameworkField, LennardJonesTable
 from gcmc.forcefield.pair_table import PairTable
+from gcmc.forcefield.species_file import load_forcefield, reduce_tables
 from gcmc.run.io_framework import load_framework_typed
 from scripts.mof.ref_energy import read_extxyz, total_energy
-from scripts.mof.units import load_forcefield, reduce_tables
+
+
+def advance_metropolis_mof(positions, rng, *, guest_type, z_star, **kw):
+    """One single-species framework window through the multi-species loop."""
+    spc = np.full(len(positions), guest_type, dtype=np.int64)
+    return advance_metropolis_mof_ms(
+        positions, spc, rng, z_star={guest_type: z_star}, **kw
+    )
+
 
 ROOT = Path(__file__).resolve().parents[2]
 FF_A = ROOT / "ff" / "forcefield_A.yaml"
@@ -49,7 +57,7 @@ FF_A = ROOT / "ff" / "forcefield_A.yaml"
 
 @pytest.fixture(scope="module")
 def env(tmp_path_factory):
-    from scripts.mof.build_framework import build, write_extxyz
+    from gcmc.framework.structure import build, write_extxyz
 
     tmp = tmp_path_factory.mktemp("ms")
     ff = load_forcefield(FF_A)
@@ -116,18 +124,17 @@ def test_one_species_stream_is_pinned_to_phase3():
         pos = res.positions
     digest = hashlib.sha256(np.ascontiguousarray(pos).tobytes()).hexdigest()
     assert res.n == 11
-    assert res.counters == {
-        "move_step": 80,
-        "move_accept": 68,
-        "add_step": 52,
-        "add_accept": 40,
-        "remove_step": 48,
-        "remove_accept": 39,
+    c = dict(res.counters)
+    c.pop("translate_sum_dr2")
+    assert c == {
+        "translate_tried": 80,
+        "translate_accepted": 68,
+        "insert_tried": 52,
+        "insert_accepted": 40,
+        "delete_tried": 48,
+        "delete_accepted": 39,
     }
     assert digest == "fb2b5566b27b9942f62d779bb3512c7004b9fc7177063247fee3a5d2470411ad"
-    # the wrapper strips the result back to the single-species shape
-    assert res.species is None
-    assert res.n_by_type is None
 
 
 def _total_reduced_ms(env, pos, species):
@@ -208,16 +215,13 @@ def test_binary_total_energy_matches_ref(env):
         # single-species test does
         u_core_k = u_red * env["red"].eps_ref
         assert u_ref_k == pytest.approx(u_core_k, rel=1e-10, abs=1e-9)
-        # the record-run decomposition must sum to the same total and match the
-        # brute-force reduced total exactly (its u_total feeds the CSV stream)
-        from gcmc.engine.rigid_framework import mof_energy_decomposition
+        # the energy oracle the run checks its running U against
+        from gcmc.engine.rigid_framework import mof_energy
 
-        dec = mof_energy_decomposition(
+        u_host, u_guest = mof_energy(
             pos, spc, field=field, table=table, beta=1.0, upper_cutoff=field.rc
         )
-        parts = sum(v for k, v in dec.items() if k != "u_total")
-        assert dec["u_total"] == pytest.approx(parts, rel=1e-12, abs=1e-12)
-        assert dec["u_total"] == pytest.approx(u_red, rel=1e-10, abs=1e-9)
+        assert u_host + u_guest == pytest.approx(u_red, rel=1e-10, abs=1e-9)
 
 
 def test_binary_grows_both_species_and_counts_consistent(env):
@@ -249,7 +253,7 @@ def test_binary_grows_both_species_and_counts_consistent(env):
     assert len(spc) == len(pos) == res.n
     assert sum(res.n_by_type.values()) == res.n
     assert res.n_by_type[xe] > 0 and res.n_by_type[kr] > 0
-    assert res.counters["swap_step"] > 0
+    assert res.counters["swap_tried"] > 0
 
 
 def test_final_config_clears_own_species_floors(env):

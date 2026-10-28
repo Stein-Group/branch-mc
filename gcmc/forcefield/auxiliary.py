@@ -93,9 +93,7 @@ def resolve_min_g3(min_g3: float | None, n_trials: int) -> float:
     before this key existed reproduces bit-for-bit. An explicit value is used as
     given and is INDEPENDENT OF k, which is the point of the key: the default
     floor moves whenever `n_trials` moves, so the weight distribution -- and any
-    gamma tuned against it -- is silently a function of the trial count. Pinning
-    the floor is the first half of decoupling gamma from k (see
-    docs/decisions/adaptive_gamma_plan.md, stage 1).
+    gamma tuned against it -- is silently a function of the trial count.
 
     One function rather than two expressions because the floor is applied in two
     places that are NOT equivalent -- `build` floors the tabulated grid before
@@ -108,8 +106,8 @@ def resolve_min_g3(min_g3: float | None, n_trials: int) -> float:
     if not (0.0 < floor <= 1.0):
         raise ValueError(
             f"auxiliary.min_g3 must satisfy 0 < min_g3 <= 1, got {floor!r}. "
-            f"Zero or negative annihilates a trial outright (and its log, which "
-            f"the adaptive-gamma solver reads, is -inf); above 1 clamps almost "
+            f"Zero or negative annihilates a trial outright (its log is -inf); "
+            f"above 1 clamps almost "
             f"the whole table to one constant, which is a bias that does not "
             f"bias. The historical default is 1/n_trials."
         )
@@ -225,16 +223,15 @@ G3_READER = "nearest"
 class _NearestG3:
     """The g3 table read at the nearest tabulated point, by integer arithmetic.
 
-    WHY THIS EXISTS. The table lookup was the auxiliary's largest single cost.
-    It used to be `scipy.interpolate.RegularGridInterpolator`, which validates
-    its input, locates each query with a binary search per axis and blends four
-    corners; measured on the query the first Rosenbluth level actually issues
-    (about 2400 points, one per trial per neighbour) that was 271 microseconds a
-    call. The grid is REGULAR -- r in steps of 0.05 from 0.025, cos theta in
+    WHY THIS EXISTS. The table lookup is the auxiliary's largest single cost.
+    `scipy.interpolate.RegularGridInterpolator` validates its input, locates
+    each query with a binary search per axis and blends four corners; on the
+    query the first Rosenbluth level actually issues (about 2400 points, one per
+    trial per neighbour) that is 271 microseconds a call. The grid is REGULAR -- r in steps of 0.05 from 0.025, cos theta in
     steps of 0.02 from -0.99 -- so locating a point needs no search at all:
     subtract the origin, divide by the step, round. This does that, and the same
     query costs 31 microseconds. End to end it took 14% off the cost of a move
-    and added 19% to ESJD per second, on the fitted and the adaptive arm alike.
+    and added 19% to ESJD per second.
 
     WHY IT IS ALLOWED TO BE COARSER, which is the part that matters. g3 is a
     SELECTION BIAS and it is divided back out of the acceptance ratio. Any
@@ -444,7 +441,6 @@ class HardCoreAux3D(Potential):
         # needs_geometry contract: these are only optional in the shared base
         # signature; every geometry-aware call site supplies them.
         assert coords is not None and idxs is not None
-        # `k` is no longer needed: nothing reshapes by it any more.
         N = dists.shape[0]
         if kdtree is None:
             # EMPTY ENVIRONMENT. `metropolis_dynamics.advance` passes `tree = cl if
@@ -528,42 +524,6 @@ class HardCoreAux3D(Potential):
             g3 = g3**gamma
         return np.prod(g3, axis=1), ref_coords
 
-    def weight_bulk_split(
-        self,
-        dists: FloatArray,
-        *,
-        coords: FloatArray | None = None,
-        idxs: IntArray | None = None,
-        kdtree: Any = None,
-        **_ignored: Any,
-    ) -> tuple[FloatArray, FloatArray, FloatArray]:
-        """(base, log_g3, ref_coords) for the first level, gamma-free.
-
-        `weight_bulk` returns one number per trial and there is no way to get
-        gamma back out of it. The adaptive solver needs the two factors apart:
-        the part gamma does not touch, and log of the part it does, so that a
-        candidate gamma costs one `exp` rather than a re-walk of the geometry.
-        Here `base` is all ones -- this potential IS the bias, it has no
-        Boltzmann factor of its own -- and it is returned anyway so the pair has
-        the same shape as `LJAux3D`'s and the caller never branches on which
-        potential it holds.
-
-        `log_g3` is the log of the TRIAL's whole bias, i.e. summed over that
-        trial's neighbours, because the bias is their product. The sum runs
-        along the neighbour axis, whose order is fixed by the neighbour query;
-        the pool permutation the engine applies reorders trials (rows), which a
-        row-wise reduction cannot see. So this is permutation-invariant without
-        needing the sorted reduction the solver itself uses.
-        """
-        g3, ref_coords = self._g3_grid_bulk(dists, coords, idxs, kdtree)
-        n = dists.shape[0]
-        if g3 is None:
-            # empty product = 1, so its log is 0. These rows STAY: an unbiased
-            # trial is still a trial and still carries its share of the
-            # participation ratio.
-            return np.ones(n), np.zeros(n), ref_coords
-        return np.ones(n), np.sum(np.log(g3), axis=1), ref_coords
-
     def _g3_pair(
         self,
         r: FloatArray | float,
@@ -637,34 +597,6 @@ class HardCoreAux3D(Potential):
             g3 = g3**gamma
         # rows whose reference neighbour was undefined carry no bias
         return np.where(no_ref, 1.0, g3)
-
-    def pairwise_split(
-        self,
-        sq: FloatArray,
-        *,
-        trial_coords: FloatArray | None = None,
-        ref_coords: FloatArray | None = None,
-        chosen_coord: FloatArray | None = None,
-        **_ignored: Any,
-    ) -> tuple[FloatArray, FloatArray]:
-        """(base, log_g3) for one deeper-level refresh, gamma-free. The split
-        twin of `pairwise`; see `weight_bulk_split` for why `base` is ones here.
-
-        The no-reference rows are the thing to be careful about. They carry bias
-        1, so their log is 0, and they must arrive in the returned array as
-        zeros rather than being filtered out: the participation ratio is computed
-        over the LEVEL POOL, and a trial with no reference neighbour is a member
-        of that pool with an honest weight. Drop it and the solver reads a
-        smaller pool than the sampler selects from -- silent at low density,
-        wrong at high, which is the worst possible failure shape.
-        """
-        g3, no_ref, n = self._g3_pair(sq, trial_coords, ref_coords, chosen_coord)
-        if g3 is None:
-            return np.ones(n), np.zeros(n)
-        # `where` before `log`, not after: a no-reference row's g3 is NaN (its
-        # direction was NaN), and log(NaN) is NaN, which would poison the sum.
-        # Substituting the bias it actually has (1) makes its log exactly 0.0.
-        return np.ones(n), np.log(np.where(no_ref, 1.0, g3))
 
     def pairwise(
         self,
@@ -766,35 +698,6 @@ class LJAux3D(Potential):
         )
         return lj_w * aux_w, ref
 
-    def weight_bulk_split(
-        self,
-        dists: FloatArray,
-        *,
-        coords: FloatArray | None = None,
-        idxs: IntArray | None = None,
-        kdtree: Any = None,
-        **_ignored: Any,
-    ) -> tuple[FloatArray, FloatArray, FloatArray]:
-        """(lj_w, log_g3, ref_coords): the combined weight of `weight_bulk`,
-        taken apart at the seam gamma sits on.
-
-        This is the split that matters, because here the two factors are
-        genuinely different physics: `lj_w` is the Boltzmann factor, which the
-        acceptance cancels against the selection probability and gamma must
-        never touch, and `g3` is the bias, which gamma tunes and the acceptance
-        divides back out. `weight_bulk` multiplies them and the seam is gone.
-
-        Composing them back -- `lj_w * exp(gamma * log_g3)` -- reproduces
-        `weight_bulk(gamma)` to round-off, which is gate S2.
-        """
-        lj_w = self.lj.weight_pair(dists)
-        _base, log_g3, ref = self.aux.weight_bulk_split(
-            dists, coords=coords, idxs=idxs, kdtree=kdtree
-        )
-        # `_base` is the aux's own ones-array; the LJ Boltzmann factor is the
-        # base on this path and replaces it.
-        return lj_w, log_g3, ref
-
     def weight_pair(  # kwargs-absorbing variant of the base signature
         self,
         r: FloatArray | float,
@@ -824,25 +727,3 @@ class LJAux3D(Potential):
     def pairwise(self, sq: FloatArray, gamma: float = 1.0, **kw: Any) -> FloatArray:
         """Forward the squared distances unchanged (see weight_pair note)."""
         return self.weight_pair(sq, gamma, **kw)
-
-    def pairwise_split(
-        self,
-        sq: FloatArray,
-        *,
-        trial_coords: FloatArray | None = None,
-        ref_coords: FloatArray | None = None,
-        chosen_coord: FloatArray | None = None,
-        **_ignored: Any,
-    ) -> tuple[FloatArray, FloatArray]:
-        """(lj_w, log_g3) for one deeper-level refresh; the split twin of
-        `pairwise`. The LJ factor is formed from the same
-        `weight_pair(sqrt(sq))` expression `weight_pair` uses, so composition
-        differs from the combined path only by the exp/log round-trip."""
-        lj_w = self.lj.weight_pair(np.sqrt(np.asarray(sq, dtype=float)))
-        _base, log_g3 = self.aux.pairwise_split(
-            sq,
-            trial_coords=trial_coords,
-            ref_coords=ref_coords,
-            chosen_coord=chosen_coord,
-        )
-        return lj_w, log_g3

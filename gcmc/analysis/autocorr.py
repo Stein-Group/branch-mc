@@ -168,22 +168,6 @@ def tau_int(x: FloatArray, c: float = SOKAL_C) -> Tau:
     )
 
 
-def tau_cpu_seconds(x: FloatArray, cpu_seconds: float, c: float = SOKAL_C) -> float:
-    """tau_N in CPU-SECONDS: the CPU cost of one statistically independent value.
-
-    `cpu_seconds` is the CPU time that produced the whole series, so
-    `cpu_seconds / n` is the cost of one sample and the product is the cost of
-    one independent sample. This is THE metric for every performance claim in
-    the plan, and it is deliberately independent of the sampling cadence: a run
-    that logs ten times more often gets ten times the tau in samples and the
-    same tau in seconds.
-    """
-    t = tau_int(x, c)
-    if t.n == 0:
-        return float("nan")
-    return t.tau * (float(cpu_seconds) / t.n)
-
-
 def block_average(x: FloatArray, n_blocks: int = 20) -> tuple[float, float]:
     """(mean, standard error) by blocking, as an independent check on `sem`.
 

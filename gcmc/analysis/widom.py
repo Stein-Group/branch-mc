@@ -28,7 +28,6 @@ here, beside the hard-sphere case it generalises.
 from __future__ import annotations
 
 import math
-from typing import Any
 
 import numpy as np
 from scipy.spatial import cKDTree
@@ -53,16 +52,6 @@ def free_volume_fraction(
     tree = cKDTree(matrix % box, boxsize=[box] * dim)
     pts = np.random.default_rng(seed).uniform(0, box, (n_test, dim))
     return float(np.mean(tree.query(pts % box, k=1)[0] >= diameter))
-
-
-def excess_mu_infinite_dilution(
-    matrix: FloatArray, box: float, diameter: float, **kw: Any
-) -> float:
-    """beta * mu_excess at infinite dilution = -ln(phi)."""
-    phi = free_volume_fraction(matrix, box, diameter, **kw)
-    if phi <= 0.0:
-        return np.inf
-    return -np.log(phi)
 
 
 def widom_henry(

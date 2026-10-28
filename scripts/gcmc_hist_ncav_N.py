@@ -30,12 +30,16 @@ marks, a frameless legend above the axes.
 
 import json
 import math
+import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import ticker
 from matplotlib.transforms import blended_transform_factory
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts import runlog  # noqa: E402
 
 # ============================================================================
 # CONFIG
@@ -75,19 +79,17 @@ LEGEND_PAD = 0.035    # space between the legend and the axes' top
 
 
 def read_log(path):
-    """run.log as {column name: array}, names taken from the `#` header."""
-    with open(path) as fh:
-        head = fh.readline()
-    if not head.startswith("#"):
-        raise ValueError(f"{path}: no '#' header, cannot read columns by name")
-    names = head.lstrip("#").split()
-    rows = np.loadtxt(path, comments="#", ndmin=2)
-    if rows.size == 0:
-        return {}
-    if rows.shape[1] != len(names):
-        raise ValueError(f"{path}: header has {len(names)} columns, rows have "
-                         f"{rows.shape[1]}")
-    return {n: rows[:, i] for i, n in enumerate(names)}
+    """{"N", "n_cav"} per row of run.log. n_cav is the window's mean cavity
+    occupancy, cavity_sum_n / cavity_draws (the n_cav column of an old log)."""
+    df = runlog.load(path)
+    out = {"N": runlog.total_n(df)}
+    if "n_cav" in df:
+        out["n_cav"] = df["n_cav"].to_numpy(float)
+    elif "cavity_draws" in df:
+        draws = df["cavity_draws"].to_numpy(float)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            out["n_cav"] = df["cavity_sum_n"].to_numpy(float) / draws
+    return out
 
 
 def read_state_point(leaf):

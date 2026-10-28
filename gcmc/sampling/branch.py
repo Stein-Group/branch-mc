@@ -955,7 +955,7 @@ class CavitySweep:
             return -np.inf
         if k == 0:
             return 0.0
-        if not self._cache and 0 < self.kmax:
+        if not self._cache and self.kmax > 0:
             # THE WHOLE LADDER IN ONE DESCENT. `window_ladder_logw` asks for every
             # rung 0..kmax in turn, and `_wsum` per rung repeats the lower rungs'
             # recursion inside each higher one. Same numbers, bit for bit.

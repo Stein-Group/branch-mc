@@ -185,7 +185,7 @@ bad(
         "sampler": {"type": "metropolis", "trials": 10},
         "ensemble": {"mu": 3.0, "dimension": 3},
     },
-    "standard GCMC",
+    "does not read",
 )
 bad(
     "metropolis + trial_box_side",
@@ -194,7 +194,7 @@ bad(
         "sampler": {"type": "metropolis", "trial_box_side": 3.0},
         "ensemble": {"mu": 3.0, "dimension": 3},
     },
-    "standard GCMC",
+    "does not read",
 )
 bad(
     "lj missing T",
@@ -234,15 +234,6 @@ bad(
         "potential": HC,
         "sampler": {"type": "rosenbluth", "trials": 30, "trial_density": 0.5},
         "ensemble": {"mu": 3.0, "dimension": 3},
-    },
-    "not both",
-)
-bad(
-    "mu and sweep",
-    {
-        "potential": HC,
-        "sampler": ROSEN,
-        "ensemble": {"mu": 3.0, "sweep": [1, 2], "dimension": 3},
     },
     "not both",
 )

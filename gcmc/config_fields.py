@@ -1,27 +1,13 @@
 """Which Config fields are physics, which are execution, and which are derived.
 
-WHY THIS FILE EXISTS. The run fingerprint used to be a hand-curated tuple
-of names in `hash_fingerprint`. Maintained lists drift, and this one had:
+WHY THIS FILE EXISTS. A hand-curated tuple of hashed names drifts: a missing
+`lj_tail_pref` lets `tail: true` and `tail: false`, two Hamiltonians sampling
+different densities, hash to the same id and resume each other. So identity is
+a PARTITION, declared here once, and `hash_fingerprint` derives the hashed set
+from it. A field is identity-bearing because of which group it is declared in,
+and the totality test fails on a field declared in none.
 
-  * `lj_tail_pref` MISSING -- so `tail: true` and `tail: false`, two different
-    Hamiltonians sampling different densities, hashed to the same id and would
-    resume each other. A live collision, found by the partition test below.
-  * `pore_axis_len` missing while `pore_H` and `pore_R` were present.
-  * eight of twenty-five keys hashing as literal `null` on an ordinary run.
-  * four keys DERIVED from others already in the set -- `potential_type` from
-    `sampler`, which was itself hashed; `rc` and `upper_cutoff` are one number
-    hashed twice.
-  * two documented sweep axes (`trial_box_side`, `trials`) that changed the id
-    only by ACCIDENT, leaking through derived keys.
-
-None of that is a lapse of judgement. It is what a maintained list does.
-
-So identity is no longer a list. It is a PARTITION, declared here once, and
-`hash_fingerprint` derives the hashed set from it. A field is identity-bearing
-because of which group it was declared in -- not because someone remembered.
-
-THE RULE, stated once because the code previously contained two contradictory
-versions of it:
+THE RULE:
 
     A field is PHYSICS if changing it changes the sampled ensemble OR the
     Markov chain used to sample it.
@@ -29,18 +15,13 @@ versions of it:
 Proposal knobs count. That is why `trial_box_side` and the auxiliary cutoff are
 physics even though the equilibrium distribution is invariant under them: two
 runs differing there are not the same experiment and must not share a directory.
-The old code included `aux_cutoff` on exactly this reasoning while excluding
-`g3_csv` as "data, not a physics parameter" -- but a different g3 table changes
-the proposal distribution too. `g3_csv` is physics, hashed by CONTENT so that
-moving the file does not re-address the run.
+A different g3 table changes the proposal distribution too, so `g3_csv` is
+physics, hashed by CONTENT so that moving the file does not re-address the run.
 
-WHY THE GROUPS ARE NAMED AFTER SUB-CONFIGS. They are the sub-configs. R8 splits
-`Config` into `PotentialSpec`, `SamplerSpec`, `EnsembleSpec`, `ExecutionSpec`
-and `IOSpec`; this module is that split expressed as field names before the
-dataclasses exist. When they do, each tuple below becomes
-`dataclasses.fields(...)` of the corresponding class and this file shrinks to
-five one-line expressions. Doing it in this order means the grouping is written,
-reviewed and TESTED against the real Config before any call site moves.
+WHY THE GROUPS ARE NAMED AFTER SUB-CONFIGS. They are the sub-configs:
+`config_specs` declares `PotentialSpec`, `SamplerSpec`, `EnsembleSpec`,
+`ExecutionSpec` and `IOSpec`, and checks at import that each one's fields are
+exactly its group here.
 """
 
 from __future__ import annotations
@@ -61,8 +42,6 @@ POTENTIAL: tuple[str, ...] = (
     "gamma_max",  # pmf exponent
     "gamma_dict",  # per-shell pmf exponents
     "delta_eta",  # pmf grid spacing
-    "x_spacing",  # pmf grid
-    "y_spacing",  # pmf grid
     "volume_of_molecule",  # sets the packing fraction the pmf is read at
     "g3_csv",  # 3D pmf table -- hashed by CONTENT digest, not path
     # 3D pmf g3 floor. PHYSICS by the rule at the top of this file: it does
@@ -143,50 +122,11 @@ SAMPLER: tuple[str, ...] = (
     #: per-move number and `channel_length` is a configured one.
     "channel_full",
     "radius",  # hard-core radius; `diameter` is its derived twin
-    # ADAPTIVE GAMMA. `fixed` reads the nine fitted exponents in
-    # `gamma_dict`; `adaptive` solves one per Rosenbluth level from the trial
-    # weights to hit `pr_target`, a target participation fraction PR / k.
-    #
-    # PHYSICS by the rule at the top of this file, and for the same reason
-    # `min_g3` is: neither moves the sampled ensemble, because the bias is
-    # divided back out of the acceptance, and both change which trial is
-    # selected. Two runs differing here are two proposal distributions and must
-    # not share a run directory. That is also why `pr_target` cannot be tuned
-    # from a run's own acceptance statistics: a constant of the run is a
-    # constant, and a mid-run update makes the kernel a function of chain
-    # history.
-    #
-    # SAMPLER and not POTENTIAL, although the bias it tunes is a potential key.
-    # The exponent is a property of the SELECTION, which is what `sampler`
-    # names: the same g3 table under two targets is one potential proposing two
-    # different ways.
-    # None (absent) and "fixed" are the same arithmetic and different run ids,
-    # the convention `min_g3` set: absent keeps every pre-existing run id,
-    # because `identity_dict` drops a None physics field, while pinning the
-    # default says it was pinned on purpose.
-    "gamma_mode",  # None (absent) | fixed | adaptive
-    "pr_target",  # adaptive only: target PR / k, in (0, 1]
-    # WHICH SPREAD the target is measured with: the participation ratio (a
-    # second moment) or perplexity (an entropy). Physics for the same reason
-    # `pr_target` is -- the same target under two criteria selects differently,
-    # so the two are different proposal distributions. None on a fixed-gamma
-    # run, where nothing reads it.
-    "gamma_criterion",  # None | participation | perplexity
-    # WHICH SOLVER returns the exponent: `moments`, the second-order closed
-    # form, or `grid`, the 17-point search. Physics for the third time by the
-    # same argument: the two land within about a percent of each other on the
-    # target and neither can move an equilibrium average, but a percent in gamma
-    # is a different trial selected, so two runs differing here are two proposal
-    # distributions. Keeping it identity-bearing is also what makes the pilot
-    # comparison legible: the two arms cannot land in one run directory and be
-    # averaged together by accident. None on a fixed-gamma run.
-    "gamma_solver",  # None | moments | grid
 )
 
 ENSEMBLE: tuple[str, ...] = (
     # muVT | NVT | semigrand | QA | confined. It carries the CANONICAL vs
-    # SEMI-GRAND distinction that `fixed_composition` used to carry as a
-    # separate boolean: at fixed N, NVT holds every species count and
+    # SEMI-GRAND distinction: at fixed N, NVT holds every species count and
     # semigrand holds only the total, and those are different chains sampling
     # different distributions, so the name is physics.
     "ensemble_type",
@@ -234,29 +174,19 @@ IO: tuple[str, ...] = (
     "target_cycles",
     "checkpoint_every",
     "traj_every",
-    "log_flush_interval",
-    "log_columns",
-    "log_drop",
     "initial_config",
     "sweep_label",
-    # MEASUREMENT, not physics: it adds counters to the window summary and
-    # changes nothing the chain does, so it belongs here and never reaches the
-    # run fingerprint. Two runs differing only in whether ESJD was recorded are
-    # the same experiment and must share a run directory.
-    "esjd",
 )
 
 # --------------------------------------------------------------- derived
 #
 # Never hashed, because hashing a function of other fields double-counts the
-# fields it derives from. `sampler` used to reach the digest four separate ways
-# through this group.
+# fields it derives from.
 
 # NOTE. Five names here -- `potential_type`, `n_species`, `box_dims`, `cell_dims`
 # and (in POTENTIAL) `species_identity` -- are PROPERTIES on Config, not dataclass
-# fields. They are listed anyway because the old identity tuple hashed
-# `potential_type`, and a group that silently omitted it would let it drift back
-# in unnoticed. The totality test skips properties when checking for phantoms;
+# fields. They are listed so that none of them can drift into a hashed group
+# unnoticed. The totality test skips properties when checking for phantoms;
 # see `PROPERTIES` below.
 #
 # THIS GROUP IS A SUB-CONFIG TOO. It mirrors `config_specs.KernelSpec`, the sixth
@@ -303,10 +233,8 @@ DERIVED: tuple[str, ...] = (
     "total_volume",  # a function of box and dimension
     "species",  # the SpeciesSpec object; `species_identity` above is what hashes
     "n_species",  # PROPERTY: len(species)
-    # PROPERTIES, and classified here for the first time at the parallel
-    # migration. Both were previously in NO group: not a deliberate omission but
-    # the totality test's blind spot -- it checks stored FIELDS, and a property
-    # classified nowhere is invisible to it. They are unambiguously derived:
+    # PROPERTIES, classified explicitly because the totality test checks stored
+    # FIELDS and a property classified nowhere is invisible to it. Derived:
     # `box_dims` is `box_sides` or the scalar `box` replicated `dimension` times,
     # `cell_dims` the same for `cell_length_sides` / `cell_length`. Both are the
     # A2.1 per-axis accessors every kernel reads instead of the scalar twins.

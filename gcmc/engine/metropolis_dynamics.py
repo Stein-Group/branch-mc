@@ -24,7 +24,6 @@ multi-molecule acceptance.
 from __future__ import annotations
 
 import math
-import os as _os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -39,6 +38,7 @@ if TYPE_CHECKING:
     from ..run.sim_setup import Config
     from ..sampling.channel import ChannelSweepHardCore, ChannelSweepLJ
     from ..system.state import ChainState
+
 from scipy.spatial import cKDTree
 
 from .. import config_specs
@@ -57,10 +57,8 @@ from ..sampling.channel import (
     ChannelSweepHardCore,
     ChannelSweepLJ,
 )
-from ..sampling.participation import ParticipationTarget
 from ..sampling.rosenbluth import select_forward, select_reverse
 from ..space import geometry, neighbors
-from ..system.state import zero_counters
 
 #: log-acceptance of a proposal that failed geometrically. Named rather than
 #: written as `-math.inf` at four call sites so the collection matrix and the
@@ -199,21 +197,9 @@ def _weighted_trials(
     choice: str,
     n_full: int,
     n_fluid: int | None = None,
-    adaptive: bool = False,
 ) -> tuple[TrialSet, BoolArray | None]:
     """Turn the raw neighbour result into a weighted TrialSet, matching the
     original find_neighbors_fast weighting for the active mode.
-
-    `adaptive` splits the pmf cases in two. False applies `gamma_dict[1]` here,
-    at pool-build time, which is what the fitted schedule wants and what every
-    frozen digest was recorded against. True leaves the bias UNEXPONENTIATED in
-    `TrialSet.log_bias` and puts only the Boltzmann factor in `energy_weight`,
-    because this pool is shared: it is merged, permuted, and then read by both
-    the forward and the reverse pass, whose level-1 sets differ. Baking one
-    gamma_1 in here would force the two passes to use it, and a reverse gamma
-    solved over the forward pool is the failure gate G6 exists to catch. Only
-    the pmf auxiliary cases honour the flag; nothing else has a bias to split,
-    and `sim_setup` refuses adaptive gamma for all of them by name.
 
     The species column rides through untouched: `geometry` filtered it by the
     same survivor mask as the coordinates, and this function only weights. It is
@@ -267,17 +253,6 @@ def _weighted_trials(
             return TrialSet(coords, w, species=spc), km
         case "ljaux":
             assert potential is not None
-            if adaptive:
-                base, log_bias, ref = potential.weight_bulk_split(
-                    dists, coords=coords, idxs=idxs, kdtree=kdtree
-                )
-                return TrialSet(
-                    coords,
-                    base,
-                    ref_neighbor_coord=ref,
-                    species=spc,
-                    log_bias=log_bias,
-                ), km
             w, ref = potential.weight_bulk(
                 dists, coords=coords, idxs=idxs, kdtree=kdtree, gamma=g1
             )
@@ -317,22 +292,9 @@ def _weighted_trials(
         case "aux":
             assert potential is not None
             if kern.two_dim:
-                # 2D is the analytic hard-disk g(r) and has no table to split;
-                # `sim_setup` refuses adaptive gamma on the dimension axis, so
-                # `adaptive` cannot be True here.
+                # 2D is the analytic hard-disk g(r)
                 w2d = cast(FloatArray, potential.weight_bulk(dists, gamma=g1))
                 return TrialSet(coords, w2d, species=spc), km
-            if adaptive:
-                base, log_bias, ref = potential.weight_bulk_split(
-                    dists, coords=coords, idxs=idxs, kdtree=kdtree
-                )
-                return TrialSet(
-                    coords,
-                    base,
-                    ref_neighbor_coord=ref,
-                    species=spc,
-                    log_bias=log_bias,
-                ), km
             w, ref = potential.weight_bulk(
                 dists, coords=coords, idxs=idxs, kdtree=kdtree, gamma=g1
             )
@@ -424,20 +386,20 @@ class MetropolisModel:
     #: pore admissibility, bulk only: a callable answering "is this point inside
     #: the accessible region?"
     inside_pore: Any | None = None
-    #: FLAT-HISTOGRAM BIASING IN N, or None. G0.4 of the design plan
-    #: needs GC-TMMC on this loop as the incumbent baseline the new engine is
-    #: measured against, and TMMC is two things: a bias `eta[N]` added to the
-    #: exchange acceptance, and a collection matrix filled with the UNBIASED
-    #: acceptance of every proposal.
-    #:
-    #: NONE IS THE WHOLE BACKWARD-COMPATIBILITY ARGUMENT. With `bias is None`
-    #: not one expression below changes and not one `rng` call is added or
-    #: removed, so every chain through this loop -- 52 pinned counter digests
-    #: and two golden trajectories -- is untouched. The add and remove branches
-    #: always draw their uniform (there is no certain-acceptance short circuit
-    #: on an exchange), so even the biased path consumes the stream at the same
-    #: rate; it is simply a different chain, which is what a bias is.
-    bias: Any | None = None
+    #: Does this loop propose single-particle insertions and deletions? True is
+    #: every path that existed before the window-exchange benchmark arm, and
+    #: takes `moves.draw_move` exactly as before. False hands N-changing work to
+    #: another move (the framework driver's window exchange) and draws from
+    #: `moves.draw_fixed_n_move`: translation, plus identity swap for a mixture.
+    exchange: bool = True
+    #: (translation, exchange, identity swap) probabilities of one proposal, as
+    #: a framework params file states them (`engine.move_probabilities`). None
+    #: is every pre-existing path and draws the module defaults unchanged.
+    move_probs: tuple[float, float, float] | None = None
+    #: Count every proposal toward `window`, translations included. False keeps
+    #: the historical rule (an exchange=True window counts exchange and swap
+    #: attempts only), which every pinned chain depends on.
+    count_every_move: bool = False
 
     @property
     def n_species(self) -> int:
@@ -518,35 +480,23 @@ def metropolis_window(
     rng: RNG,
     model: MetropolisModel,
     window: int,
-    counters: dict[str, int],
+    counters: dict[str, Any],
+    energy: dict[str, float] | None = None,
 ) -> tuple[FloatArray, IntArray | None, int]:
     """One sampling window of single-particle Metropolis GCMC.
 
-    THE loop. Bulk, pore, quenched-annealed matrix and rigid framework all come
-    through here, single species or a mixture, because what separated them was
-    never the move set -- it was three questions about a point, and `model`
-    answers those.
+    Bulk, pore, quenched-annealed matrix and rigid framework all come through
+    here, single species or a mixture; `model` answers what differs between
+    them. Returns `(positions, species, pairs_evaluated)`. `counters` is
+    mutated in place (keys from `state.window_counters`), and so is `energy`
+    when given: `guest` and `host` accumulate the energy change of every
+    accepted move, guest-guest (tail included) and host-guest respectively.
+    `spc` None means one species, id `model.species_ids[0]`.
 
-    Returns `(positions, species, pairs_evaluated)`; `counters` is mutated in
-    place. `spc` is None only for a run with no species column at all, and the
-    loop then treats every particle as species id 0, which is the reduction that
-    keeps the pre-P4 chains bit-identical.
-
-    RNG ORDER IS THE INVARIANT, and it is the reason several branches below look
-    like special cases rather than a uniform expression:
-
-      * a hard core with no overlap has dU = 0 exactly, so the acceptance is
-        CERTAIN and no uniform is drawn;
-      * an empty environment with no one-body term also has dU = 0 exactly, and
-        the same applies -- but WITH a host the framework energy differs between
-        the two positions, so that one is a real test and does draw;
-      * the species draw precedes the position draw on insertion, and consumes
-        nothing at one species, which is what makes the mixture loop reduce to
-        the single-species stream call for call.
-
-    Any edit that adds, removes or reorders an `rng` call changes every chain
-    through here, including 52 pinned counter digests and two golden fixed-seed
-    trajectories.
+    The RNG order is fixed: a certain acceptance (hard core without overlap, or
+    an empty environment without a host) draws no uniform, and the species draw
+    precedes the position draw and consumes nothing at one species. Changing
+    either changes every chain through this loop.
     """
     box = model.box
     side = box
@@ -559,10 +509,12 @@ def metropolis_window(
     probs = np.array(model.species_probs, dtype=float)
     log_z = model.log_z
     n_evals = 0
+    track = energy is not None and not model.hard_core
+    du_guest = 0.0
+    du_host = 0.0
 
     def pick_species() -> int:
-        """Insertion/deletion species draw. Consumes NO randomness at one
-        species, which is what keeps the single-species reduction exact."""
+        """Insertion/deletion species draw; consumes no randomness at one species."""
         if n_species == 1:
             return int(ids[0])
         return int(rng.choice(ids, p=probs))
@@ -571,22 +523,21 @@ def metropolis_window(
         return int(ids[0]) if spc is None else int(spc[j])
 
     step = 0
-    bias = model.bias
     while step < window:
         N = len(pos)
-        if bias is not None:
-            # VISITED STATES, one count per proposal, which is Errington's
-            # convention and the histogram G9.2's flatness criterion reads.
-            # Counted before the move is chosen so translations count too: the
-            # chain occupies this macrostate for this step whatever it proposes.
-            bias.visit(N)
-        choice = moves.draw_move(rng, n_species)
+        if model.exchange:
+            choice = moves.draw_move(rng, n_species, model.move_probs)
+        else:
+            choice = moves.draw_fixed_n_move(rng, n_species, model.move_probs)
 
-        # ----- translate -----
         if choice == "move":
-            counters["move_step"] += 1
+            counters["translate_tried"] += 1
+            if not model.exchange or model.count_every_move:
+                # without exchange a window of translations alone must end, so
+                # every proposal counts
+                step += 1
             if N == 0:
-                continue  # null proposal: nothing to move
+                continue
             j = int(rng.integers(N))
             s = species_of(j)
             old = pos[j]
@@ -595,42 +546,46 @@ def metropolis_window(
             disp = mf * (rng.uniform(0, 1, dim) - 0.5)
             moved = (old + disp) % side
             if model.blocked(moved, s):
-                continue  # into a wall, or onto a framework atom
+                continue
             if len(without) == 0 and model.field is None:
-                # Nothing to interact with and no host: dU is 0 exactly, the
-                # acceptance is certain, and drawing a uniform to learn that
-                # would consume randomness the pinned chains do not.
+                # nothing to interact with: dU = 0, accepted without a draw
                 pos = moved.reshape(1, -1)
-                counters["move_accept"] += 1
+                counters["translate_accepted"] += 1
+                counters["translate_sum_dr2"] += float(disp @ disp)
                 continue
             tree = cKDTree(without, boxsize=box) if len(without) else None
-            u_new, ov_new, ne = model.pair_energy(moved, s, without, without_s, tree)
+            p_new, ov_new, ne = model.pair_energy(moved, s, without, without_s, tree)
             n_evals += ne
             if ov_new:
-                continue  # a move onto an overlap is rejected outright
+                continue
             if model.hard_core:
-                # admissibility IS the interaction: dU = 0, accept, no draw
                 pos = np.append(without, [moved], axis=0)
                 if spc is not None:
                     assert without_s is not None
                     spc = np.append(without_s, s)
-                counters["move_accept"] += 1
+                counters["translate_accepted"] += 1
+                counters["translate_sum_dr2"] += float(disp @ disp)
                 continue
-            u_new += model.one_body(moved, s)
-            u_old, _ov, ne = model.pair_energy(old, s, without, without_s, tree)
+            h_new = model.one_body(moved, s)
+            p_old, _ov, ne = model.pair_energy(old, s, without, without_s, tree)
             n_evals += ne
-            u_old += model.one_body(old, s)
+            h_old = model.one_body(old, s)
+            u_new = p_new + h_new
+            u_old = p_old + h_old
             if np.log(rng.uniform(0, 1)) <= -beta * (u_new - u_old):
                 pos = np.append(without, [moved], axis=0)
                 if spc is not None:
                     assert without_s is not None
                     spc = np.append(without_s, s)
-                counters["move_accept"] += 1
+                counters["translate_accepted"] += 1
+                counters["translate_sum_dr2"] += float(disp @ disp)
+                if track:
+                    du_guest += p_new - p_old
+                    du_host += h_new - h_old
             continue
 
-        # ----- identity swap ----- resample a chosen guest's species
         if choice == "swap":
-            counters["swap_step"] += 1
+            counters["swap_tried"] += 1
             step += 1
             if N == 0:
                 continue
@@ -641,109 +596,78 @@ def metropolis_window(
             without = np.delete(pos, j, axis=0)
             without_s = None if spc is None else np.delete(spc, j)
             if model.blocked(point, s_new):
-                continue  # the NEW identity must clear the floors too
+                continue
             tree = cKDTree(without, boxsize=box) if len(without) else None
-            u_new, ov, ne = model.pair_energy(point, s_new, without, without_s, tree)
+            p_new, ov, ne = model.pair_energy(point, s_new, without, without_s, tree)
             n_evals += ne
             if ov:
                 continue
-            u_new += model.one_body(point, s_new)
-            u_old, _ov, ne = model.pair_energy(point, s, without, without_s, tree)
+            h_new = model.one_body(point, s_new)
+            p_old, _ov, ne = model.pair_energy(point, s, without, without_s, tree)
             n_evals += ne
-            u_old += model.one_body(point, s)
-            # A LABELLED particle changes identity, so the ratio is the activity
-            # ratio times the Boltzmann factor. There is NO n_s/(n_s'+1) term:
-            # that belongs to an aggregate counts move, and adding it here double
-            # counts the uniform-particle selection and biases the mixture toward
-            # the minority species while conserving total N.
+            h_old = model.one_body(point, s)
+            u_new = p_new + h_new
+            u_old = p_old + h_old
+            # a labelled particle changes identity: activity ratio times the
+            # Boltzmann factor, no n_s/(n_s'+1) term
             log_acc = log_z[s_new] - log_z[s] - beta * (u_new - u_old)
             if math.log(rng.uniform(0, 1)) <= log_acc:
-                assert spc is not None  # swap is only drawn when typed
+                assert spc is not None
                 spc[j] = s_new
-                counters["swap_accept"] += 1
+                counters["swap_accepted"] += 1
+                if track:
+                    du_guest += p_new - p_old
+                    du_host += h_new - h_old
             continue
 
-        # ----- insertion ----- a species, then a uniform position
         if choice == "add":
-            counters["add_step"] += 1
-            counters["add_attempt"] += 1
+            counters["insert_tried"] += 1
             step += 1
             s = pick_species()
             trial = rng.uniform(0, side, dim)
             if model.blocked(trial, s):
-                if bias is not None:
-                    bias.record(N, N + 1, _NINF_ACC)
-                continue  # trial hit the wall / a framework atom
+                continue
             tree = cKDTree(pos, boxsize=box) if N > 0 else None
-            u, ov, ne = model.pair_energy(trial, s, pos, spc, tree)
+            p_u, ov, ne = model.pair_energy(trial, s, pos, spc, tree)
             n_evals += ne
             if ov:
-                if bias is not None:
-                    # A GEOMETRIC FAILURE IS A TRANSITION WITH ACCEPTANCE ZERO,
-                    # not an absence of data. Skipping these rows would make the
-                    # measured P(N -> N+1) the acceptance CONDITIONAL on a
-                    # non-overlapping trial, which is a different matrix and
-                    # gives a ln Pi that is wrong by the overlap fraction --
-                    # exactly the quantity that matters at high loading.
-                    bias.record(N, N + 1, _NINF_ACC)
-                continue  # hard core at the floor, every model
+                continue
             n_s = N if spc is None else int(np.count_nonzero(spc == s))
             if model.hard_core:
                 log_bf = 0.0
             else:
-                u += model.one_body(trial, s)
+                h_u = model.one_body(trial, s)
+                u = p_u + h_u
+                t_u = 0.0
                 if model.tail_pref is not None:
-                    u += model.tail_pref * (2.0 * N + 1.0)
+                    t_u = model.tail_pref * (2.0 * N + 1.0)
+                    u += t_u
                 log_bf = -beta * u
-            # TERM ORDER IS THE BULK ORDER, verbatim. At one species `log_z[s]`
-            # is `beta * mu` and `n_s` is `N`, so this expression is textually
-            # what `_advance_single_particle` computed and the 52 pinned bulk digests
-            # cannot move on a re-association.
             log_acc = log_v - math.log(n_s + 1) + log_z[s] + log_bf
-            if bias is not None:
-                # the UNBIASED ratio reaches the matrix; the bias reaches the
-                # chain. Getting these two the wrong way round is the one
-                # mistake that still produces a smooth ln Pi curve.
-                bias.record(N, N + 1, log_acc)
-                log_acc += bias.log_bias(N + 1) - bias.log_bias(N)
             if math.log(rng.uniform(0, 1)) <= log_acc:
                 pos = np.append(pos, [trial], axis=0) if N > 0 else trial.reshape(1, -1)
                 if spc is not None:
                     spc = np.append(spc, s)
-                counters["add_accept"] += 1
+                counters["insert_accepted"] += 1
+                if track:
+                    du_guest += p_u + t_u
+                    du_host += h_u
             continue
 
-        # ----- deletion ----- a species, then a uniform particle of it
-        #
-        # `elif`, not a bare `else`, and the `else` below raises. This WAS a
-        # bare `else` and it swallowed "swap": `moves.draw_move` emitted it for
-        # n_species > 1, nothing matched, and every swap proposal executed as a
-        # deletion -- 15 removes and 14 swaps drawn in one measured window,
-        # remove_step recording 29. A dispatch on a closed set of strings must
-        # enumerate the set.
         if choice == "remove":
-            counters["remove_step"] += 1
+            counters["delete_tried"] += 1
             step += 1
-            # THE SPECIES DRAW COMES FIRST, before the emptiness test, and that
-            # ordering is load-bearing: the framework loop drew a species even
-            # at N = 0 (its emptiness test is "no particle of THIS species"),
-            # while the bulk loop had no species to draw. `pick_species`
-            # consumes nothing at one species, so putting it here reproduces
-            # both streams rather than picking one.
+            # the species draw comes before the emptiness test
             s = pick_species()
             if spc is not None:
                 idx_s = np.nonzero(spc == s)[0]
                 n_s = len(idx_s)
                 if n_s == 0:
-                    if bias is not None:
-                        bias.record(N, N - 1, _NINF_ACC)
-                    continue  # nothing of this species: a wasted proposal
+                    continue
                 j = int(idx_s[int(rng.integers(n_s))])
             else:
                 if N == 0:
-                    if bias is not None:
-                        bias.record(N, N - 1, _NINF_ACC)
-                    continue  # rejected attempt: nothing to remove
+                    continue
                 n_s = N
                 j = int(rng.integers(N))
             chosen = pos[j]
@@ -753,26 +677,32 @@ def metropolis_window(
                 log_bf = 0.0
             else:
                 tree = cKDTree(without, boxsize=box) if len(without) else None
-                u, _ov, ne = model.pair_energy(chosen, s, without, without_s, tree)
+                p_u, _ov, ne = model.pair_energy(chosen, s, without, without_s, tree)
                 n_evals += ne
-                u += model.one_body(chosen, s)
+                h_u = model.one_body(chosen, s)
+                u = p_u + h_u
+                t_u = 0.0
                 if model.tail_pref is not None:
-                    u += model.tail_pref * (2.0 * N - 1.0)
-                log_bf = -beta * u  # removing reverses the sign below
+                    t_u = model.tail_pref * (2.0 * N - 1.0)
+                    u += t_u
+                log_bf = -beta * u
             log_acc = math.log(n_s) - log_v - log_z[s] - log_bf
-            if bias is not None:
-                bias.record(N, N - 1, log_acc)
-                log_acc += bias.log_bias(N - 1) - bias.log_bias(N)
             if math.log(rng.uniform(0, 1)) <= log_acc:
                 pos = without
                 if spc is not None:
                     assert without_s is not None
                     spc = without_s
-                counters["remove_accept"] += 1
+                counters["delete_accepted"] += 1
+                if track:
+                    du_guest -= p_u + t_u
+                    du_host -= h_u
             continue
 
         raise RuntimeError(f"unhandled move choice {choice!r}")
 
+    if energy is not None:
+        energy["guest"] = energy.get("guest", 0.0) + du_guest
+        energy["host"] = energy.get("host", 0.0) + du_host
     return pos, spc, n_evals
 
 
@@ -858,7 +788,16 @@ def _advance_single_particle(
     if not hs:
         assert model.tail_pref is not None  # set for every LJ config
 
-    c = zero_counters()
+    c: dict[str, Any] = {
+        "translate_tried": 0,
+        "translate_accepted": 0,
+        "translate_sum_dr2": 0.0,
+        "insert_tried": 0,
+        "insert_accepted": 0,
+        "delete_tried": 0,
+        "delete_accepted": 0,
+    }
+    energy: dict[str, float] = {}
     pos, _spc, _n_evals = metropolis_window(
         np.asarray(state.positions, float),
         None,
@@ -866,24 +805,17 @@ def _advance_single_particle(
         model,
         io_.sampling_window,
         c,
+        energy,
     )
-
     state.positions = pos
-    # `_advance_single_particle` does not carry a species column: it never reads one
-    # for the energy and never writes one on an insertion or deletion, so
-    # `state.species` would desync from `state.positions` on the first accepted
-    # exchange. `sim_setup` refuses typed + metropolis for exactly that reason;
-    # this asserts the invariant that refusal is protecting, for a Config built
-    # by some other route.
-    assert state.species is None or len(state.species) == len(pos), (
-        f"metropolis desynced the species column: {len(pos)} positions against "
-        f"{len(state.species)} labels. This loop is single-species only."
-    )
+    # single species only: sim_setup refuses typed + metropolis outside NVT
+    assert state.species is None or len(state.species) == len(pos)
     state.step += io_.sampling_window
-    packing = (len(pos) * pot_spec.volume_of_molecule) / kern.total_volume
-    # metropolis has no cavity, so n_cav is not defined; report 0 for a uniform
-    # stats schema.
-    return {"N": len(pos), "packing_fraction": packing, "counters": c, "n_cav": 0.0}
+    return {
+        "N": len(pos),
+        "columns": c,
+        "dU": None if hs else energy["guest"],
+    }
 
 
 def _lj_energy(dists: FloatArray, rc: float) -> float:
@@ -1013,11 +945,10 @@ def _lj_set_energy(
     than one particle is inserted/removed at once). sigma = 1 (reduced units).
 
     `rest_neighbors` is the live `neighbors.CellList` whose ACTIVE fluid slots are
-    exactly `rest`; passing it is what removes the O(N) index build this used to
-    do once per clique. Frozen matrix slots are dropped: obstacles interact by
-    overlap exclusion only, never through the LJ sum, which is what handing a
-    fluid-only `rest` array used to express. Without it, a throwaway cell list is
-    built here from `rest`, so every other caller (cell_parallel.py) is unchanged.
+    exactly `rest`; passing it saves an O(N) index build per clique. Frozen
+    matrix slots are dropped: obstacles interact by overlap exclusion only, never
+    through the LJ sum. Without it, a throwaway cell list is built here from
+    `rest` (the path cell_parallel.py takes).
     """
     coords = np.asarray(coords, float)
     if len(coords) == 0:
@@ -1040,86 +971,6 @@ def _lj_set_energy(
         dvec -= np.round(dvec / box_arr) * box_arr
         total += _lj_energy(np.sqrt((dvec**2).sum(axis=1)), rc)
     return total
-
-
-# ------------------------------------------------------- environment switches
-# Every switch below is read ONCE, at import, and every one is OFF or at its
-# default unless the matching environment variable is set. With none of them set
-# this module behaves exactly as the run's `params.json` describes: same RNG
-# stream, same counters, same on-disk schema.
-#
-# They are split into two groups on purpose, because they are not the same kind
-# of thing and calling them all "diagnostics" was wrong:
-#
-# DIAGNOSTIC -- these only accumulate counters and cannot change the chain.
-#
-#   BRANCH_DIAG=1            collect rejection-reason counters in `DIAG`
-#   BRANCH_DIAG_REC=1        also record per-attempt guard inputs in
-#                            `DIAGV["rec"]` as
-#                            (choice, n_add, n_remove, len(trial_set), len(pool))
-#   BRANCH_DIAG_REC_CAP=N    cap on how many such records are kept (2e6)
-#
-# CHAIN-AFFECTING -- these change what is sampled or how a window is counted,
-# and they are NOT part of the run id. A run using one is therefore NOT
-# reproducible from its `params.json` alone, so record the value yourself if you
-# use one. They exist as escape hatches, not as configuration; anything you want
-# to keep belongs in the params schema where the validator can see it.
-#
-#   NVT_SKIP_NULL=1          at fixed N, a repack that reproduces the incoming
-#                            configuration exactly does not count as a step
-#   NVT_NULL_BUDGET=N        how many such uncounted nulls one window allows
-#                            before they start counting again (50)
-#   GRID_PITCH=x             force the cell-list pitch instead of deriving it
-#                            from the cutoff; the one use is reproducing a run
-#                            made before the pitch changed (see the note at the
-#                            cell-list construction for why that is not free)
-#
-# A fourth switch, POOLGUARD, tested an alternative form of the forward-selection
-# guard. It was an experiment, it changed the chain, and it is gone; the guard
-# reads `len(trial_set)`, which is what every run has ever used.
-#
-# DIAG/DIAGV/DIAGN are module globals and are NOT reset between windows; a
-# driver that wants per-window numbers should clear them itself.
-DIAG: dict[str, int] = {}
-DIAGV: dict[str, list] = {}
-DIAGN: dict[str, list] = {}
-
-_DIAG_ON = bool(_os.environ.get("BRANCH_DIAG"))
-_DIAG_REC = bool(_os.environ.get("BRANCH_DIAG_REC"))
-_SKIP_NULL = bool(_os.environ.get("NVT_SKIP_NULL"))
-_REC_CAP = int(_os.environ.get("BRANCH_DIAG_REC_CAP", "2000000"))
-
-# A jammed rod can have exactly one feasible clique -- the one already there --
-# so every repack would be null and an uncounted null would spin the window
-# forever. Once this many nulls have gone uncounted in one window, the rest are
-# counted normally and DIAG["repack_null_capped"] records that it happened.
-_NULL_BUDGET_PER_STEP = int(_os.environ.get("NVT_NULL_BUDGET", "50"))
-
-_CURN = [0]  # system size at the current attempt, for binning events by density
-
-
-def _d(k: str, n: int = 1) -> None:
-    """Count one event, and remember the N it happened at."""
-    if not _DIAG_ON:
-        return
-    DIAG[k] = DIAG.get(k, 0) + n
-    DIAGN.setdefault(k, []).append(_CURN[0])
-
-
-def _dv(k: str, v: float) -> None:
-    """Record one scalar sample."""
-    if not _DIAG_ON:
-        return
-    DIAGV.setdefault(k, []).append(float(v))
-
-
-def _drec(t: tuple) -> None:
-    """Record one per-attempt tuple (capped, these lists get long)."""
-    if not _DIAG_REC:
-        return
-    lst = DIAGV.setdefault("rec", [])
-    if len(lst) < _REC_CAP:
-        lst.append(t)
 
 
 def _count_reused(chosen: FloatArray, old: FloatArray) -> int:
@@ -1146,24 +997,6 @@ def _count_reused(chosen: FloatArray, old: FloatArray) -> int:
     return int(
         np.count_nonzero(np.all(a[:, None, :] == b[None, :, :], axis=2).any(axis=1))
     )
-
-
-def _same_positions(a: FloatArray, b: FloatArray) -> bool:
-    """True when two coordinate sets are identical as SETS, ignoring order.
-
-    Exact float comparison is the right test here and not a floating-point sin:
-    the chosen coordinates are drawn out of `pool.coords`, and the removed
-    members entered that pool verbatim as `cl.coords[chosen_slots]`. A member
-    that is put back is the same float64 triple, bit for bit, never a recomputed
-    one. So equality means "nothing moved", not "nothing moved much".
-    """
-    if len(a) != len(b):
-        return False
-    if len(a) == 0:
-        return True
-    a = np.asarray(a)
-    b = np.asarray(b)
-    return bool(np.array_equal(a[np.lexsort(a.T)], b[np.lexsort(b.T)]))
 
 
 def _lj_set_energy_split(
@@ -1330,7 +1163,6 @@ def advance(
 
     rng = state.rng
     pos = np.asarray(state.positions, float)
-    c = zero_counters()
 
     box = np.asarray(kern.box_dims, dtype=np.float64)
     # per-axis side: for a cubic box this is [L, L, L], so every `% side`,
@@ -1375,94 +1207,6 @@ def advance(
     n_trials = samp.n_trial_molecules
     depth = samp.depth
     gdict = pot_spec.gamma_dict
-    # ADAPTIVE GAMMA. One object for the whole window, built here and threaded
-    # to both passes, because the forward and reverse solves must be against the
-    # same constants and the way that goes wrong is one call site being changed
-    # and the other not. None is the frozen path: `gdict` is read and not a line
-    # of the solver runs. `sim_setup` has already refused every sampler,
-    # dynamics, dimension and auxiliary this does not apply to, so reaching here
-    # with a target means rosenbluth + pmf under metropolis_dynamics.
-    target: ParticipationTarget | None = None
-    if samp.gamma_mode == "adaptive":
-        assert samp.pr_target is not None  # sim_setup requires it with the mode
-        target = ParticipationTarget(
-            f_pr=samp.pr_target,
-            gamma_max=(
-                3.0 if pot_spec.gamma_max is None else float(pot_spec.gamma_max)
-            ),
-            criterion=(samp.gamma_criterion or "participation"),
-            solver=(samp.gamma_solver or "moments"),
-        )
-    # Solved exponents, per pass, accumulated over the window. Level-indexed
-    # rather than pooled, because the whole claim of the method is that the decay
-    # across levels emerges; a single mean would hide it. `_gamma_clamped` counts
-    # levels that solved to exactly 0, which is the diagnostic for `pr_target`
-    # set out of reach.
-    # ESJD. Raw sums over ATTEMPTED moves, never means, for the reason the
-    # clique counters state: a statistic over any span of log rows is then exact
-    # rather than a mean of means. Divide by `wall_s` for the per-second form,
-    # which is what an accept/reject engine and a rejection-free one can be
-    # raced on directly (the same convention as `glb_dN_sq` in the Glauber
-    # engine, deliberately, so the two logs compare).
-    #
-    # OPT-IN (`run.esjd`), and absent from the summary otherwise. Not because it
-    # is expensive -- it is two multiplies per accepted move -- but because a new
-    # integer in every muVT summary moves every pinned counter digest in the
-    # project to record nothing.
-    #
-    # TWO OBSERVABLES, because they answer different questions and this engine
-    # makes them disagree:
-    #
-    #   dN_sq  sum (n_add - n_remove)^2 over attempts. An exchange moves N by
-    #          exactly +/-1 at EVERY depth (an add inserts d+1 and removes d),
-    #          so this equals the accepted exchange count and E[dN^2] per move
-    #          is the exchange acceptance rate. That is the cross-engine race
-    #          metric, and it is blind to the whole point of depth: a depth-3
-    #          move can replace four positions while N moves by one.
-    #   dr_sq  sum of squared displacement over attempted TRANSLATIONS,
-    #          minimum-imaged. The classic ESJD, and the one `move_factor`
-    #          tunes. Unaffected by the selection bias, so it is the control
-    #          arm: if it moves between two gamma settings, something other
-    #          than the exponent changed.
-    #
-    # For the configuration turnover that depth buys, the log already has it:
-    # `clq*_new_a / wall_s` is throughput in POSITIONS rather than in moves.
-    esjd_on = io_.esjd
-    _esjd: dict[str, float] = {
-        "dN_sq": 0.0,
-        "dr_sq": 0.0,
-        "moves": 0.0,
-        "translations": 0.0,
-    }
-
-    def _esjd_dN(dn: int) -> None:
-        """Fold one accepted exchange's number change into the ESJD sum."""
-        if esjd_on:
-            _esjd["dN_sq"] += float(dn) ** 2
-
-    def _esjd_dr(before: FloatArray, after: FloatArray) -> None:
-        """Fold one accepted translation's squared displacement in, minimum
-        imaged: a particle that wrapped the box moved a short way, not a long
-        one, and counting the wrap would make ESJD a function of where the
-        origin happens to sit."""
-        if not esjd_on:
-            return
-        d = np.asarray(after, float) - np.asarray(before, float)
-        d -= side * np.round(d / side)
-        _esjd["dr_sq"] += float(np.sum(d * d))
-
-    _gamma_sum: dict[str, dict[int, float]] = {"forward": {}, "reverse": {}}
-    _gamma_n: dict[str, dict[int, int]] = {"forward": {}, "reverse": {}}
-    _gamma_clamped = {"forward": 0, "reverse": 0}
-
-    def _tally(which: str, gammas: list[float]) -> None:
-        """Fold one pass's solved exponents into the window accumulators."""
-        for level, g in enumerate(gammas, start=1):
-            _gamma_sum[which][level] = _gamma_sum[which].get(level, 0.0) + g
-            _gamma_n[which][level] = _gamma_n[which].get(level, 0) + 1
-            if g == 0.0:
-                _gamma_clamped[which] += 1
-
     beta = kern.beta
     temp = pot_spec.temp
     mu = state.mu if state.mu is not None else ens.chem_pot
@@ -1476,11 +1220,6 @@ def advance(
     # The auxiliary is ACTIVE whenever one is configured, INCLUDING at the no-op
     # radius rc_sel == uc.
     #
-    # This flag used to read `ljbranch and rc_sel < uc`, and the comment above it
-    # said the no-op case then "does no arithmetic at all" so that "bit-identity
-    # is structural". Both sentences were true and together they made the one gate
-    # that bears on Q6 incapable of failing.
-    #
     # `auxiliary.cutoff == run.upper_cutoff` -- and, in typed mode,
     # `aux: {control: true}` -- exist for exactly one purpose: to be the control
     # arm that decides whether the correction is inserted in the right place.
@@ -1491,7 +1230,7 @@ def advance(
     # code whose insertion point is in question, so it cannot answer the
     # question, and it passes.
     #
-    # So the correction now RUNS at the no-op radius, where its value is exactly
+    # So the correction RUNS at the no-op radius, where its value is exactly
     # 0.0 -- exactly, not nearly: `_lj_set_energy_split` applies both radii to one
     # neighbour query as two identical sums over the same array in the same order,
     # so at rc_short == rc_full the difference is a float zero. Adding an exact
@@ -1501,7 +1240,7 @@ def advance(
     # correction was evaluated as well as that the chain did not move.
     #
     # THE COST FALLS ONLY ON THE CONTROL ARM. Every production run configures
-    # rc_sel < uc, where this flag was already True; the extra work happens only
+    # rc_sel < uc, where this flag is True anyway; the extra work happens only
     # for a run that deliberately asks for the no-op, which is a run whose whole
     # purpose is to do that work and get zero.
     aux_on = ljbranch and _aux_rc is not None
@@ -1514,7 +1253,7 @@ def advance(
     branch = kern.branch
     channel = kern.channel  # branch variant: cuboid + sweep
     # Move split: 1 takes the frozen three-way call, so every single-species
-    # characterisation trajectory and the whole P4 snapshot are unaffected.
+    # characterisation trajectory is unaffected.
     n_species = kern.n_species
     # ---- the typed insert path --------------------------------
     #
@@ -1523,7 +1262,7 @@ def advance(
     # computed, and `commit_exchange` is called with the same two arguments it
     # always was. That is not an optimisation -- `rng` draws consume the stream,
     # so a single-species run must not make one, or every characterisation
-    # trajectory in `tests/ref` and the whole P4 snapshot move. The digest gate
+    # trajectory in `tests/ref` and every counter digest moves. The digest gate
     # is what holds that claim.
     # THE TYPED ENERGY, or None. Non-None exactly when `build_potential` handed
     # back a table-aware potential, which it does only for a typed `lj` run --
@@ -1577,42 +1316,14 @@ def advance(
     # The one neighbour structure for this window. Built once from the current
     # configuration (frozen obstacles first, so `is_matrix` is a prefix), then
     # updated in place by every accepted move.
-    # GRID PITCH. `CellList`'s `cutoff` argument sets the cell WIDTH and nothing
-    # else -- `self.cutoff` is read on exactly one line, to compute `nc` -- and
-    # every query passes its own radius explicitly. So this is a pure
-    # performance knob with no semantic content.
-    #
-    # It used to be `uc`, which sizes the grid for the LARGEST radius in the run
-    # while the HOTTEST query is the smallest one. The trial cloud is screened at
-    # rc_sel, and at 192 trials per exchange that single query is ~60% of the
-    # exchange path (cProfile, rho* 0.797). With cw = uc = 2.5 the 27-cell
-    # stencil sweeps a volume of 422 to answer a question about a sphere of
-    # volume 14 -- 336 candidate distances per trial where ~11 are in range, and
-    # ~98% of those trials are about to be discarded as overlapping anyway.
-    #
-    # Sizing the grid to rc_sel puts reach(rc_sel) back at 1, so the hot query
-    # sweeps 98 instead of 422. The uc queries (translations, the dual-cutoff
-    # correction) go to reach 2 and sweep 455 instead of 422 -- marginally worse,
-    # but there are far fewer of them and they are not the bottleneck.
-    #
-    # MEASURED at rho* = 0.797, box 20, T 1.5, channel L6 w2.0 depth 2,
-    # trial_density 8, auxiliary 1.5: 1.95x per window (median of repeats).
-    # With no auxiliary rc_sel == uc and this is the old value exactly, so a
-    # non-auxiliary run is untouched.
-    #
-    # NOT BIT-REPRODUCIBLE against existing runs. A different cell width changes
-    # the padded row width k of the neighbour arrays, which changes numpy's
-    # pairwise-summation tree inside the weight products, which lands one ulp
-    # away -- enough to flip an acceptance and send the chain down a different
-    # (equally valid) path. Same sampled distribution, different random walk.
-    # Set GRID_PITCH to reproduce an old run exactly.
-    _grid = float(_os.environ.get("GRID_PITCH", "0") or 0) or rc_sel
+    # The cell width is the selection radius: the trial-cloud screen at rc_sel
+    # is the hottest query, so the grid is sized for it.
+    _grid = rc_sel
     # The species column travels with the coordinates into the cell list, never
     # by index: particles reorder inside the window, so a parallel array
     # held outside would be scrambled by the first swap-remove. A single-species
     # run has `state.species is None`, `species_of` materialises zeros, and the
-    # list reads type 0 everywhere -- exactly what it read before the column
-    # existed, which is why the P4 snapshot is unaffected.
+    # list reads type 0 everywhere.
     cl = neighbors.CellList.from_positions(
         pos,
         side,
@@ -1697,76 +1408,82 @@ def advance(
             for p_, s_ in zip(chosen_coords, chosen_species):
                 alive_push(cl.insert(p_, species=int(s_)))
 
-    # running total of cavity occupancy (spheres found in the trial cuboid/cavity
-    # at each exchange), reported as a per-window mean so a run can check the
-    # local density n_cav/v_cav against the global N/V.
-    _ncav_sum = 0.0
-    _ncav_count = 0
-    _ncav_last: int | None = None  # occupancy at the window's last exchange
-    # dual-cutoff correction statistics for this window. The MEAN should sit near
-    # zero (the shell energy cancels between the inserted and removed groups) and
-    # the SD is what costs acceptance, so both are reported: a drifting mean means
-    # the two groups are not being drawn from comparable surroundings, which is a
-    # different bug from a merely wide distribution.
-    _corr_sum = 0.0
-    _corr_sq = 0.0
-    _corr_count = 0
+    # The window's log columns, raw counts and sums only, in log order.
+    c: dict[str, Any] = {
+        "translate_tried": 0,
+        "translate_accepted": 0,
+        "translate_sum_dr2": 0.0,
+    }
+    if canonical:
+        c.update(swap_tried=0, swap_accepted=0)
+    elif nvt:
+        c.update(
+            repack_tried=0,
+            repack_evaluated=0,
+            repack_accepted=0,
+            repack_sum_size=0,
+            repack_sum_new=0,
+            repack_sum_size_accepted=0,
+            repack_sum_new_accepted=0,
+        )
+    else:
+        c.update(
+            insert_tried=0,
+            insert_evaluated=0,
+            insert_accepted=0,
+            delete_tried=0,
+            delete_evaluated=0,
+            delete_accepted=0,
+        )
+        if typed_insert:
+            c.update(swap_tried=0, swap_accepted=0)
+    if not canonical:
+        # guests found in the cavity or channel body, summed over the exchanges
+        # that drew one, and how many did
+        c.update(cavity_sum_n=0, cavity_draws=0)
+
+    # energy change of every accepted move (LJ only; a hard core has U = 0)
+    du = 0.0
+    _table = None if _typed_lj is None else _typed_lj.table
+
+    def _group_energy(coords: FloatArray, spc: IntArray | None) -> float:
+        """U of a group against every active slot (fluid and matrix) within uc,
+        plus the pairs inside the group, minimum imaged."""
+        coords = np.asarray(coords, float)
+        if len(coords) == 0:
+            return 0.0
+        if _table is not None and spc is None:
+            spc = np.zeros(len(coords), dtype=np.int64)
+        total = 0.0
+        if cl.n_active:
+            d, sl = cl.query(coords, uc)
+            live = np.isfinite(d)
+            if live.any():
+                if _table is None:
+                    total += _lj_energy(d[live], uc)
+                else:
+                    rows = np.broadcast_to(np.arange(len(coords))[:, None], d.shape)
+                    total += _lj_energy_typed(
+                        d[live],
+                        np.asarray(spc)[rows[live]],
+                        cl.species_at(sl[live]),
+                        uc,
+                        _table,
+                    )
+        if len(coords) > 1:
+            ii, jj = np.triu_indices(len(coords), k=1)
+            dvec = coords[ii] - coords[jj]
+            dvec -= np.round(dvec / box) * box
+            dr = np.sqrt((dvec**2).sum(axis=1))
+            if _table is None:
+                total += _lj_energy(dr, uc)
+            else:
+                sp = np.asarray(spc)
+                total += _lj_energy_typed(dr, sp[ii], sp[jj], uc, _table)
+        return total
 
     step = 0
-    # see the NULL REPACK note in the repack acceptance branch
-    null_budget = _NULL_BUDGET_PER_STEP * io_.sampling_window if _SKIP_NULL else 0
-
-    # CLIQUE COMPOSITION -- how much of each drawn clique is genuinely new.
-    #
-    # RAW SUMS, NEVER MEANS. These are three integers per direction and the log
-    # writes the integers, not a ratio. That is the whole point: a per-window
-    # mean would make any coarser reporting interval a mean of means, weighted
-    # by nothing meaningful (windows differ in how many cliques they draw, and
-    # under full repacking they differ in clique SIZE too). With sums, the
-    # statistic over any span of rows -- one window, a thousand, the whole run,
-    # a resumed run stitched across a walltime kill -- is
-    #
-    #     fraction new  = sum(clq*_new) / sum(clq*_pos)
-    #     new per clique= sum(clq*_new) / sum(clq*_n)
-    #
-    # summing numerator and denominator separately, which is exact. `avg_n_cav`
-    # is a per-window mean, so it is exact for one row only; averaging it over
-    # rows is a mean of means and it must not be used as a template.
-    #
-    # Counted where the acceptance is computed, so clq{A,R}_n match add_attempt
-    # / the remove equivalent exactly -- a free cross-check on the log.
-    # The `_acc` triple repeats pos/new over ACCEPTED moves only. The plain
-    # counters are incremented where the acceptance is COMPUTED, so they sum
-    # over rejections too and a turnover fraction built from them silently
-    # assumes turnover is uncorrelated with acceptance -- an assumption that is
-    # false in the direction that flatters the sampler if high-turnover cliques
-    # are rejected more often. The two are kept side by side rather than the
-    # plain ones being moved, because clq{A,R}_n == add_attempt / the remove
-    # equivalent is a free cross-check on the log and moving the site breaks it.
-    _clq = {
-        "A_n": 0,
-        "A_pos": 0,
-        "A_new": 0,
-        "A_pos_acc": 0,
-        "A_new_acc": 0,
-        "R_n": 0,
-        "R_pos": 0,
-        "R_new": 0,
-        "R_pos_acc": 0,
-        "R_new_acc": 0,
-        "P_n": 0,
-        "P_pos": 0,
-        "P_new": 0,
-        "P_pos_acc": 0,
-        "P_new_acc": 0,
-    }
     while step < io_.sampling_window:
-        if esjd_on:
-            # EVERY proposed move, not just the exchanges: a translation has
-            # dN = 0 and belongs in the denominator of E[dN^2] exactly as a
-            # rejected exchange does. (`_d("attempt")` further down counts
-            # exchange attempts only, which is a different question.)
-            _esjd["moves"] += 1.0
         if nvt:
             # NVT: only number-conserving moves; no insertions or deletions, so N
             # stays at the target exactly. An empty system has nothing to do, so
@@ -1807,17 +1524,15 @@ def advance(
                 choice = "repack"
         else:
             # One fixed move-type distribution regardless of N. Forcing "add" at
-            # N=0 (the old code) dropped the proposal ratio q(0->1)/q(1->0)=4 out
-            # of the acceptance and biased P(N=0) by that factor. A move or remove
+            # N=0 would drop the proposal ratio q(0->1)/q(1->0)=4 out of the
+            # acceptance and bias P(N=0) by that factor. A move or remove
             # proposed at N=0 is a null / rejected attempt, counted so the window
             # advances as from any state.
             choice = moves.draw_move(rng, n_species)
 
         # ---------------------------------------------------------- translate
         if choice == "move":
-            c["move_step"] += 1
-            if esjd_on:
-                _esjd["translations"] += 1.0
+            c["translate_tried"] += 1
             if N == 0:
                 continue  # null proposal: nothing to move
             j = rng.choice(N)
@@ -1828,17 +1543,21 @@ def advance(
                 mx = (old[0] + mf * (ranf1 - 0.5)) % side[0]
                 my = (old[1] + mf * (ranf2 - 0.5)) % side[1]
                 moved = np.array([mx, my])
+                dr2 = (mf * (ranf1 - 0.5)) ** 2 + (mf * (ranf2 - 0.5)) ** 2
             else:
-                # three independent displacement components. The old code set the
-                # z draw to (ranf1 + ranf2) % 1, pinning every displacement to a
-                # fixed 2D surface and starving z mixing; drawing a third uniform
-                # frees it. This consumes one extra RNG value per 3D translation,
-                # so old checkpoints resume as a valid but different chain.
+                # three independent displacement components; a z derived from
+                # the other two draws would pin every displacement to a fixed 2D
+                # surface and starve z mixing.
                 ranf1, ranf2, ranf3 = rng.uniform(0, 1, 3)
                 mx = (old[0] + mf * (ranf1 - 0.5)) % side[0]
                 my = (old[1] + mf * (ranf2 - 0.5)) % side[1]
                 mz = (old[2] + mf * (ranf3 - 0.5)) % side[2]
                 moved = np.array([mx, my, mz])
+                dr2 = (
+                    (mf * (ranf1 - 0.5)) ** 2
+                    + (mf * (ranf2 - 0.5)) ** 2
+                    + (mf * (ranf3 - 0.5)) ** 2
+                )
             if ens.pore_geometry is not None and not geometry.inside_pore(
                 moved, ens, samp
             ):
@@ -1849,17 +1568,18 @@ def advance(
                 # before any query, which is also what keeps the rng draw count
                 # matching the untouched engine on this path.
                 cl.move(slot, moved)
-                c["move_accept"] += 1
-                _esjd_dr(old, moved)
+                c["translate_accepted"] += 1
+                c["translate_sum_dr2"] += dr2
                 continue
             # The overlap test must also see the frozen matrix, so a fluid
             # particle cannot move onto an obstacle; the cell list holds both.
-            # Deactivating the mover's slot is what `cKDTree(without)` used to
-            # express, at O(1) instead of an O(N) rebuild. A radius query returns
+            # Deactivating the mover's slot excludes it at O(1), with no rebuild.
+            # A radius query returns
             # every neighbour inside the cutoff, so `query_saturating`'s doubling
             # loop has nothing left to guarantee.
             cl.remove(slot)
             accepted = False
+            dU = 0.0
             if lj:
                 d_new, s_new = cl.query_point(moved, uc, inclusive=False)
                 # TYPED: the mover's own type against each neighbour's, so both
@@ -1896,8 +1616,9 @@ def advance(
                 accepted = cl.count_within(moved, geometry.overlap_radius(lower)) == 0
             if accepted:
                 cl.move(slot, moved)  # in place; `alive` does not change
-                c["move_accept"] += 1
-                _esjd_dr(old, moved)
+                c["translate_accepted"] += 1
+                c["translate_sum_dr2"] += dr2
+                du += dU
             else:
                 cl.reactivate(slot)
             continue
@@ -1953,7 +1674,7 @@ def advance(
         # rises as the box demixes, so a canonical run gets slower exactly as it
         # succeeds.
         if choice == "pair_swap":
-            c["swap_step"] += 1
+            c["swap_tried"] += 1
             if N < 2 or not typed_insert:
                 continue
             i, j = (int(x) for x in rng.choice(N, size=2, replace=False))
@@ -1965,7 +1686,7 @@ def advance(
             # The i-j pair itself is invariant -- (a, b) becomes (b, a) and the
             # table is symmetric -- so leaving it out of both sums is not an
             # approximation, it is the term cancelling.
-            du = 0.0
+            du_pair = 0.0
             if _typed_lj is not None:
                 for slot, old_t, new_t, other in (
                     (slot_i, a, b, slot_j),
@@ -1979,17 +1700,18 @@ def advance(
                     if not d_s.size:
                         continue
                     nb = cl.species_at(sl_s)
-                    du += _typed_lj.total_energy_typed(
+                    du_pair += _typed_lj.total_energy_typed(
                         d_s, new_t, nb
                     ) - _typed_lj.total_energy_typed(d_s, old_t, nb)
-            if du <= 0.0 or np.log(rng.uniform(0, 1)) <= -beta * du:
+            if du_pair <= 0.0 or np.log(rng.uniform(0, 1)) <= -beta * du_pair:
                 cl.species[slot_i] = b
                 cl.species[slot_j] = a
-                c["swap_accept"] += 1
+                c["swap_accepted"] += 1
+                du += du_pair
             continue
 
         if choice == "swap":
-            c["swap_step"] += 1
+            c["swap_tried"] += 1
             if N == 0 or not typed_insert:
                 continue  # null proposal: nothing to reassign
             assert log_z is not None  # narrowed by typed_insert
@@ -2012,18 +1734,19 @@ def advance(
             # exactly its floor is admissible, its energy large), and using the
             # acceptance keeps the swap reversible: a hard rejection in one
             # direction with none in the other would not be.
-            du = 0.0
+            du_swap = 0.0
             if _typed_lj is not None:
                 d_s, sl_s = cl.query_point(cl.coords[slot], uc, inclusive=False)
                 if d_s.size:
                     nb = cl.species_at(sl_s)
-                    du = _typed_lj.total_energy_typed(
+                    du_swap = _typed_lj.total_energy_typed(
                         d_s, tgt, nb
                     ) - _typed_lj.total_energy_typed(d_s, cur, nb)
-            log_a = moves.swap_log_acceptance(log_z, cur, tgt, beta, du)
+            log_a = moves.swap_log_acceptance(log_z, cur, tgt, beta, du_swap)
             if np.log(rng.uniform(0, 1)) <= log_a:
                 cl.species[slot] = tgt
-                c["swap_accept"] += 1
+                c["swap_accepted"] += 1
+                du += du_swap
             continue
 
         # ---------------------------------------------------------- add/remove
@@ -2037,13 +1760,13 @@ def advance(
             # counters are legitimately zero even with full_repacking on -- muVT
             # draws only move/add/remove, and full_repacking there means "exchange
             # as many particles as the cavity holds", not "repack".
-            c["repack_step"] += 1
+            c["repack_tried"] += 1
             n_add = n_remove = depth + 1  # remove k, insert k; N conserved
         elif choice == "add":
-            c["add_step"] += 1
+            c["insert_tried"] += 1
             n_add, n_remove = depth + 1, depth
         elif choice == "remove":
-            c["remove_step"] += 1
+            c["delete_tried"] += 1
             if N == 0:
                 # rejected attempt: nothing to remove, but the exchange step still
                 # counts toward the window, matching the metropolis path.
@@ -2094,9 +1817,8 @@ def advance(
             else:
                 idx_cav = np.empty(0, dtype=int)
                 n_cav = 0
-            _ncav_sum += n_cav
-            _ncav_count += 1
-            _ncav_last = n_cav
+            c["cavity_sum_n"] += n_cav
+            c["cavity_draws"] += 1
         else:
             # depth >= 1 uses the SAME mirror geometry as depth 0, for the same
             # reason. An `add` centres the cavity uniformly; a `remove` must
@@ -2192,9 +1914,8 @@ def advance(
                 cl, chan_body, center, samp.cavity_radius, side, two_d
             )
             n_cav = len(idx_cav)
-            _ncav_sum += n_cav
-            _ncav_count += 1
-            _ncav_last = n_cav
+            c["cavity_sum_n"] += n_cav
+            c["cavity_draws"] += 1
             if full_repacking:
                 # whole-cavity repack: throw away depth and act on everything the
                 # cavity holds. add removes all n_cav and inserts one more, remove
@@ -2244,17 +1965,11 @@ def advance(
                 # exactly the `else` branch evaluated at the new occupancy, and
                 # the same condition (n_cav < depth) holds on both sides.
                 #
-                # This used to read `n_add, n_remove = n_cav, n_cav - 1` for the
-                # add: it removed n_cav - 1 and left ONE occupant behind, so its
-                # reverse would have to remove n_cav and insert n_cav - 1, a move
-                # the remove branch never proposes. The add and remove fallbacks
-                # were therefore not inverses and detailed balance failed. It
-                # fires whenever n_cav < depth, so it is invisible at depth 1
-                # (where n_cav == 0 is handled above and nothing else can
-                # trigger it) and dominates at large depth: measured -0.0059 in
-                # eta at 2D mu = 1, depth 3, L = 2. Note the n_cav == 0 add rule
-                # above, (1, 0), and full_repacking both already use this
-                # convention -- the old add fallback was the odd one out.
+                # An add of (n_cav, n_cav - 1) instead would leave one occupant
+                # behind, and its reverse (remove n_cav, insert n_cav - 1) is a
+                # move the remove branch never proposes: detailed balance fails
+                # whenever n_cav < depth. The n_cav == 0 add rule above, (1, 0),
+                # and full_repacking use the same convention.
                 if choice == "repack":
                     # repack must stay balanced: remove and add the same count,
                     # capped at what the cavity actually holds, so N is conserved
@@ -2268,14 +1983,11 @@ def advance(
                     # claims trial slots too, so gating on n_add alone is both a
                     # crash at n_cav == n_trials+1 and a direction-dependent
                     # threshold
-                    _d("bail_nadd_gt_ntrials")
                     continue  # add or remove count exceeds the trial cloud
 
         # Split the system into in-cavity (to remove) and the rest. The rest is
         # never materialised: it is exactly the cell list's active fluid once the
         # chosen slots are tombstoned, and its only other use was a count.
-        _CURN[0] = N
-        _d("attempt")
         chosen_slots = None
         n_rest = N - n_remove
         if n_remove == 0:
@@ -2286,7 +1998,6 @@ def advance(
                 # uniformly from the remaining cavity occupants
                 others = idx_cav[idx_cav != anchor]
                 if len(others) < n_remove - 1:
-                    _d("bail_anchor_others")
                     continue
                 chosen_slots = np.empty(n_remove, dtype=np.int64)
                 chosen_slots[0] = anchor
@@ -2298,7 +2009,6 @@ def advance(
 
         if n_rest == 0 and has_matrix and n_add == 0:
             # pure deletion with no fluid left: nothing to remove.
-            _d("bail_pure_del_empty")
             continue
         # trial molecules in the cavity
         if chan_body is not None:
@@ -2319,11 +2029,11 @@ def advance(
         if n_remove != 0:
             keep_mask[rng.choice(n_trials, size=n_remove, replace=False)] = False
 
-        # A trial atom's SPECIES is drawn here, with its position. This is
-        # the defect P3 closes: insertions used to default to type 0 while
-        # removals took any type, so every species but the first could leave the
-        # box and never arrive -- add and remove were not each other's mirror,
-        # which is the one thing the acceptance rule assumes.
+        # A trial atom's SPECIES is drawn here, with its position. An insertion
+        # that defaulted to type 0 while removals took any type would let every
+        # species but the first leave the box and never arrive: add and remove
+        # must be each other's mirror, which is the one thing the acceptance
+        # rule assumes.
         #
         # Drawn from `p_trial`, a PROPOSAL knob: it must not be able to move
         # the equilibrium composition, and `moves.species_draw_correction` is what
@@ -2337,9 +2047,8 @@ def advance(
         )
 
         # The exclusion set is fluid-rest PLUS frozen matrix: trials and shadows
-        # that overlap either are rejected. `cKDTree(disk_rest + matrix)` used to
-        # say that with an O(N) rebuild; deactivating the chosen slots says the
-        # same thing in O(n_remove). The slots stay tombstoned until the move
+        # that overlap either are rejected. Deactivating the chosen slots excludes
+        # them in O(n_remove), with no rebuild. The slots stay tombstoned until the move
         # resolves: an accepted move never wants them back (`commit_exchange`
         # inserts the chosen coordinates instead), and every other exit path,
         # including the several `continue`s below, restores them.
@@ -2389,7 +2098,6 @@ def advance(
             )
             if raw is None:
                 if n_add != 0:
-                    _d("bail_raw_none_all_trials_overlap")
                     continue  # nothing to insert from: equivalent to rejecting
                 # pure deletion: a fully overlapping shadow cloud is a valid (and
                 # common) outcome whose reverse weight is the removed molecules
@@ -2413,12 +2121,10 @@ def advance(
                     choice,
                     N,
                     n_rest,
-                    adaptive=target is not None,
                 )
 
             if n_remove != 0:
                 if raw_in is None:
-                    _d("bail_rawin_none")
                     continue
                 mol_in_cav, _ = _weighted_trials(
                     raw_in,
@@ -2430,10 +2136,8 @@ def advance(
                     choice,
                     N,
                     n_rest,
-                    adaptive=target is not None,
                 )
                 if len(mol_in_cav) != n_remove:
-                    _d("bail_molincav_mismatch")
                     continue
             else:
                 mol_in_cav = TrialSet(np.empty((0, dim)), np.empty(0))
@@ -2498,10 +2202,6 @@ def advance(
             chan_sweep: ChannelSweepHardCore | ChannelSweepLJ | None = None
             if chan_body is not None and len(pool):
                 kmx = max(n_add, n_remove)
-                _dv("kmax", kmx)
-                _dv("pool_size", len(pool))
-                _dv("trials_admissible", len(trial_set))
-                _dv("n_remove", n_remove)
                 chan_sweep = chan_body.make_sweep(
                     pool,
                     kmx,
@@ -2541,17 +2241,7 @@ def advance(
                 # own feasibility condition, made cheap. When it holds,
                 # log_weight(n_add) is -inf anyway, and THAT test is symmetric
                 # because both directions read one shared sweep object.
-                _drec(
-                    (
-                        choice,
-                        int(n_add),
-                        int(n_remove),
-                        int(len(trial_set)),
-                        int(len(pool)),
-                    )
-                )
                 if len(trial_set) < n_add:
-                    _d("bail_guard_lt_nadd")
                     continue
                 if branch:
                     if ljbranch:
@@ -2561,11 +2251,9 @@ def advance(
                             assert isinstance(chan_sweep, ChannelSweepLJ)
                             sum_new = chan_sweep.log_weight(n_add)
                             if not np.isfinite(sum_new):
-                                _d("bail_logZ_infeasible_LJ")
                                 continue
                             idx: Sequence[int] | None = chan_sweep.sample(n_add, rng)
                             if idx is None:
-                                _d("bail_sample_none_LJ")
                                 continue
                             chosen_rows = list(idx)
                             chosen_coords = pool.coords[chosen_rows]
@@ -2596,7 +2284,6 @@ def advance(
                             assert isinstance(chan_sweep, ChannelSweepHardCore)
                             num_new = chan_sweep.count(n_add)
                             if num_new == 0:
-                                _d("bail_count_zero_HS")
                                 continue
                             idx = chan_sweep.sample(n_add, rng)
                             assert idx is not None  # num_new > 0
@@ -2617,7 +2304,6 @@ def advance(
                         sum_new = np.log(num_new)
                         e_u_r_new = 0.0
                 else:
-                    _g_fwd: list[float] | None = [] if target is not None else None
                     chosen, sum_new_arr = select_forward(
                         pool,
                         n_add,
@@ -2626,15 +2312,7 @@ def advance(
                         side=side,
                         r_squared=r_sq,
                         gamma_schedule=gdict,
-                        target=target,
-                        solved_gammas=_g_fwd,
                     )
-                    if _g_fwd is not None:
-                        # tallied even when the move is about to be rejected: a
-                        # solved gamma is a property of the pool, and dropping
-                        # the rejected ones would report the exponent
-                        # conditioned on acceptance
-                        _tally("forward", _g_fwd)
                     if chosen is None or sum_new_arr is None:
                         continue
                     sum_new = np.sum(np.log(sum_new_arr))
@@ -2700,7 +2378,6 @@ def advance(
                     assert km is not None  # raw was handled above; km rides with it
                     _trimmed = trial_set.mask(km)
                     trimmed: TrialSet | None = _trimmed if len(_trimmed) != 0 else None
-                    _g_rev: list[float] | None = [] if target is not None else None
                     sum_cur_arr, e_cur_arr = select_reverse(
                         trimmed,
                         mol_in_cav,
@@ -2709,11 +2386,7 @@ def advance(
                         side=side,
                         r_squared=r_sq,
                         gamma_schedule=gdict,
-                        target=target,
-                        solved_gammas=_g_rev,
                     )
-                    if _g_rev is not None:
-                        _tally("reverse", _g_rev)
                     sum_current = np.sum(np.log(sum_cur_arr))
                     e_u_r_current = np.sum(np.log(e_cur_arr))
             else:
@@ -2723,13 +2396,13 @@ def advance(
             if branch and not np.isfinite(sum_current):
                 continue
 
-            # clique composition, recorded once per scored move (see _clq above)
-            _ck = {"add": "A", "remove": "R"}.get(choice, "P")
-            _cpos = len(chosen_coords)
-            _cnew = _cpos - _count_reused(chosen_coords, disk_in)
-            _clq[_ck + "_n"] += 1
-            _clq[_ck + "_pos"] += _cpos
-            _clq[_ck + "_new"] += _cnew
+            if choice == "repack":
+                # clique composition: positions drawn, and those not a removed
+                # member put back
+                _cpos = len(chosen_coords)
+                _cnew = _cpos - _count_reused(chosen_coords, disk_in)
+                c["repack_sum_size"] += _cpos
+                c["repack_sum_new"] += _cnew
 
             # LJ tail: a system-level energy change, applied exactly once per move
             # with the same sign in both directions. For branch the per-particle
@@ -2824,9 +2497,6 @@ def advance(
                     table=_aux_tab,
                 )
                 delta_corr = beta * ((u_ins_f - u_ins_s) - (u_rem_f - u_rem_s))
-                _corr_sum += delta_corr
-                _corr_sq += delta_corr * delta_corr
-                _corr_count += 1
                 # aux_on implies ljbranch implies lj, so the tail term exists
                 delta_E_lj = (delta_E_lj or 0.0) + delta_corr
 
@@ -2881,67 +2551,36 @@ def advance(
                 else None
             )
 
-            # acceptance
+            if ljaux:
+                u_ins = (
+                    _lj_set_energy(chosen_coords, None, box, uc, rest_neighbors=cl)
+                    if len(chosen_coords)
+                    else 0.0
+                )
+                u_rem = (
+                    _lj_set_energy(disk_in, None, box, uc, rest_neighbors=cl)
+                    if len(disk_in)
+                    else 0.0
+                )
+                delta_E = (
+                    (delta_E_lj or 0.0)
+                    + (e_u_r_new - e_u_r_current)
+                    + beta * (u_ins - u_rem)
+                )
+            else:
+                delta_E = (
+                    delta_E_lj
+                    if delta_E_lj is not None
+                    else (0.0 if lj else (e_u_r_new - e_u_r_current))
+                )
+
+            # neg_log_acc is minus the log acceptance ratio, clamped at 0; the
+            # move is accepted when neg_log_acc <= -log(u), u ~ U(0,1).
             if choice == "repack":
-                # NULL REPACK.
-                #
-                # The pool the DP samples from contains the members that were
-                # just tombstoned, so "put every one of them back exactly where
-                # it was" is a legal clique and, at high density, often the
-                # highest-weight one. That move is accepted (its acceptance
-                # ratio is identically 1: same positions, same energy, same
-                # Rosenbluth weight) and changes nothing. Counting it inflates
-                # repack_accept and makes the sampler look like it is working.
-                #
-                # Not counting a self-transition does not touch the Markov
-                # chain: X -> X leaves the state at X whether or not the
-                # bookkeeping notices. What changes is the meaning of a cycle,
-                # which now costs more real work and reports an honest
-                # acceptance ratio.
-                if (
-                    _SKIP_NULL
-                    and null_budget > 0
-                    and _same_positions(chosen_coords, disk_in)
-                ):
-                    _d("repack_null")
-                    c["repack_step"] -= 1
-                    step -= 1
-                    null_budget -= 1
-                    continue
-                c["repack_attempt"] += 1
-                # Number-conserving move: remove k, insert k in one step. The
-                # chemical-potential prefactor cancels identically (the e^{beta mu}
-                # of the k insertions against the e^{-beta mu} of the k deletions,
-                # and the V/N number factors), leaving only the configurational
-                # Rosenbluth ratio and the energy change. n_add == n_remove makes
-                # the k_trials factors of the forward and reverse equal, so they too
-                # cancel and no count prefactor remains.
+                c["repack_evaluated"] += 1
+                # number-conserving: the mu prefactors and the k_trials factors
+                # cancel, leaving the Rosenbluth ratio and the energy change
                 mu_excess = -sum_new + sum_current
-                if ljaux:
-                    u_ins = (
-                        _lj_set_energy(chosen_coords, None, box, uc, rest_neighbors=cl)
-                        if len(chosen_coords)
-                        else 0.0
-                    )
-                    u_rem = (
-                        _lj_set_energy(disk_in, None, box, uc, rest_neighbors=cl)
-                        if len(disk_in)
-                        else 0.0
-                    )
-                    delta_E = (
-                        (delta_E_lj or 0.0)
-                        + (e_u_r_new - e_u_r_current)
-                        + beta * (u_ins - u_rem)
-                    )
-                else:
-                    delta_E = (
-                        delta_E_lj
-                        if delta_E_lj is not None
-                        else (0.0 if lj else (e_u_r_new - e_u_r_current))
-                    )
-                # neg_log_acc is minus the log acceptance ratio, clamped at 0 so the
-                # acceptance probability exp(-neg_log_acc) never exceeds 1. The move is
-                # accepted when neg_log_acc <= -log(u), u ~ U(0,1).
                 neg_log_acc = (
                     mu_excess
                     + delta_E
@@ -2949,49 +2588,14 @@ def advance(
                     - species_corr
                     - (activity if activity is not None else 0.0)
                 )
-                _d("reach_metropolis_repack")
-                _dv("repack_rosen", mu_excess)
-                _dv("repack_dE", delta_E)
-                _dv("repack_neg_log_acc", neg_log_acc)
-                neg_log_acc = max(0.0, neg_log_acc)
-                if neg_log_acc <= -np.log(rng.uniform(0, 1)):
-                    commit_exchange(chosen_coords, chosen_slots, chosen_species)
-                    committed = True
-                    c["repack_accept"] += 1
-                    _esjd_dN(n_add - n_remove)
-                    _clq["P_pos_acc"] += _cpos
-                    _clq["P_new_acc"] += _cnew
-                    _d("accept_repack")
             elif choice == "add":
-                c["add_attempt"] += 1
+                c["insert_evaluated"] += 1
                 mu_ideal = -np.log(total_vol / (N + 1))
                 if branch:
                     k_trials = -np.log((n_trials - n_remove) / n_add)
                 else:
                     k_trials = -np.log(n_trials - n_remove)
                 mu_excess = -sum_new + sum_current - k_trials
-                if ljaux:
-                    u_ins = (
-                        _lj_set_energy(chosen_coords, None, box, uc, rest_neighbors=cl)
-                        if len(chosen_coords)
-                        else 0.0
-                    )
-                    u_rem = (
-                        _lj_set_energy(disk_in, None, box, uc, rest_neighbors=cl)
-                        if len(disk_in)
-                        else 0.0
-                    )
-                    delta_E = (
-                        (delta_E_lj or 0.0)
-                        + (e_u_r_new - e_u_r_current)
-                        + beta * (u_ins - u_rem)
-                    )
-                else:
-                    delta_E = (
-                        delta_E_lj
-                        if delta_E_lj is not None
-                        else (0.0 if lj else (e_u_r_new - e_u_r_current))
-                    )
                 neg_log_acc = (
                     mu_ideal
                     - (beta * mu if activity is None else activity)
@@ -3000,52 +2604,14 @@ def advance(
                     - corr
                     - species_corr
                 )
-                _d("reach_metropolis_add")
-                _dv("add_rosen", mu_excess)
-                _dv("add_dE", delta_E)
-                _dv(
-                    "add_ideal",
-                    mu_ideal - (beta * mu if activity is None else activity),
-                )
-                _dv("add_neg_log_acc", neg_log_acc)
-                neg_log_acc = max(0.0, neg_log_acc)
-                if neg_log_acc <= -np.log(rng.uniform(0, 1)):
-                    commit_exchange(chosen_coords, chosen_slots, chosen_species)
-                    committed = True
-                    c["add_accept"] += 1
-                    _esjd_dN(n_add - n_remove)
-                    _clq["A_pos_acc"] += _cpos
-                    _clq["A_new_acc"] += _cnew
-                    _d("accept_add")
             else:
+                c["delete_evaluated"] += 1
                 mu_ideal = -np.log(N / total_vol)
                 if branch:
                     k_trials = -np.log((n_trials - n_add) / n_remove)
                 else:
                     k_trials = -np.log(n_trials - n_add)
                 mu_excess = -sum_new + sum_current + k_trials
-                if ljaux:
-                    u_ins = (
-                        _lj_set_energy(chosen_coords, None, box, uc, rest_neighbors=cl)
-                        if len(chosen_coords)
-                        else 0.0
-                    )
-                    u_rem = (
-                        _lj_set_energy(disk_in, None, box, uc, rest_neighbors=cl)
-                        if len(disk_in)
-                        else 0.0
-                    )
-                    delta_E = (
-                        (delta_E_lj or 0.0)
-                        + (e_u_r_new - e_u_r_current)
-                        + beta * (u_ins - u_rem)
-                    )
-                else:
-                    delta_E = (
-                        delta_E_lj
-                        if delta_E_lj is not None
-                        else (0.0 if lj else (e_u_r_new - e_u_r_current))
-                    )
                 neg_log_acc = (
                     mu_ideal
                     - (-beta * mu if activity is None else activity)
@@ -3054,128 +2620,49 @@ def advance(
                     - corr
                     - species_corr
                 )
-                _d("reach_metropolis_rem")
-                _dv("rem_rosen", mu_excess)
-                _dv("rem_dE", delta_E)
-                _dv(
-                    "rem_ideal",
-                    mu_ideal - (-beta * mu if activity is None else activity),
-                )
-                _dv("rem_neg_log_acc", neg_log_acc)
-                neg_log_acc = max(0.0, neg_log_acc)
-                if neg_log_acc <= -np.log(rng.uniform(0, 1)):
-                    commit_exchange(chosen_coords, chosen_slots, chosen_species)
-                    committed = True
-                    c["remove_accept"] += 1
-                    _esjd_dN(n_add - n_remove)
-                    _clq["R_pos_acc"] += _cpos
-                    _clq["R_new_acc"] += _cnew
-                    _d("accept_remove")
+            neg_log_acc = max(0.0, neg_log_acc)
+            if neg_log_acc <= -np.log(rng.uniform(0, 1)):
+                if lj:
+                    # energy change: the inserted group against the rest plus its
+                    # own pairs, less the same for the removed group, plus the
+                    # tail. Reuses the full-radius energies already in hand.
+                    if aux_on:
+                        d_pair = u_ins_f - u_rem_f
+                    elif ljaux:
+                        d_pair = u_ins - u_rem
+                    else:
+                        rem_spc = (
+                            None
+                            if _table is None or chosen_slots is None
+                            else cl.species_at(chosen_slots)
+                        )
+                        d_pair = _group_energy(
+                            chosen_coords, chosen_species
+                        ) - _group_energy(disk_in, rem_spc)
+                    du += d_pair + (tail or 0.0) * (n_new**2 - n_old**2)
+                commit_exchange(chosen_coords, chosen_slots, chosen_species)
+                committed = True
+                if choice == "repack":
+                    c["repack_accepted"] += 1
+                    c["repack_sum_size_accepted"] += _cpos
+                    c["repack_sum_new_accepted"] += _cnew
+                elif choice == "add":
+                    c["insert_accepted"] += 1
+                else:
+                    c["delete_accepted"] += 1
         finally:
             if not committed:
                 for _s in removed_slots:
                     cl.reactivate(int(_s))
 
-    # The window's only materialisation of the configuration. Order follows
-    # `alive`, which is not the order the old array had; nothing downstream
-    # depends on particle order.
-    if _SKIP_NULL and null_budget == 0:
-        # every uncounted null was spent: the rod is jammed enough that the
-        # incoming packing is the only one the DP can find. The remaining nulls
-        # in this window were counted as ordinary repacks.
-        _d("repack_null_capped")
+    # The window's only materialisation of the configuration, in `alive` order.
     state.positions = np.array(cl.coords[alive[:N]], dtype=float)
-    # Materialise the species column from the SAME slot order as the positions, so
-    # the two cannot come apart. Left as None for a SINGLE-species run rather than
-    # written as zeros: io then emits no species array, a schema-2 checkpoint and a
-    # schema-3 single-species checkpoint stay identical in content, and the
-    # fingerprint gains no null key.
-    #
-    # THE CONDITION IS "IS THIS A TYPED RUN", NOT "DID THE CALLER ALREADY PASS A
-    # COLUMN", and the difference was a silent wrong answer for the whole of P3.
-    #
-    # It read `if state.species is not None`. A fresh `ChainState` has
-    # `species is None`, so on a real multi-species run: the cell list was seeded
-    # from `species_of` (zeros), the window drew species, swapped identities and
-    # weighted every pair by sigma_ij/eps_ij correctly, and then this line
-    # DISCARDED the result. The next window re-seeded the list from zeros again,
-    # so every particle was relabelled species 0 at each window boundary. A
-    # three-species run at equal activities reported composition (1, 0, 0) --
-    # every window, forever -- while internally sampling a genuine mixture and
-    # accepting ~65 identity swaps per window whose effect was then thrown away.
-    #
-    # Nothing caught it because nothing looked. The matrix's species invariant
-    # reads `if species is not None: assert aligned`, which skips itself on
-    # exactly the runs that were broken; the typed statistical gates run through
-    # `advance_metropolis_mof_ms`, a different sampler; and the engine tests that
-    # do check the column construct a state that already has one, which is the
-    # one thing a real run does not do.
+    # A typed run always writes its species column back, even when the caller
+    # passed none: the cell list was seeded from zeros and holds the real labels.
     if state.species is not None or n_species > 1:
         state.species = np.array(cl.species[alive[:N]], dtype=np.int64)
     state.step += io_.sampling_window
-    packing = (N * pot_spec.volume_of_molecule) / total_vol
-    n_cav_mean = (_ncav_sum / _ncav_count) if _ncav_count else 0.0
-    out = {"N": N, "packing_fraction": packing, "counters": c, "n_cav": n_cav_mean}
-    # None when the window ran no exchange: there was no cavity to count
-    out["n_cav_last"] = _ncav_last
-    # raw per-window sums; the runner logs them as integers (see _clq above)
-    out["clique"] = dict(_clq)
-    # ADAPTIVE GAMMA DIAGNOSTICS, absent on a fixed-gamma run (the identity
-    # convention: an inactive key is absent, never null). Per level and per
-    # pass, because "gamma_rev != gamma_fwd at the same level" is the property
-    # gate G3 asserts and a pooled mean would make it unreadable. `clamped` is
-    # the count of levels that solved to exactly 0: a large number means
-    # `pr_target` is set higher than the pool can reach and the bias is off
-    # wherever that happened.
-    if esjd_on:
-        # Absent unless asked for (the identity convention: an inactive key is
-        # absent, never null). `wall` is already in the summary, so ESJD per
-        # second is a division the reader does -- and can do over any span of
-        # rows, exactly, which a per-window rate could not.
-        out["esjd"] = dict(_esjd)
-    if target is not None:
-        out["gamma_adaptive"] = {
-            "pr_target": target.f_pr,
-            "criterion": target.criterion,
-            "solver": target.solver,
-            "mean_by_level": {
-                which: {
-                    lvl: _gamma_sum[which][lvl] / _gamma_n[which][lvl]
-                    for lvl in sorted(_gamma_sum[which])
-                }
-                for which in ("forward", "reverse")
-            },
-            "levels_solved": {
-                which: sum(_gamma_n[which].values()) for which in ("forward", "reverse")
-            },
-            "clamped": dict(_gamma_clamped),
-        }
-    # PER-SPECIES OCCUPANCY, the entire output of a multi-species run and the one
-    # quantity that never reached a run's files. `state.species` has carried it
-    # correctly since the window-boundary fix above, but the summary reported `N`
-    # alone, so a cluster run of a mixture wrote a log in which A and B are
-    # indistinguishable. Every composition number in the suite is read out of
-    # `state.species` in-process by a test; nothing outside a python session could
-    # see one.
-    #
-    # RAW INTEGERS, one per species, never a mole fraction -- the same rule the
-    # clique columns state and for the same reason: these sum exactly over any
-    # span of windows, whereas a per-window fraction becomes a mean of means the
-    # moment the reporting interval changes.
-    #
-    # A DICT KEYED BY NAME, not a list, and the reason is a defect this shape
-    # already had once. The first version emitted a list, which
-    # `tests/matrix/test_smoke._int_leaves` walks straight past: it recurses into
-    # dicts and hashes integers, so a list is neither and is dropped in silence.
-    # The composition would have been in the summary, in the log, and absent from
-    # the digest that is supposed to pin the stream -- the same silent-drop the
-    # nested counters suffered until the digest learned to walk them. Names
-    # rather than ids because the reader of a summary should not have to know the
-    # table's ordering to know which count is which.
-    #
-    # ABSENT on a single-species run rather than `{name: N}`, following the
-    # identity convention (inactive keys are absent, never null): the key exists
-    # exactly when there is a species column to count.
+    out: dict[str, Any] = {"N": N, "columns": c, "dU": du if lj else None}
     if state.species is not None:
         _counts = np.bincount(state.species, minlength=n_species)
         _names = (
@@ -3183,14 +2670,5 @@ def advance(
             if kern.species is not None
             else tuple(str(i) for i in range(n_species))
         )
-        out["n_by_species"] = {n: int(c) for n, c in zip(_names, _counts)}
-    if _corr_count:
-        mean = _corr_sum / _corr_count
-        # population variance of the correction over the window's exchanges;
-        # clamped at 0 because the sum-of-squares form can go slightly negative
-        # by rounding when the true variance is near zero
-        var = max(0.0, _corr_sq / _corr_count - mean * mean)
-        out["aux_corr_mean"] = mean
-        out["aux_corr_sd"] = float(np.sqrt(var))
-        out["aux_corr_n"] = _corr_count
+        out["n_by_species"] = {n: int(v) for n, v in zip(_names, _counts)}
     return out

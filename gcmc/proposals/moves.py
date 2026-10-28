@@ -57,16 +57,54 @@ MS_MOVES = ["move", "add", "remove", "swap"]
 MS_PROBS = [0.4, 0.2, 0.2, 0.2]
 
 
-def draw_move(rng: RNG, n_species: int) -> str:
+def draw_move(
+    rng: RNG, n_species: int, probs: tuple[float, float, float] | None = None
+) -> str:
     """The move type for one iteration.
 
     At `n_species == 1` this is byte-for-byte the call the engine has always
     made, so the stream is untouched. See the module note on why a four-way call
     with a zero swap probability would not be.
+
+    `probs` = (translation, exchange, identity swap), the framework params
+    file's `engine.move_probabilities`; the exchange share is split evenly
+    between add and remove (the grand-canonical acceptance assumes P(add) =
+    P(remove)). The defaults (0.5, 0.5, 0) and (0.4, 0.4, 0.2) produce exactly
+    SINGLE_PROBS and MS_PROBS, so they draw the same stream as None.
     """
     if n_species == 1:
-        return str(rng.choice(SINGLE_MOVES, p=SINGLE_PROBS))
+        p = SINGLE_PROBS if probs is None else [probs[0], probs[1] / 2, probs[1] / 2]
+        return str(rng.choice(SINGLE_MOVES, p=p))
+    if probs is not None:
+        t, e, s = probs
+        return str(rng.choice(MS_MOVES, p=[t, e / 2, e / 2, s]))
     return str(rng.choice(MS_MOVES, p=MS_PROBS))
+
+
+#: How a window splits its budget when the NUMBER-CHANGING work is delegated to
+#: another move (the framework driver's window-exchange engine, glauber_window_
+#: move_ms). Translation and, with a mixture, identity swap keep the conventional
+#: loop's own 2:1 ratio (0.4 : 0.2 in MS_PROBS), so the only difference from the
+#: conventional arm is WHO proposes N -> N +- 1: an equal-footing benchmark then
+#: compares exchange engines and nothing else.
+FIXED_N_MS_MOVES = ["move", "swap"]
+FIXED_N_MS_PROBS = [2.0 / 3.0, 1.0 / 3.0]
+
+
+def draw_fixed_n_move(
+    rng: RNG, n_species: int, probs: tuple[float, float, float] | None = None
+) -> str:
+    """The move type for one iteration of a window with no single-particle
+    insertion or deletion. One species: always a translation, drawing nothing
+    from the stream (there is no choice to make). A mixture: translation or
+    identity swap at 2:1, or at translation : swap = probs[0] : probs[2] when
+    the framework params file states its move probabilities."""
+    if n_species == 1:
+        return "move"
+    if probs is not None:
+        q = probs[2] / (probs[0] + probs[2])
+        return str(rng.choice(FIXED_N_MS_MOVES, p=[1.0 - q, q]))
+    return str(rng.choice(FIXED_N_MS_MOVES, p=FIXED_N_MS_PROBS))
 
 
 #: How a CANONICAL fixed-composition window splits its budget. Two moves only,

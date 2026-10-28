@@ -6,9 +6,9 @@ here, from a structure that is built once per window and updated in O(1) per
 accepted move. Nothing else in the hot path may build a kd-tree, a grid, or a
 distance loop; if a capability is missing, it belongs in this module.
 
-Why a cell list at all. The engine used to rebuild `scipy.spatial.cKDTree` from
-scratch on every move, twice per exchange step: 4.3 ms at N = 15,000, about 90%
-of the wall time. A cell list answers the same radius query in tens of
+Why a cell list at all. Rebuilding `scipy.spatial.cKDTree` from scratch on every
+move, twice per exchange step, costs 4.3 ms at N = 15,000, about 90% of the wall
+time. A cell list answers the same radius query in tens of
 microseconds and survives an accepted move for the cost of moving one slot
 between two buckets.
 
@@ -36,11 +36,10 @@ Storage and lifetime.
 
   Frozen quenched-annealed obstacles occupy the lowest slot ids, are marked in
   `is_matrix`, and are never removed. `matrix_at(idxs)` answers the "is this
-  neighbour an obstacle" question the LJ weights ask, which is what the fluid /
-  matrix split of a compact array used to answer by index comparison.
+  neighbour an obstacle" question the LJ weights ask.
 
 Query contract. `query` reproduces what `cKDTree.query(..., k, distance_upper_
-bound=rc)` hands `geometry.find_neighbors` today: rows sorted ascending, padded
+bound=rc)` hands `geometry.find_neighbors`: rows sorted ascending, padded
 with `inf` distances and pad index `= data.shape[0]`, and (like scipy) a
 neighbour at exactly `rc` is EXCLUDED. Unlike a fixed-k query it returns every
 neighbour inside the cutoff, so `query_saturating`'s doubling loop is unnecessary
@@ -97,7 +96,6 @@ class CellList:
     __slots__ = (
         "_capacity",
         "_cell",
-        "_cellsel",
         "_coordsT",
         "_count",
         "_dirty",
@@ -200,7 +198,6 @@ class CellList:
         self._sorted = np.empty(0, dtype=np.int64)
         self._start = np.zeros(self._ncell + 1, dtype=np.int64)
         self._count = np.zeros(self._ncell, dtype=np.int64)
-        self._cellsel = np.zeros(self._ncell, dtype=bool)
 
     @classmethod
     def from_positions(
